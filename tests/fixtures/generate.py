@@ -31,9 +31,9 @@ def chapterlog_order(n, cid, fixed=20, mul=127, off=235, a=9302, c=49397, m=2332
     return list(range(fixed)) + rest
 
 
-def scramble(items, cid):
+def scramble(items, cid, **consts):
     """Inverse of the restore: restored[order[i]] = scrambled[i]."""
-    order = chapterlog_order(len(items), cid)
+    order = chapterlog_order(len(items), cid, **consts)
     return [items[order[i]] for i in range(len(items))]
 
 
@@ -192,5 +192,23 @@ write(
         url_next=f"/novel/{BOOK_ID}/catalog",
         prev_text="上一章",
         next_text="返回目录",
+    ),
+)
+
+# 7. Page shuffled with the constants of chapterlog-2026-05.js (seed = id*135+234),
+#    used to test constant extraction and the rendered-DOM (decoy) path.
+cid = 180207
+texts = scramble([para(7, 1, i) for i in range(1, 41)], cid, mul=135, off=234)
+write(
+    "shuffled-2026-05.html",
+    page_html(
+        chapter_id=cid,
+        page_no=1,
+        title="第七章 新版混淆",
+        body=ps(texts),
+        url_prev=f"/novel/{BOOK_ID}/180206.html",
+        url_next=f"/novel/{BOOK_ID}/180207_2.html",
+        prev_text="上一章",
+        next_text="下一页",
     ),
 )
