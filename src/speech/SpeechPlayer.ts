@@ -28,7 +28,7 @@ const MAX_CHUNK = 120;
  * pausing/resuming and rate changes lose little and WebKit never gets a
  * very long utterance.
  */
-export function splitIntoChunks(text: string, max = MAX_CHUNK): string[] {
+export function splitIntoChunks(text: string, max: number = MAX_CHUNK): string[] {
   const sentences = text.match(/[^。！？!?…；;]+[。！？!?…；;」』”’）)]*|[。！？!?…；;」』”’）)]+/g) ?? [text];
   const chunks: string[] = [];
   let buf = "";
@@ -67,7 +67,7 @@ export class SpeechPlayer {
   private voiceURI?: string;
 
   constructor(
-    private readonly engine: SpeechEngine,
+    private engine: SpeechEngine,
     private readonly source: PlaybackSource,
     private readonly events: PlayerEvents = {},
     options: { rate?: number; voiceURI?: string } = {},
@@ -162,12 +162,42 @@ export class SpeechPlayer {
     if (this.isActive) this.restartLoop();
   }
 
+  engineIs(engine: SpeechEngine): boolean {
+    return this.engine === engine;
+  }
+
+  /** Re-speaks the current chunk (e.g. after a voice change); no-op unless playing. */
+  restartCurrent(): void {
+    if (this.isActive) this.restartLoop();
+  }
+
+  /** Swaps the speech backend, continuing from the current chunk if playing. */
+  setEngine(engine: SpeechEngine): void {
+    if (engine === this.engine) return;
+    const wasActive = this.isActive;
+    this.generation++;
+    this.engine.stop();
+    this.engine = engine;
+    if (wasActive) this.restartLoop();
+  }
+
   /** Re-speaks the current chunk if the engine went quiet (e.g. returning from background). */
   recoverIfStalled(): void {
     if (this._state === "playing" && !this.engine.speaking) {
       log.debug("recovering stalled speech");
       this.restartLoop();
     }
+  }
+
+  /** First chunk of the next text paragraph, if it is already loaded. */
+  private firstChunkAfter(id: string): string | undefined {
+    let next = this.source.next(id);
+    for (let hops = 0; hops < 5 && next !== "pending" && next !== "end"; hops++) {
+      const text = this.source.textOf(next);
+      if (text) return splitIntoChunks(text, this.engine.maxChunkLength)[0];
+      next = this.source.next(next);
+    }
+    return undefined;
   }
 
   private moveTo(id: string): void {
@@ -202,10 +232,14 @@ export class SpeechPlayer {
         this.events.onParagraph?.(id);
       }
       if (text) {
-        const chunks = splitIntoChunks(text);
+        const chunks = splitIntoChunks(text, this.engine.maxChunkLength);
         while (alive() && this.chunkIndex < chunks.length) {
           try {
-            const r = await this.engine.speak(chunks[this.chunkIndex], { rate: this.rate, voiceURI: this.voiceURI });
+            const opts = { rate: this.rate, voiceURI: this.voiceURI };
+            const speaking = this.engine.speak(chunks[this.chunkIndex], opts);
+            const upcoming = this.chunkIndex + 1 < chunks.length ? chunks[this.chunkIndex + 1] : this.firstChunkAfter(id);
+            if (upcoming) this.engine.prefetch?.(upcoming, opts);
+            const r = await speaking;
             if (!alive()) return;
             if (r === "cancelled") {
               // Cancelled by something other than us (system interruption): stop cleanly.

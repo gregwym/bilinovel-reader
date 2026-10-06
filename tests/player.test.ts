@@ -195,3 +195,22 @@ describe("sortChineseVoices", () => {
     expect(sortChineseVoices(voices).map((v) => v.name)).toEqual(["Tingting", "Meijia", "Sinji"]);
   });
 });
+
+describe("SpeechPlayer engine integration", () => {
+  it("prefetches the next chunk/paragraph and can switch engines mid-play", async () => {
+    const prefetched: string[] = [];
+    const a = new FakeEngine();
+    a.hold = true;
+    (a as FakeEngine & { prefetch: (t: string) => void }).prefetch = (t: string) => prefetched.push(t);
+    const b = new FakeEngine();
+    b.hold = true;
+    const player = new SpeechPlayer(a, new FakeSource(["a", "b"]));
+    player.play();
+    await settle();
+    expect(prefetched).toEqual(["文本b。"]);
+    player.setEngine(b);
+    await settle();
+    expect(b.spoken).toEqual(["文本a。"]);
+    expect(player.state).toBe("playing");
+  });
+});

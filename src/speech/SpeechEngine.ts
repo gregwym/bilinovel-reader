@@ -15,6 +15,10 @@ export interface SpeechEngine {
   /** Must be called synchronously inside a user gesture before the first `speak` (iOS). */
   unlock(): void;
   speak(text: string, options: SpeakOptions): Promise<"done" | "cancelled">;
+  /** Optional hint: `text` will probably be spoken next (network engines start synthesizing it). */
+  prefetch?(text: string, options: SpeakOptions): void;
+  /** Preferred maximum utterance length in characters. */
+  readonly maxChunkLength?: number;
   pause(): void;
   resume(): void;
   stop(): void;

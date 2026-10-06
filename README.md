@@ -9,7 +9,8 @@
 - 打开任意章节页自动进入阅读模式（Shadow DOM 覆盖层，不改动原页面；可随时退出）
 - 站点内部的分页（`180204.html → 180204_2.html → …`）对用户不可见，一章就是一章
 - 滚动到底部自动加载下一页 / 下一章，不刷新页面（`fetch` + `DOMParser`），地址栏用 `history.replaceState` 同步
-- 浏览器 TTS 逐段朗读：当前段落高亮并跟随滚动，自动跨页、跨章继续
+- 逐段朗读：当前段落高亮并跟随滚动，自动跨页、跨章继续
+- 两种朗读引擎：系统语音（Safari Web Speech）或 **Azure 神经网络语音**（更自然，可在后台/锁屏继续播放，锁屏可控制）
 - 播放 / 暂停 / 上一段 / 下一段，点击段落「从这里开始朗读」，语速（0.75–1.5x）与中文声音可选
 - 阅读与收听共用一个光标；按书保存进度，重新打开时提示「上次读到…，要继续吗？」
 - 字号、行距、字体（黑体/宋体）、主题（自动/浅色/护眼/深色），设置持久化
@@ -46,6 +47,20 @@ https://gregwym.github.io/bilinovel-reader/bili-reader.user.js
 | 语速 | 左下角 `1.0x` |
 | 声音、字号、行距、主题 | 右上角 ⋯ |
 | 退出阅读模式 | 左上角 ‹（右下角会出现「📖 阅读模式」按钮可再次进入） |
+
+## Azure 神经网络语音（可选）
+
+系统语音比较生硬，可以改用 Azure AI Speech 的中文神经网络语音（晓晓、云希等）。使用**免费 F0 层**时，每月 50 万字符（中文按 2 计，约 25 万字）用完后 Azure 会拒绝请求，**不会自动扣费**；阅读器随即自动改用系统语音继续朗读，下月额度恢复后再切回 Azure（重新选择一次「Azure」即可立即重试）。
+
+1. 在 [Azure 门户](https://portal.azure.com/) 创建 **Speech**（语音）资源，**定价层选 Free F0**，区域建议 `eastasia` 或 `southeastasia`。
+2. 在资源的「密钥和终结点」页复制 **密钥 1** 和 **区域**。
+3. 阅读器 ⋯ →「朗读」选 **Azure**，粘贴密钥、填写区域，选择声音，点「试听」。
+
+说明：
+- 密钥保存在 Userscripts 的私有存储（`GM.setValue`）中，网页脚本读不到；只有在不支持该 API 的管理器里才退回到 `localStorage`。
+- 请求通过 `GM.xmlHttpRequest` 直接发往 `{区域}.tts.speech.microsoft.com`，正在朗读的文字会发送给微软。
+- 设置页显示的「本月约用」是本机估算，以 Azure 后台计量为准。
+- 每段约 300 字一次请求，并会预取下一句以减少停顿。
 
 ## 开发
 
@@ -84,6 +99,8 @@ src/
 │   └── ProgressStore.ts       进度与设置（异步 KV 接口，可换成 IndexedDB）
 ├── speech/
 │   ├── SpeechEngine.ts        SpeechEngine 接口 + WebSpeechEngine（可替换为原生引擎）
+│   ├── AzureSpeechEngine.ts   Azure 神经网络语音（REST + <audio>，预取、用量估算）
+│   ├── FallbackSpeechEngine.ts Azure 失败（额度/密钥/网络）时自动改用系统语音
 │   ├── SpeechPlayer.ts        逐段朗读状态机 idle/playing/paused/buffering/error
 │   └── VoiceManager.ts        中文声音列表
 ├── ui/                        ReaderView（Shadow DOM）与样式
@@ -107,7 +124,8 @@ src/
 
 ## 已知限制
 
-- **后台/锁屏朗读**：这是纯网页 TTS。Safari 切到后台或锁屏后，iOS 可能暂停 `speechSynthesis`，也可能在当前句读完后不再继续；回到前台时会自动尝试恢复。它的表现不会等同于原生有声书 App。TTS 已隔离在 `SpeechEngine` 接口后面，将来可替换为原生实现。
+- **后台/锁屏朗读**：系统语音（`speechSynthesis`）在 Safari 切到后台或锁屏后可能暂停或在当前句后停止，回到前台时会自动尝试恢复。Azure 语音通过 `<audio>` 播放，后台表现通常更好，但仍受 iOS 对网页的限制（例如需要联网取下一句），不等同于原生有声书 App。TTS 隔离在 `SpeechEngine` 接口后面。
+- Safari 网页无法使用 Siri 语音或下载的增强/高级语音（Apple 限制）。
 - 暂停/恢复采用「取消 + 从当前句重读」，以规避 WebKit 的 `pause()/resume()` 不可靠问题，所以恢复时会重读当前句。
 - 首次播放必须由点击触发（iOS 限制）。
 - 恢复到某一页时，从该页开始显示；同一章之前的页面可通过 ⋯ →「从本章开头阅读」加载。
@@ -117,7 +135,9 @@ src/
 
 ## 隐私
 
-Bili Reader 没有后端，不会向开发者发送任何阅读数据。所有阅读进度和设置都只保存在你的浏览器（`localStorage`）中。脚本只会向你正在浏览的 Bilinovel 站点请求你接下来要读的页面。
+Bili Reader 没有后端，不会向开发者发送任何阅读数据。所有阅读进度和设置都只保存在你的浏览器中。脚本只会向你正在浏览的 Bilinovel 站点请求你接下来要读的页面。
+
+例外：如果你启用了 Azure 语音，正在朗读的文字会直接从你的设备发送到你自己的 Azure Speech 资源（微软）以合成语音；默认的系统语音不会发送任何内容。
 
 ## 许可
 

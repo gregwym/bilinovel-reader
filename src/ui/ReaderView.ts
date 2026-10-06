@@ -1,6 +1,7 @@
 import type { Paragraph } from "../adapters/types";
 import type { PlayerState } from "../speech/SpeechPlayer";
 import type { VoiceInfo } from "../speech/VoiceManager";
+import { AZURE_PRESET_VOICES, AzureUsageMeter, type AzureVoice } from "../speech/AzureSpeechEngine";
 import {
   FONT_SIZE_RANGE,
   LINE_HEIGHT_OPTIONS,
@@ -32,6 +33,10 @@ export interface ViewCallbacks {
   onRate(rate: number): void;
   onVoice(voiceURI: string | undefined): void;
   onSettings(settings: Settings): void;
+  /** New Azure key entered (empty string clears it). */
+  onAzureKey(key: string): void;
+  /** Speak a short sample with the Azure voice (called from a tap). */
+  onAzureTest(): void;
   onOpenOriginal(): void;
   onRestartChapter(): void;
 }
@@ -79,6 +84,10 @@ export class ReaderView {
   private chipTimer?: ReturnType<typeof setTimeout>;
   private savedPageStyles?: { html: string; body: string };
   private voices: VoiceInfo[] = [];
+  private azureVoices: AzureVoice[] = AZURE_PRESET_VOICES;
+  private azureKeySet = false;
+  private azureStatus = "";
+  private azureUsage = 0;
   private systemDark = globalThis.matchMedia?.("(prefers-color-scheme: dark)");
 
   constructor(
@@ -445,6 +454,14 @@ export class ReaderView {
     this.renderSheetIfOpen();
   }
 
+  setAzureState(state: { voices?: AzureVoice[]; keySet?: boolean; status?: string; usage?: number }): void {
+    if (state.voices) this.azureVoices = state.voices.length ? state.voices : AZURE_PRESET_VOICES;
+    if (state.keySet !== undefined) this.azureKeySet = state.keySet;
+    if (state.status !== undefined) this.azureStatus = state.status;
+    if (state.usage !== undefined) this.azureUsage = state.usage;
+    this.renderSheetIfOpen();
+  }
+
   // ---------------------------------------------------------------------------
   // Settings
 
@@ -515,6 +532,8 @@ export class ReaderView {
       this.cb.onVoice(uri);
     });
 
+    const azureRows = s.ttsEngine === "azure" ? this.renderAzureRows(row) : [row("声音", voiceSelect)];
+
     const close = () => this.closeSheet();
     const sheet = h(
       "div",
@@ -562,7 +581,18 @@ export class ReaderView {
           (v) => this.update({ theme: v }),
         ),
       ),
-      row("声音", voiceSelect),
+      row(
+        "朗读",
+        seg<Settings["ttsEngine"]>(
+          [
+            ["system", "系统语音"],
+            ["azure", "Azure"],
+          ],
+          s.ttsEngine,
+          (v) => this.update({ ttsEngine: v }),
+        ),
+      ),
+      ...azureRows,
       h(
         "div",
         { class: "br-sheet-actions" },
@@ -574,5 +604,61 @@ export class ReaderView {
       h("div", { class: "br-version" }, `Bili Reader v${this.version}`),
     );
     this.sheetEl.replaceChildren(h("div", { class: "br-sheet-backdrop", onclick: close }), sheet);
+  }
+
+  private renderAzureRows(row: (label: string, control: Node) => HTMLElement): HTMLElement[] {
+    const s = this.settings;
+    const keyInput = h("input", {
+      type: "password",
+      autocomplete: "off",
+      autocapitalize: "off",
+      spellcheck: "false",
+      placeholder: this.azureKeySet ? "已保存（输入新密钥以替换）" : "粘贴 Speech 资源密钥",
+      "aria-label": "Azure 密钥",
+    });
+    keyInput.addEventListener("change", () => {
+      const v = keyInput.value.trim();
+      if (v) this.cb.onAzureKey(v);
+    });
+
+    const regionInput = h("input", {
+      type: "text",
+      autocomplete: "off",
+      autocapitalize: "off",
+      spellcheck: "false",
+      value: s.azureRegion,
+      placeholder: "eastasia",
+      "aria-label": "Azure 区域",
+    });
+    regionInput.addEventListener("change", () => {
+      const v = regionInput.value.trim().toLowerCase();
+      if (v && v !== s.azureRegion) this.update({ azureRegion: v });
+    });
+
+    const voiceSelect = h("select", { "aria-label": "Azure 声音" });
+    const voices = this.azureVoices.some((v) => v.shortName === s.azureVoice)
+      ? this.azureVoices
+      : [{ shortName: s.azureVoice, label: s.azureVoice, locale: "" }, ...this.azureVoices];
+    for (const v of voices) voiceSelect.append(h("option", { value: v.shortName }, v.label));
+    voiceSelect.value = s.azureVoice;
+    voiceSelect.addEventListener("change", () => this.update({ azureVoice: voiceSelect.value }));
+
+    const pct = Math.min(100, Math.round((this.azureUsage / AzureUsageMeter.FREE_CHARS) * 100));
+    const usage = `本月约用 ${this.azureUsage.toLocaleString()} / ${AzureUsageMeter.FREE_CHARS.toLocaleString()} 字符（${pct}%，中文按 2 计，以 Azure 后台为准）`;
+
+    const actions = h(
+      "div",
+      { class: "br-seg" },
+      h("button", { onclick: () => this.cb.onAzureTest() }, "试听"),
+      this.azureKeySet ? h("button", { onclick: () => this.cb.onAzureKey("") }, "清除密钥") : null,
+    );
+
+    return [
+      row("密钥", keyInput),
+      row("区域", regionInput),
+      row("声音", voiceSelect),
+      row("", actions),
+      h("div", { class: "br-note" }, this.azureStatus ? `${this.azureStatus}\n${usage}` : usage),
+    ];
   }
 }

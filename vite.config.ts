@@ -24,7 +24,11 @@ const metadata = `// ==UserScript==
 // @match        https://www.bilinovel.com/novel/*
 // @run-at       document-idle
 // @noframes
-// @grant        none
+// @grant        GM.xmlHttpRequest
+// @grant        GM_xmlhttpRequest
+// @grant        GM.getValue
+// @grant        GM.setValue
+// @connect      speech.microsoft.com
 // @homepageURL  ${PAGES_URL}/
 // @updateURL    ${SCRIPT_URL}
 // @downloadURL  ${SCRIPT_URL}
