@@ -99,6 +99,7 @@ export class ProgressStore {
 
 export type Theme = "system" | "light" | "dark" | "sepia";
 export type FontFamily = "sans" | "serif";
+export type TtsEngine = "system" | "azure";
 
 export interface Settings {
   fontSize: number;
@@ -107,6 +108,9 @@ export interface Settings {
   fontFamily: FontFamily;
   voiceURI?: string;
   rate: number;
+  ttsEngine: TtsEngine;
+  azureRegion: string;
+  azureVoice: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -115,6 +119,9 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: "system",
   fontFamily: "sans",
   rate: 1.0,
+  ttsEngine: "system",
+  azureRegion: "eastasia",
+  azureVoice: "zh-CN-XiaoxiaoNeural",
 };
 
 export const RATE_OPTIONS = [0.75, 0.85, 0.9, 1.0, 1.1, 1.2, 1.35, 1.5];
@@ -149,5 +156,63 @@ export function sanitizeSettings(s: Settings): Settings {
     fontFamily: s.fontFamily === "serif" ? "serif" : "sans",
     voiceURI: typeof s.voiceURI === "string" ? s.voiceURI : undefined,
     rate: clamp(s.rate, 0.5, 2, DEFAULT_SETTINGS.rate),
+    ttsEngine: s.ttsEngine === "azure" ? "azure" : "system",
+    azureRegion:
+      typeof s.azureRegion === "string" && /^[a-z0-9]+$/.test(s.azureRegion.trim().toLowerCase())
+        ? s.azureRegion.trim().toLowerCase()
+        : DEFAULT_SETTINGS.azureRegion,
+    azureVoice:
+      typeof s.azureVoice === "string" && /^[A-Za-z0-9-]+$/.test(s.azureVoice) ? s.azureVoice : DEFAULT_SETTINGS.azureVoice,
   };
 }
+
+interface GmStorage {
+  getValue?(key: string, defaultValue?: unknown): Promise<unknown>;
+  setValue?(key: string, value: unknown): Promise<void>;
+}
+
+/**
+ * Storage for secrets such as API keys. Prefers the userscript manager's
+ * private storage (GM.getValue/GM.setValue), which page scripts cannot read;
+ * falls back to localStorage when the manager does not provide it.
+ */
+export class SecretStore implements KeyValueStore {
+  private readonly fallback: KeyValueStore;
+
+  constructor(
+    private readonly gm: GmStorage | undefined = (globalThis as { GM?: GmStorage }).GM,
+    fallback?: KeyValueStore,
+  ) {
+    this.fallback = fallback ?? new LocalStorageStore();
+  }
+
+  get isPrivate(): boolean {
+    return typeof this.gm?.getValue === "function" && typeof this.gm?.setValue === "function";
+  }
+
+  async get(key: string): Promise<string | null> {
+    if (this.isPrivate) {
+      try {
+        const v = await this.gm!.getValue!(key, null);
+        return typeof v === "string" ? v : null;
+      } catch {
+        return null;
+      }
+    }
+    return this.fallback.get(key);
+  }
+
+  async set(key: string, value: string): Promise<void> {
+    if (this.isPrivate) {
+      try {
+        await this.gm!.setValue!(key, value);
+        return;
+      } catch {
+        /* fall through */
+      }
+    }
+    await this.fallback.set(key, value);
+  }
+}
+
+export const AZURE_KEY_SECRET = "biliReader.azureKey";
