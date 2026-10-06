@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bili Reader</title>
+<meta name="description" content="Bilinovel 连续阅读与朗读用户脚本（iPhone / iPad Safari + Userscripts）">
+<style>
+  :root { --bg: #f7f5f0; --fg: #2a2723; --muted: #6f695f; --accent: #c2410c; --card: #fff; --border: rgba(0,0,0,.08); }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161514; --fg: #e4ded4; --muted: #a39d93; --accent: #fb923c; --card: #1f1e1c; --border: rgba(255,255,255,.1); }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 -apple-system, "PingFang SC", system-ui, sans-serif; }
+  main { max-width: 560px; margin: 0 auto; padding: calc(32px + env(safe-area-inset-top)) 16px calc(32px + env(safe-area-inset-bottom)); }
+  h1 { margin: 0 0 4px; font-size: 28px; }
+  .version { color: var(--muted); font-size: 14px; margin: 0 0 20px; }
+  .install { display: block; text-align: center; padding: 14px; border-radius: 12px; background: var(--accent); color: #fff; font-weight: 600; text-decoration: none; font-size: 17px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 4px 16px; margin: 20px 0; }
+  ol { padding-left: 20px; }
+  li { margin: 8px 0; }
+  code { font-size: 13px; word-break: break-all; }
+  a { color: var(--accent); }
+  footer { color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Bili Reader</h1>
+  <p class="version">版本 __VERSION__ · Bilinovel 连续阅读 + 朗读</p>
+  <a class="install" href="./bili-reader.user.js">安装用户脚本</a>
+
+  <div class="card">
+    <ol>
+      <li>在 App Store 安装 <strong>Userscripts</strong>（作者 Justin Wasack，免费）。</li>
+      <li>打开「设置 → Safari → 扩展 → Userscripts」，开启并将网站权限设为允许（或至少允许 bilinovel.net）。</li>
+      <li>在 Safari 中打开本页，点上面的「安装用户脚本」，然后点地址栏左侧的扩展按钮 → Userscripts → <strong>Install</strong>。</li>
+      <li>打开任意 Bilinovel 章节（如 <code>https://www.bilinovel.net/novel/5369/180204.html</code>），阅读模式会自动启动。</li>
+    </ol>
+  </div>
+
+  <p>更新：Userscripts 会按 <code>@updateURL</code> 检查更新；也可以重复上面第 3 步覆盖安装。脚本地址：<br><code>__SCRIPT_URL__</code></p>
+  <p>隐私：Bili Reader 没有后端，不会向开发者发送任何阅读数据。阅读进度和设置只保存在你的浏览器中。</p>
+  <footer><a href="__REPO_URL__">GitHub 仓库</a> · MIT License</footer>
+</main>
+</body>
+</html>
