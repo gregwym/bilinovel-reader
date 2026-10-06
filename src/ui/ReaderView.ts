@@ -1,4 +1,4 @@
-import type { Paragraph } from "../adapters/types";
+import type { FrameHost, Paragraph } from "../adapters/types";
 import type { PlayerState } from "../speech/SpeechPlayer";
 import type { VoiceInfo } from "../speech/VoiceManager";
 import { AZURE_PRESET_VOICES, AzureUsageMeter, type AzureVoice } from "../speech/AzureSpeechEngine";
@@ -72,6 +72,9 @@ export class ReaderView {
   private sheetEl?: HTMLElement;
   private pillEl!: HTMLButtonElement;
   private fatalEl?: HTMLElement;
+  private frameLayer!: HTMLElement;
+  private frameMessage!: HTMLElement;
+  private frameCancel?: () => void;
 
   /** Paragraph elements in document order, for fast visibility lookup. */
   private paraEls: HTMLElement[] = [];
@@ -158,7 +161,27 @@ export class ReaderView {
       ),
     );
 
-    this.root = h("div", { class: "br-root" }, top, this.bannerEl, this.scrollEl, this.chipEl, this.playerEl);
+    this.frameMessage = h("span", {}, "");
+    this.frameLayer = h(
+      "div",
+      { class: "br-frame-layer" },
+      h(
+        "div",
+        { class: "br-frame-bar" },
+        this.frameMessage,
+        h("button", { class: "br-btn", onclick: () => this.frameCancel?.() }, "取消"),
+      ),
+    );
+    this.root = h(
+      "div",
+      { class: "br-root" },
+      top,
+      this.bannerEl,
+      this.scrollEl,
+      this.chipEl,
+      this.playerEl,
+      this.frameLayer,
+    );
     this.pillEl = h("button", { class: "br-pill", hidden: true, onclick: () => this.cb.onReenter() }, "📖 阅读模式");
     this.shadow.append(this.root, this.pillEl);
 
@@ -175,6 +198,23 @@ export class ReaderView {
       { root: this.scrollEl, rootMargin: "0px 0px 150% 0px" },
     ).observe(this.sentinel);
   }
+
+  /** Hosts page-loader iframes; shows them full-screen when a challenge needs the user. */
+  readonly frameHost: FrameHost = {
+    attach: (iframe) => {
+      iframe.className = "br-loader-frame";
+      this.frameLayer.append(iframe);
+    },
+    reveal: (_iframe, message, cancel) => {
+      this.frameMessage.textContent = message;
+      this.frameCancel = cancel;
+      this.frameLayer.classList.add("visible");
+    },
+    detach: (iframe) => {
+      iframe.remove();
+      if (!this.frameLayer.querySelector("iframe")) this.frameLayer.classList.remove("visible");
+    },
+  };
 
   // ---------------------------------------------------------------------------
   // Visibility of the whole reader

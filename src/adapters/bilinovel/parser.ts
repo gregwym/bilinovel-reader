@@ -94,7 +94,7 @@ function meta(doc: Document, property: string): string {
   return decodeText(el?.getAttribute("content") ?? "");
 }
 
-function findContent(doc: Document): Element | null {
+export function findContent(doc: Document): Element | null {
   for (const sel of CONTENT_SELECTORS) {
     const el = doc.querySelector(sel);
     if (el) return el;
@@ -102,9 +102,61 @@ function findContent(doc: Document): Element | null {
   return null;
 }
 
+/** Set on elements found to be invisible (computed style or page CSS rules). */
+export const HIDDEN_ATTR = "data-br-hidden";
+
 function isHidden(el: Element): boolean {
+  if (el.hasAttribute("hidden") || el.hasAttribute(HIDDEN_ATTR)) return true;
   const style = (el.getAttribute("style") ?? "").replace(/\s+/g, "").toLowerCase();
-  return style.includes("display:none") || style.includes("visibility:hidden") || el.hasAttribute("hidden");
+  return style.includes("display:none") || style.includes("visibility:hidden");
+}
+
+/**
+ * Marks elements hidden by the page's own CSS (`<style>` text). The site's
+ * chapterlog.js inserts decoy copies of earlier paragraphs and hides them
+ * with a class rule; in a rendered page they must be skipped.
+ */
+export function markStyleRuleHidden(doc: Document): void {
+  const css = Array.from(doc.querySelectorAll("style"))
+    .map((s) => s.textContent ?? "")
+    .join("\n")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  const ruleRe = /([^{}@]+)\{([^{}]*)\}/g;
+  for (let m = ruleRe.exec(css); m; m = ruleRe.exec(css)) {
+    const body = m[2].replace(/\s+/g, "").toLowerCase();
+    if (!/display:none|visibility:hidden/.test(body)) continue;
+    for (const selector of m[1].split(",")) {
+      const sel = selector.trim();
+      if (!sel || !/acontent|TextContent|^\.|^p\b/.test(sel)) continue; // only rules that can affect the body text
+      try {
+        doc.querySelectorAll(sel).forEach((el) => el.setAttribute(HIDDEN_ATTR, ""));
+      } catch {
+        /* unsupported selector */
+      }
+    }
+  }
+}
+
+/**
+ * Copies "is this rendered?" from a live element tree onto its clone, using
+ * computed styles (covers CSS inserted through CSSOM, which a clone loses).
+ * `clone` must be an unmodified deep clone of `live`. Returns the number of
+ * hidden non-empty paragraphs (decoys).
+ */
+export function markComputedHidden(live: Element, clone: Element, win: Window): number {
+  const liveEls = live.querySelectorAll("*");
+  const cloneEls = clone.querySelectorAll("*");
+  if (liveEls.length !== cloneEls.length) return 0;
+  let n = 0;
+  liveEls.forEach((el, i) => {
+    const cs = win.getComputedStyle(el);
+    if (cs.display === "none" || cs.visibility === "hidden") {
+      cloneEls[i].setAttribute(HIDDEN_ATTR, "");
+      // Count hidden paragraphs only (scripts/styles are display:none too).
+      if (el.tagName.toLowerCase() === "p" && el.textContent?.trim()) n++;
+    }
+  });
+  return n;
 }
 
 /** Replaces wrapper divs by the images they contain; removes other divs (ads, widgets). */
@@ -205,6 +257,7 @@ export function parseBilinovelDocument(doc: Document, url: URL, options: ParseOp
 
   const content = findContent(doc);
   if (!content) throw new ParseError("Chapter content element not found", href);
+  markStyleRuleHidden(doc);
 
   const rawText = content.textContent ?? "";
   if (BLOCKED_KEYWORDS.filter((k) => rawText.includes(k)).length >= 2) {

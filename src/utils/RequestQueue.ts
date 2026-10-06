@@ -63,6 +63,19 @@ export class RequestQueue {
     return run;
   }
 
+  /**
+   * Runs an arbitrary network task (e.g. loading a page in an iframe) in the
+   * same serial, rate-limited lane as fetchText. No retries.
+   */
+  run<T>(task: () => Promise<T>): Promise<T> {
+    const result = this.tail.then(async () => {
+      await this.waitForSlot();
+      return task();
+    });
+    this.tail = result.catch(() => undefined);
+    return result;
+  }
+
   private async waitForSlot(): Promise<void> {
     const wait = this.lastStart + this.minIntervalMs - this.now();
     if (wait > 0) {
@@ -93,7 +106,11 @@ export class RequestQueue {
 
   private async attempt(url: string, init: RequestInit): Promise<string> {
     log.debug("GET", url);
-    const res = await this.fetchImpl(url, { credentials: "include", ...init });
+    const res = await this.fetchImpl(url, {
+      credentials: "include",
+      headers: { Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" },
+      ...init,
+    });
     const text = await res.text();
     if (looksLikeChallenge(text)) {
       throw new FetchError("Bot challenge page returned", url, res.status, true);

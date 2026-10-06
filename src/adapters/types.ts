@@ -28,19 +28,30 @@ export interface PageContent {
   chapterUrl: string;
 }
 
+/** Where an adapter may place an iframe used to load pages (and show bot challenges). */
+export interface FrameHost {
+  /** Puts the (invisible) iframe into the document. */
+  attach(iframe: HTMLIFrameElement): void;
+  /** Makes the iframe visible so the user can solve a challenge; `cancel` aborts the load. */
+  reveal(iframe: HTMLIFrameElement, message: string, cancel: () => void): void;
+  /** Removes the iframe (and hides any challenge UI). */
+  detach(iframe: HTMLIFrameElement): void;
+}
+
 export interface SiteAdapter {
   readonly name: string;
   canHandle(url: URL): boolean;
   /** Parses a document whose HTML is the server response (scripts not executed). */
   parseDocument(document: Document, url: URL): Promise<PageContent>;
   /**
-   * Parses the page the user is looking at, after the site's own scripts ran
-   * (so any client-side de-obfuscation already happened). Used as a fallback
-   * when re-fetching the current URL fails.
+   * Content of the page the user opened (`document` is the live, rendered
+   * page). The adapter may use the rendered DOM or load the URL itself.
    */
-  parseRenderedDocument(document: Document, url: URL): Promise<PageContent>;
+  loadCurrentPage(document: Document, url: URL): Promise<PageContent>;
   /** Fetches and parses a page through the adapter's rate-limited queue. */
   fetchPage(url: string): Promise<PageContent>;
+  /** Lets the UI host the adapter's loader frames. */
+  setFrameHost?(host: FrameHost): void;
   /** Builds the URL of a given page of a chapter (used for progress restore). */
   pageUrl(bookId: string, chapterId: string, pageIndex: number): string;
 }

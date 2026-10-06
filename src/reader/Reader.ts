@@ -155,6 +155,7 @@ export class Reader implements PlaybackSource {
   async start(): Promise<void> {
     this.settings = await this.settingsStore.load();
     this.view.mount();
+    this.adapter.setFrameHost?.(this.view.frameHost);
     this.view.applySettings(this.settings);
     this.view.setTitles("Bili Reader", "正在加载…");
     this.view.show();
@@ -201,23 +202,9 @@ export class Reader implements PlaybackSource {
     await this.offerRestore(page);
   }
 
-  /**
-   * The server HTML of the current URL is re-fetched (usually from the HTTP
-   * cache) so the first page goes through exactly the same parser as every
-   * following page. If that fails, fall back to the rendered DOM.
-   */
-  private async fetchCurrentPage(): Promise<PageContent> {
-    try {
-      return await this.adapter.fetchPage(location.href);
-    } catch (err) {
-      log.warn("re-fetching the current page failed; parsing the rendered page instead", err);
-      try {
-        return await this.adapter.parseRenderedDocument(document, new URL(location.href));
-      } catch (fallbackErr) {
-        log.warn("rendered page parse failed too", fallbackErr);
-        throw err;
-      }
-    }
+  /** The page the tab originally loaded (the live DOM belongs to it). */
+  private fetchCurrentPage(): Promise<PageContent> {
+    return this.adapter.loadCurrentPage(document, new URL(this.originalUrl));
   }
 
   private exit(): void {
