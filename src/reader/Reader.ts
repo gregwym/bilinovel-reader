@@ -81,7 +81,7 @@ export class Reader implements PlaybackSource {
     private readonly adapter: SiteAdapter,
     private readonly progress = new ProgressStore(),
     private readonly settingsStore = new SettingsStore(),
-    version = "dev",
+    private readonly version = "dev",
   ) {
     this.webEngine = new WebSpeechEngine(globalThis.speechSynthesis, (uri) => this.voices.resolve(uri));
     this.azureEngine = new AzureSpeechEngine(
@@ -91,11 +91,20 @@ export class Reader implements PlaybackSource {
           : undefined,
       { onUsage: (chars) => this.view.setAzureState({ usage: this.usage.add(chars) }) },
     );
-    this.azureWithFallback = new FallbackSpeechEngine(this.azureEngine, this.webEngine, (code) => {
-      const msg = `${describeAzureError(code)}，已改用系统语音`;
-      log.warn(msg);
-      this.view.setPlayerMessage(msg);
-      this.view.setAzureState({ status: msg });
+    this.azureWithFallback = new FallbackSpeechEngine(this.azureEngine, this.webEngine, {
+      onFallback: (code, retryAt) => {
+        const when = Number.isFinite(retryAt)
+          ? `，${Math.max(1, Math.round((retryAt - Date.now()) / 60_000))} 分钟内自动重试`
+          : "，请检查设置";
+        const msg = `${describeAzureError(code)}，暂用系统语音${when}`;
+        log.warn(msg);
+        this.view.setPlayerMessage(msg);
+        this.view.setAzureState({ status: msg, fallback: true });
+      },
+      onRecover: () => {
+        this.view.setPlayerMessage("已恢复 Azure 语音");
+        this.view.setAzureState({ status: "已恢复 Azure 语音", fallback: false });
+      },
     });
     this.player = new SpeechPlayer(this.webEngine, this, {
       onState: (state, message) => {
@@ -138,6 +147,12 @@ export class Reader implements PlaybackSource {
         onSettings: (s) => this.updateSettings(s),
         onAzureKey: (key) => void this.setAzureKey(key),
         onAzureTest: () => this.testAzureVoice(),
+        onAzureRetry: () => {
+          this.azureWithFallback.reset();
+          this.view.setAzureState({ status: "正在重试 Azure…", fallback: false });
+          this.player.restartCurrent();
+        },
+        onCopyDiagnostics: () => this.copyDiagnostics(),
         onOpenOriginal: () => this.openOriginal(),
         onRestartChapter: () => {
           const p = this.cursorId ? this.buffer.get(this.cursorId) : undefined;
@@ -477,6 +492,7 @@ export class Reader implements PlaybackSource {
     this.settings = s;
     this.view.applySettings(s);
     void this.settingsStore.save(s);
+    if (prev.azureBuffer !== s.azureBuffer) this.azureEngine.setPrefetchCount(s.azureBuffer);
     const azureChanged =
       prev.ttsEngine !== s.ttsEngine || prev.azureRegion !== s.azureRegion || prev.azureVoice !== s.azureVoice;
     if (azureChanged) {
@@ -497,6 +513,8 @@ export class Reader implements PlaybackSource {
   /** Selects the engine for the current settings; a fresh choice retries Azure after a fallback. */
   private applyEngine(): void {
     this.azureWithFallback.reset();
+    this.azureEngine.setPrefetchCount(this.settings.azureBuffer);
+    this.view.setAzureState({ fallback: false });
     this.view.setAzureState({ status: this.settings.ttsEngine === "azure" && !this.azureKey ? "请先填写密钥" : "" });
     const engine = this.currentEngine();
     // Either way the current chunk restarts with the new engine/voice when playing.
@@ -535,6 +553,25 @@ export class Reader implements PlaybackSource {
         const code = err instanceof SpeechEngineError ? err.code : String(err);
         this.view.setAzureState({ status: `试听失败：${describeAzureError(code)}` });
       });
+  }
+
+  /** Copies troubleshooting info (no book text) to the clipboard. */
+  private copyDiagnostics(): void {
+    const data = JSON.stringify(
+      {
+        version: this.version,
+        userAgent: navigator.userAgent,
+        url: location.href,
+        engine: this.settings.ttsEngine,
+        azureFallback: this.azureWithFallback.fallbackReason ?? null,
+        loads: this.adapter.getDiagnostics?.() ?? [],
+      },
+      null,
+      1,
+    );
+    const done = () => this.view.setPlayerMessage("诊断信息已复制");
+    navigator.clipboard?.writeText(data).then(done, () => window.prompt("复制以下诊断信息", data));
+    if (!navigator.clipboard) window.prompt("复制以下诊断信息", data);
   }
 
   /** Lock-screen / Control Center controls (effective while the Azure audio element plays). */

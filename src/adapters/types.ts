@@ -50,6 +50,8 @@ export interface SiteAdapter {
   loadCurrentPage(document: Document, url: URL): Promise<PageContent>;
   /** Fetches and parses a page through the adapter's rate-limited queue. */
   fetchPage(url: string): Promise<PageContent>;
+  /** Recent load records for troubleshooting (no reading data beyond URLs and counts). */
+  getDiagnostics?(): Record<string, unknown>[];
   /** Lets the UI host the adapter's loader frames. */
   setFrameHost?(host: FrameHost): void;
   /** Builds the URL of a given page of a chapter (used for progress restore). */

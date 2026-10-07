@@ -1,7 +1,8 @@
 import type { PageContent, SiteAdapter } from "../types";
-import { FetchError, ParseError } from "../types";
+import { FetchError } from "../types";
 import { RequestQueue } from "../../utils/RequestQueue";
 import { log } from "../../utils/log";
+import { bodyText, httpRequest } from "../../utils/http";
 import { parseChapterLogScript, type ShuffleTemplate } from "./deobfuscate";
 import { findChapterLogScript, findContent, markComputedHidden, parseBilinovelDocument } from "./parser";
 import { defaultFrameHost, loadInFrame, type FrameHost, type LoadedFrame } from "./frameLoader";
@@ -24,8 +25,8 @@ export class BilinovelAdapter implements SiteAdapter {
   readonly name = "bilinovel";
   private readonly templates = new Map<string, Promise<ShuffleTemplate | undefined>>();
 
-  /** Set after a bot challenge: fetch keeps failing, so load pages in a frame instead. */
-  private preferFrame = false;
+  /** Recent page loads, for the "copy diagnostics" button. */
+  private readonly diagnostics: Record<string, unknown>[] = [];
 
   constructor(
     private readonly queue: RequestQueue = new RequestQueue(),
@@ -45,8 +46,21 @@ export class BilinovelAdapter implements SiteAdapter {
     return buildPageUrl(location.origin, bookId, chapterId, pageIndex);
   }
 
-  /** Parses server HTML (scripts not executed): undoes the paragraph shuffle itself. */
-  async parseDocument(doc: Document, url: URL): Promise<PageContent> {
+  getDiagnostics(): Record<string, unknown>[] {
+    return [...this.diagnostics];
+  }
+
+  private record(entry: Record<string, unknown>): void {
+    this.diagnostics.push({ t: new Date().toISOString(), ...entry });
+    if (this.diagnostics.length > 30) this.diagnostics.shift();
+  }
+
+  /**
+   * Parses server HTML whose scripts did not run (DOMParser output or a
+   * script-less frame): undoes the paragraph shuffle itself. With `win`, the
+   * document is rendered and invisible elements are dropped as well.
+   */
+  async parseDocument(doc: Document, url: URL, win?: Window): Promise<PageContent> {
     const scriptUrl = findChapterLogScript(doc, url);
     let shuffle: ShuffleTemplate | undefined;
     if (scriptUrl) {
@@ -54,82 +68,105 @@ export class BilinovelAdapter implements SiteAdapter {
       // Guessing constants would silently scramble the text; let the site's own script do it instead.
       if (!shuffle) throw new TemplateUnavailableError(url.href);
     }
-    return this.logged(parseBilinovelDocument(doc, url, { shuffle }));
+    const content = findContent(doc);
+    const hidden = win && content ? markComputedHidden(content, content, win) : 0;
+    const page = parseBilinovelDocument(doc, url, { shuffle });
+    this.record({ url: url.href, method: "static", paragraphs: page.paragraphs.length, hidden, ...dupStats(page) });
+    return this.logged(page);
   }
 
   /**
    * Parses a document whose scripts already ran (the live page or a frame):
-   * paragraph order is restored, and decoy paragraphs the site inserts are
-   * hidden with CSS, so invisible elements are dropped using computed styles.
+   * paragraph order is restored by the site, and decoy paragraphs it inserts
+   * are hidden, so invisible elements are dropped using the rendered styles.
    */
   async parseRenderedDocument(doc: Document, url: URL): Promise<PageContent> {
-    return this.logged(this.parseRendered(doc, url).page);
+    return this.logged(this.parseRendered(doc, url, "rendered"));
   }
 
-  private parseRendered(doc: Document, url: URL): { page: PageContent; hidden: number } {
+  private parseRendered(doc: Document, url: URL, method: string): PageContent {
     // Work on a copy: the parser strips junk and must never mutate the live page.
     const copy = doc.cloneNode(true) as Document;
     const live = findContent(doc);
     const cloned = findContent(copy);
     const win = doc.defaultView;
     const hidden = live && cloned && win ? markComputedHidden(live, cloned, win) : 0;
-    return { page: parseBilinovelDocument(copy, url, { shuffle: null }), hidden };
+    const page = parseBilinovelDocument(copy, url, { shuffle: null });
+    this.record({ url: url.href, method, paragraphs: page.paragraphs.length, hidden, ...dupStats(page) });
+    return page;
   }
 
   /**
-   * The page the user opened. Uses the rendered DOM when the site's
-   * de-obfuscation evidently ran (saves a request that Cloudflare may
-   * challenge); otherwise loads it like any other page.
+   * The page the user opened. Loaded like every other page (server HTML, so
+   * no script-inserted decoys); the rendered DOM is the fallback, and is also
+   * used to cross-check the paragraph order restore.
    */
   async loadCurrentPage(doc: Document, url: URL): Promise<PageContent> {
+    let page: PageContent;
     try {
-      const { page, hidden } = this.parseRendered(doc, url);
-      const shuffled = !!findChapterLogScript(doc, url);
-      const textCount = page.paragraphs.filter((p) => p.text).length;
-      // chapterlog.js only reorders past 20 paragraphs, and then also inserts hidden decoys.
-      if (!shuffled || textCount <= 20 || hidden > 0) return this.logged(page);
-      log.debug("rendered page not verifiably de-obfuscated; loading it instead");
+      // Never make the user solve a challenge for a page that is already on screen.
+      page = await this.queue.run(() => this.loadStatic(url.href));
     } catch (err) {
-      log.warn("parsing the rendered page failed; loading it instead", err);
+      log.warn("loading the current page failed; using the rendered page", err);
+      return this.logged(this.parseRendered(doc, url, "live"));
     }
-    return this.fetchPage(url.href);
+    try {
+      const live = this.parseRendered(doc, url, "live-check");
+      const a = page.paragraphs.map((p) => p.text ?? p.imageUrl);
+      const b = live.paragraphs.map((p) => p.text ?? p.imageUrl);
+      const firstDiff = a.findIndex((t, i) => t !== b[i]);
+      const match = firstDiff < 0 && a.length === b.length;
+      this.record({ url: url.href, method: "cross-check", match, static: a.length, live: b.length, firstDiff });
+      if (!match) log.warn("server-HTML restore differs from the rendered page", { firstDiff, static: a.length, live: b.length });
+    } catch {
+      /* diagnostics only */
+    }
+    return page;
   }
 
-  async fetchPage(url: string): Promise<PageContent> {
-    if (this.preferFrame) return this.fetchViaFrame(url);
-    let html: string;
+  /** Loads a page through the rate-limited queue. */
+  fetchPage(url: string): Promise<PageContent> {
+    return this.queue.run(() => this.loadPage(url));
+  }
+
+  /**
+   * Script-less frame first: a normal navigation (so Cloudflare treats it like
+   * the user opening the page), server HTML (no decoys) and the site's CSS.
+   * If that hits a challenge or the shuffle constants are unknown, load with
+   * scripts (the challenge may need the user) and read the rendered page.
+   */
+  private loadStatic(url: string): Promise<PageContent> {
+    return this.withFrame(url, false, (doc, win) => this.parseDocument(doc, new URL(url), win));
+  }
+
+  private async loadPage(url: string): Promise<PageContent> {
+    const u = new URL(url);
     try {
-      html = await this.queue.fetchText(url);
+      return await this.loadStatic(url);
     } catch (err) {
-      if (err instanceof FetchError && err.challenge) {
-        log.info("bot challenge on fetch; switching to frame loading", url);
-        this.preferFrame = true;
-        return this.fetchViaFrame(url);
-      }
-      throw err;
-    }
-    const doc = new DOMParser().parseFromString(html, "text/html");
-    try {
-      return await this.parseDocument(doc, new URL(url));
-    } catch (err) {
-      if (err instanceof TemplateUnavailableError) return this.fetchViaFrame(url);
-      if (err instanceof ParseError) log.error("parse failed", url, err.message, { htmlLength: html.length });
-      throw err;
+      const challenge = err instanceof FetchError && err.challenge;
+      if (!challenge && !(err instanceof TemplateUnavailableError)) throw err;
+      log.info(challenge ? "challenge; loading with scripts" : "shuffle constants unknown; loading with scripts", url);
+      this.record({ url, method: "fallback", reason: challenge ? "challenge" : "no-template" });
+      return this.withFrame(url, true, async (doc) => this.logged(this.parseRendered(doc, u, "rendered")));
     }
   }
 
-  private fetchViaFrame(url: string): Promise<PageContent> {
-    return this.queue.run(async () => {
-      let frame: LoadedFrame | undefined;
-      try {
-        frame = await this.frameLoader(url, this.frameHost, {
-          isReady: (d) => !!findContent(d) && d.readyState !== "loading",
-        });
-        return this.logged(this.parseRendered(frame.doc, new URL(url)).page);
-      } finally {
-        frame?.dispose();
-      }
-    });
+  private async withFrame<T>(url: string, scripts: boolean, use: (doc: Document, win: Window) => Promise<T>): Promise<T> {
+    const start = Date.now();
+    let frame: LoadedFrame | undefined;
+    try {
+      frame = await this.frameLoader(url, this.frameHost, {
+        scripts,
+        // Without scripts, wait for stylesheets (load event) so visibility can be judged; don't wait forever on images.
+        isReady: (d) =>
+          !!findContent(d) &&
+          (d.readyState === "complete" || (d.readyState === "interactive" && (scripts || Date.now() - start > 3000))),
+      });
+      return await use(frame.doc, frame.win);
+    } finally {
+      frame?.dispose();
+    }
   }
 
   private logged(page: PageContent): PageContent {
@@ -156,6 +193,16 @@ export class BilinovelAdapter implements SiteAdapter {
     return pending;
   }
 
+  /** Second try through the userscript manager (not subject to the page's bot checks). */
+  private async fetchTemplateViaGm(src: string): Promise<ShuffleTemplate | null> {
+    try {
+      const res = await httpRequest({ method: "GET", url: src, timeoutMs: 15_000 });
+      return res.status === 200 ? parseChapterLogScript(bodyText(res)) : null;
+    } catch {
+      return null;
+    }
+  }
+
   private async fetchTemplate(src: string): Promise<ShuffleTemplate | undefined> {
     try {
       const cached = JSON.parse(localStorage.getItem(TEMPLATE_CACHE_KEY) ?? "null") as CachedTemplate | null;
@@ -166,7 +213,7 @@ export class BilinovelAdapter implements SiteAdapter {
     try {
       // Static asset: let the HTTP cache serve it and skip the page rate limit.
       const res = await fetch(src, { credentials: "include", cache: "force-cache" });
-      const template = parseChapterLogScript(await res.text());
+      const template = parseChapterLogScript(await res.text()) ?? (await this.fetchTemplateViaGm(src));
       if (!template) {
         log.warn("Could not read shuffle constants from chapterlog.js; pages will load in a frame", src);
         this.templates.delete(src);
@@ -185,4 +232,16 @@ export class BilinovelAdapter implements SiteAdapter {
       return undefined;
     }
   }
+}
+
+/** Repeated paragraph texts within one page: decoys would show up here. */
+function dupStats(page: PageContent): { duplicates: number } {
+  const seen = new Set<string>();
+  let duplicates = 0;
+  for (const p of page.paragraphs) {
+    if (!p.text || p.text.length < 8) continue;
+    if (seen.has(p.text)) duplicates++;
+    seen.add(p.text);
+  }
+  return { duplicates };
 }

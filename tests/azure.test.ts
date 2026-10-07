@@ -9,7 +9,7 @@ import {
 } from "../src/speech/AzureSpeechEngine";
 import { FallbackSpeechEngine } from "../src/speech/FallbackSpeechEngine";
 import { SpeechEngineError, type SpeechEngine } from "../src/speech/SpeechEngine";
-import type { HttpRequest, HttpResponse } from "../src/utils/http";
+import { NetworkError, type HttpRequest, type HttpResponse } from "../src/utils/http";
 import { SecretStore, MemoryStore, SettingsStore } from "../src/reader/ProgressStore";
 
 const enc = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer;
@@ -96,7 +96,7 @@ describe("AzureSpeechEngine", () => {
 
   it("reuses prefetched audio instead of requesting again", async () => {
     const { e, requests } = engine([ok()]);
-    e.prefetch("下一句", { rate: 1 });
+    e.prefetch(["下一句"], { rate: 1 });
     await e.speak("下一句", { rate: 1 });
     expect(requests).toHaveLength(1);
   });
@@ -104,10 +104,9 @@ describe("AzureSpeechEngine", () => {
   it("maps auth and quota failures", async () => {
     await expect(engine([fail(401)]).e.speak("a", { rate: 1 })).rejects.toMatchObject({ code: "auth" });
     await expect(engine([fail(403)]).e.speak("a", { rate: 1 })).rejects.toMatchObject({ code: "quota" });
-    // 429 is retried once before giving up.
+    // Throttling is retried before giving up.
     const throttled = engine([fail(429), ok()]);
     await expect(throttled.e.speak("a", { rate: 1 })).resolves.toBe("done");
-    await expect(engine([fail(429), fail(429)]).e.speak("a", { rate: 1 })).rejects.toMatchObject({ code: "quota" });
   });
 
   it("fails with config when no key is set", async () => {
@@ -146,7 +145,7 @@ describe("AzureSpeechEngine", () => {
   });
 });
 
-describe("FallbackSpeechEngine", () => {
+describe("FallbackSpeechEngine (circuit breaker)", () => {
   const stub = (impl: () => Promise<"done" | "cancelled">, spoken: string[], name: string): SpeechEngine => ({
     unlock() {},
     speak: (t) => (spoken.push(`${name}:${t}`), impl()),
@@ -156,27 +155,124 @@ describe("FallbackSpeechEngine", () => {
     speaking: false,
   });
 
-  it("switches to the secondary engine on quota errors and stays there", async () => {
+  function setup(errors: (string | null)[]) {
+    let now = 0;
     const spoken: string[] = [];
-    const reasons: string[] = [];
-    const primary = stub(() => Promise.reject(new SpeechEngineError("quota")), spoken, "azure");
+    const events: string[] = [];
+    const primary = stub(() => {
+      const e = errors.shift();
+      return e ? Promise.reject(new SpeechEngineError(e)) : Promise.resolve("done");
+    }, spoken, "azure");
     const secondary = stub(() => Promise.resolve("done"), spoken, "web");
-    const f = new FallbackSpeechEngine(primary, secondary, (c) => reasons.push(c));
+    const f = new FallbackSpeechEngine(
+      primary,
+      secondary,
+      { onFallback: (c, at) => events.push(`fallback:${c}:${at}`), onRecover: () => events.push("recover") },
+      () => now,
+    );
+    return { f, spoken, events, advance: (ms: number) => (now += ms) };
+  }
+
+  it("a transient error only affects that utterance's engine until a short cooldown", async () => {
+    const { f, spoken, events, advance } = setup(["network", null]);
     await f.speak("一", { rate: 1 });
-    await f.speak("二", { rate: 1 });
-    expect(spoken).toEqual(["azure:一", "web:一", "web:二"]);
-    expect(reasons).toEqual(["quota"]);
-    f.reset();
+    await f.speak("二", { rate: 1 }); // still cooling down
+    advance(20_001);
+    await f.speak("三", { rate: 1 }); // primary again, succeeds
+    expect(spoken).toEqual(["azure:一", "web:一", "web:二", "azure:三"]);
+    expect(events).toEqual(["fallback:network:20000", "recover"]);
     expect(f.usingFallback).toBe(false);
   });
 
+  it("backs off longer on repeated transient failures", async () => {
+    const { f, events, advance } = setup(["server", "server"]);
+    await f.speak("一", { rate: 1 });
+    advance(20_001);
+    await f.speak("二", { rate: 1 });
+    expect(events[1]).toBe(`fallback:server:${20_001 + 40_000}`);
+  });
+
+  it("waits 30 minutes after quota errors and for a reset after auth errors", async () => {
+    const q = setup(["quota"]);
+    await q.f.speak("一", { rate: 1 });
+    expect(q.events[0]).toBe(`fallback:quota:${30 * 60_000}`);
+
+    const a = setup(["auth", null]);
+    await a.f.speak("一", { rate: 1 });
+    a.advance(24 * 3600_000);
+    await a.f.speak("二", { rate: 1 });
+    expect(a.spoken).toEqual(["azure:一", "web:一", "web:二"]);
+    a.f.reset();
+    await a.f.speak("三", { rate: 1 });
+    expect(a.spoken.at(-1)).toBe("azure:三");
+  });
+
   it("does not fall back on user-gesture errors", async () => {
-    const spoken: string[] = [];
-    const f = new FallbackSpeechEngine(
-      stub(() => Promise.reject(new SpeechEngineError("not-allowed")), spoken, "azure"),
-      stub(() => Promise.resolve("done"), spoken, "web"),
-    );
+    const { f } = setup(["not-allowed"]);
     await expect(f.speak("一", { rate: 1 })).rejects.toMatchObject({ code: "not-allowed" });
+  });
+
+  it("only prefetches while the primary is in use", async () => {
+    const got: string[][] = [];
+    const { f } = setup(["network"]);
+    (f as unknown as { primary: SpeechEngine }).primary.prefetch = (t: string[]) => void got.push(t);
+    f.prefetch(["a"], { rate: 1 });
+    await f.speak("一", { rate: 1 });
+    f.prefetch(["b"], { rate: 1 });
+    expect(got).toEqual([["a"]]);
+  });
+});
+
+describe("Azure error handling", () => {
+  it("retries network failures with backoff before failing", async () => {
+    let calls = 0;
+    const e = new AzureSpeechEngine(() => cfg, {
+      audio: new FakeAudio() as unknown as HTMLAudioElement,
+      sleep: async () => undefined,
+      request: async () => {
+        calls++;
+        if (calls < 3) throw new NetworkError("offline");
+        return ok();
+      },
+    });
+    await expect(e.speak("a", { rate: 1 })).resolves.toBe("done");
+    expect(calls).toBe(3);
+  });
+
+  it("distinguishes throttling from an exhausted quota", async () => {
+    const quotaBody: HttpResponse = { status: 429, headers: {}, body: enc("Quota exceeded") };
+    await expect(engine([quotaBody]).e.speak("a", { rate: 1 })).rejects.toMatchObject({ code: "quota" });
+    await expect(engine([fail(429), fail(429), fail(429)]).e.speak("a", { rate: 1 })).rejects.toMatchObject({
+      code: "throttled",
+    });
+    await expect(engine([fail(503), fail(503), fail(503)]).e.speak("a", { rate: 1 })).rejects.toMatchObject({
+      code: "server",
+    });
+  });
+
+  it("synthesizes up to N upcoming chunks ahead, two at a time", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const urls: string[] = [];
+    const e = new AzureSpeechEngine(() => cfg, {
+      audio: new FakeAudio() as unknown as HTMLAudioElement,
+      request: async (r) => {
+        urls.push(r.body!);
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((res) => setTimeout(res, 5));
+        inFlight--;
+        return ok();
+      },
+    });
+    e.setPrefetchCount(3);
+    e.prefetch(["一", "二", "三", "四", "五"], { rate: 1 });
+    await new Promise((res) => setTimeout(res, 40));
+    expect(urls).toHaveLength(3);
+    expect(peak).toBe(2);
+    // Already buffered: speaking them needs no new request.
+    await e.speak("二", { rate: 1 });
+    expect(urls).toHaveLength(3);
   });
 });
 

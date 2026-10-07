@@ -21,6 +21,12 @@ export interface LoadedFrame {
 }
 
 export interface FrameLoadOptions {
+  /**
+   * Run the page's scripts. Without scripts the frame holds the server HTML
+   * (plus the site's CSS): no client-side obfuscation such as inserted decoy
+   * paragraphs, but a bot challenge cannot complete there.
+   */
+  scripts?: boolean;
   /** Wait for an automatic challenge before showing it to the user. */
   revealAfterMs?: number;
   /** Give up after this long (including time spent waiting for the user). */
@@ -50,8 +56,9 @@ export function loadInFrame(url: string, host: FrameHost, options: FrameLoadOpti
   const timeoutMs = options.timeoutMs ?? 180_000;
   return new Promise((resolve, reject) => {
     const iframe = document.createElement("iframe");
-    // No popups / top navigation from the site's scripts; scripts and forms are needed for the challenge.
-    iframe.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms");
+    // No popups / top navigation; scripts and forms only when a challenge must run.
+    const scripts = options.scripts ?? true;
+    iframe.setAttribute("sandbox", scripts ? "allow-scripts allow-same-origin allow-forms" : "allow-same-origin");
     iframe.setAttribute("aria-hidden", "true");
     iframe.title = "Bili Reader loader";
     const start = Date.now();
@@ -82,6 +89,10 @@ export function loadInFrame(url: string, host: FrameHost, options: FrameLoadOpti
       if (doc && doc.readyState !== "loading" && doc.location.href !== "about:blank") {
         if (options.isReady(doc)) return finish();
         const html = doc.documentElement?.outerHTML ?? "";
+        if (!scripts && doc.readyState === "complete") {
+          // Nothing will change in a script-less frame: it is a challenge or an error page.
+          return finish(new FetchError("Page not available without scripts", url, undefined, looksLikeChallenge(html)));
+        }
         const elapsed = Date.now() - start;
         if (!revealed && elapsed > revealAfterMs && looksLikeChallenge(html)) {
           revealed = true;

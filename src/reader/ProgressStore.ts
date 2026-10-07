@@ -111,6 +111,8 @@ export interface Settings {
   ttsEngine: TtsEngine;
   azureRegion: string;
   azureVoice: string;
+  /** Azure sentences synthesized ahead of playback. */
+  azureBuffer: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -122,6 +124,7 @@ export const DEFAULT_SETTINGS: Settings = {
   ttsEngine: "system",
   azureRegion: "eastasia",
   azureVoice: "zh-CN-XiaoxiaoNeural",
+  azureBuffer: 3,
 };
 
 export const RATE_OPTIONS = [0.75, 0.85, 0.9, 1.0, 1.1, 1.2, 1.35, 1.5];
@@ -163,6 +166,7 @@ export function sanitizeSettings(s: Settings): Settings {
         : DEFAULT_SETTINGS.azureRegion,
     azureVoice:
       typeof s.azureVoice === "string" && /^[A-Za-z0-9-]+$/.test(s.azureVoice) ? s.azureVoice : DEFAULT_SETTINGS.azureVoice,
+    azureBuffer: Math.round(clamp(s.azureBuffer, 1, 10, DEFAULT_SETTINGS.azureBuffer)),
   };
 }
 

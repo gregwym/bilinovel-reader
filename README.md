@@ -60,7 +60,8 @@ https://gregwym.github.io/bilinovel-reader/bili-reader.user.js
 - 密钥保存在 Userscripts 的私有存储（`GM.setValue`）中，网页脚本读不到；只有在不支持该 API 的管理器里才退回到 `localStorage`。
 - 请求通过 `GM.xmlHttpRequest` 直接发往 `{区域}.tts.speech.microsoft.com`，正在朗读的文字会发送给微软。
 - 设置页显示的「本月约用」是本机估算，以 Azure 后台计量为准。
-- 每段约 300 字一次请求，并会预取下一句以减少停顿。
+- 每次请求约 300 字；可设置「预缓冲」1–8 句（默认 3 句，最多 2 个并发请求），跳转后的第一句会截短以便尽快开始播放。
+- 出错时按类型处理：网络/限流/服务器错误会先重试，仍失败则这一句临时用系统语音，20 秒起逐步延长后自动重试 Azure；额度用完 30 分钟后重试；密钥错误需修改设置。设置里也可「立即重试 Azure」。
 
 ## 开发
 
@@ -74,6 +75,8 @@ npm run serve      # 在局域网提供 dist/，iPhone 打开 http://<电脑IP>:
 ```
 
 也可以直接把 `dist/bili-reader.user.js` 的内容复制到 Userscripts 的新建脚本里测试。
+
+遇到解析问题时，可在 ⋯ 中点「复制诊断信息」（只含页面地址、加载方式和段落计数，不含正文）。
 
 调试日志：在章节页的控制台执行 `localStorage.setItem("biliReader.debug", "1")` 后刷新（Mac Safari「开发」菜单可连接 iPhone 查看）。
 
@@ -115,8 +118,10 @@ src/
 - 长章节被拆成 `{章节号}.html`、`{章节号}_2.html`… 多个网页；最后一页的「下一页」变为「下一章」，卷末则指向目录。
 - **服务器返回的段落顺序是打乱的**：`/scripts/chapterlog.js` 在浏览器里按章节号做种子、用 LCG 驱动的 Fisher–Yates 还原（前 20 段不动）。`fetch` 回来的 HTML 不会执行脚本，所以本项目自行还原，并在运行时从 chapterlog.js 中提取常量（失败时用已知默认值）。
 - 正文里混有广告、`<x1234>` 之类的反爬标签和私有区（PUA）字符，解析时会清理/替换；图片 URL 可能使用形近字符（如 `𝘣`）。
-- `chapterlog.js` 还原段落后，还会复制若干前文段落作为诱饵插入正文，并用动态 CSS 隐藏；解析渲染后的页面时按计算样式剔除这些隐藏段落。
-- 站点在 Cloudflare 之后，脚本发起的 `fetch` 可能被要求人机验证。遇到这种情况会改用隐藏的同源 iframe 加载后续页面（正常的页面导航，站点脚本会自行完成还原）；如果验证需要手动操作，会在阅读器内显示验证页面，完成后自动继续。
+- `chapterlog.js` 还原段落后，还会复制若干段落作为诱饵随机插入正文，并用动态 CSS 隐藏。
+- 因此页面通过**禁用脚本的同源 iframe**（`sandbox="allow-same-origin"`）加载：拿到的是服务器原始 HTML，站点脚本不会执行，诱饵根本不会产生；站点 CSS 仍生效，再按实际渲染结果（`display`、透明度、字号、颜色、裁剪、尺寸和位置）剔除不可见元素；段落顺序由本项目按 chapterlog.js 中的常量还原。这同时是正常的页面导航，避开了 Cloudflare 对脚本 `fetch` 的拦截。
+- 遇到人机验证或无法读取 chapterlog.js 时，改用允许脚本的 iframe（必要时在阅读器内显示验证页面），读取渲染结果并剔除不可见段落。
+- 打开的第一页会同时与浏览器中已渲染的页面比对段落顺序（结果见「复制诊断信息」）。
 
 参考并改编了以下 MIT 许可项目中的思路与数据（见 `THIRD_PARTY_NOTICES.md`）：
 [Montaro2017/bili_novel_packer](https://github.com/Montaro2017/bili_novel_packer)、

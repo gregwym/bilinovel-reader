@@ -44,7 +44,7 @@ export const AZURE_PRESET_VOICES: AzureVoice[] = [
 
 const OUTPUT_FORMAT = "audio-24khz-48kbitrate-mono-mp3";
 const REQUEST_TIMEOUT_MS = 20_000;
-const CACHE_SIZE = 8;
+const PREFETCH_CONCURRENCY = 2;
 
 export function azureTtsEndpoint(region: string): string {
   return `https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`;
@@ -81,13 +81,21 @@ export function billableChars(text: string): number {
 }
 
 /** Maps an HTTP failure to a SpeechEngineError code the UI can explain. */
-export function azureErrorCode(status: number): string {
+/**
+ * Maps an HTTP failure to an error code. 429 means short-term throttling
+ * unless the body mentions the (monthly) quota.
+ */
+export function azureErrorCode(status: number, body = ""): string {
   if (status === 401) return "auth";
   if (status === 403) return "quota";
-  if (status === 429) return "quota";
+  if (status === 429) return /quota/i.test(body) ? "quota" : "throttled";
   if (status === 400) return "bad-request";
+  if (status >= 500) return "server";
   return `http-${status}`;
 }
+
+/** Errors that usually go away by themselves (retry soon). */
+export const TRANSIENT_AZURE_ERRORS = new Set(["network", "throttled", "server", "audio-error", "timeout"]);
 
 export function describeAzureError(code: string): string {
   switch (code) {
@@ -96,7 +104,13 @@ export function describeAzureError(code: string): string {
     case "auth":
       return "Azure 密钥或区域不正确";
     case "quota":
-      return "Azure 免费额度已用完或请求过于频繁";
+      return "Azure 免费额度已用完";
+    case "throttled":
+      return "Azure 请求过于频繁";
+    case "server":
+      return "Azure 服务暂时出错";
+    case "audio-error":
+      return "音频播放出错";
     case "network":
       return "无法连接 Azure";
     case "bad-request":
@@ -143,6 +157,10 @@ export interface AzureEngineOptions {
 
 export class AzureSpeechEngine implements SpeechEngine {
   readonly maxChunkLength = 300;
+  readonly firstChunkLength = 80;
+  prefetchCount = 3;
+  private prefetchQueue: { text: string; rate: number }[] = [];
+  private prefetchActive = 0;
   private readonly request: (req: HttpRequest) => Promise<HttpResponse>;
   private readonly audio: HTMLAudioElement;
   private readonly cache = new Map<string, Promise<Blob>>();
@@ -175,8 +193,33 @@ export class AzureSpeechEngine implements SpeechEngine {
     }
   }
 
-  prefetch(text: string, options: SpeakOptions): void {
-    this.synthesize(text, options.rate).catch(() => undefined);
+  /** Number of upcoming chunks to synthesize ahead (user setting). */
+  setPrefetchCount(n: number): void {
+    this.prefetchCount = Math.max(0, Math.min(10, Math.round(n)));
+  }
+
+  prefetch(texts: string[], options: SpeakOptions): void {
+    const cfg = this.getConfig();
+    if (!cfg?.key) return;
+    // Newest hint wins: drop queued (not yet started) work for an old position.
+    this.prefetchQueue = texts
+      .slice(0, this.prefetchCount)
+      .filter((t) => !this.cache.has(this.cacheKey(cfg, t, options.rate)))
+      .map((text) => ({ text, rate: options.rate }));
+    this.pumpPrefetch();
+  }
+
+  private pumpPrefetch(): void {
+    while (this.prefetchActive < PREFETCH_CONCURRENCY && this.prefetchQueue.length) {
+      const job = this.prefetchQueue.shift()!;
+      this.prefetchActive++;
+      this.synthesize(job.text, job.rate)
+        .catch(() => undefined)
+        .finally(() => {
+          this.prefetchActive--;
+          this.pumpPrefetch();
+        });
+    }
   }
 
   async speak(text: string, options: SpeakOptions): Promise<"done" | "cancelled"> {
@@ -233,11 +276,15 @@ export class AzureSpeechEngine implements SpeechEngine {
     settle?.("cancelled");
   }
 
+  private cacheKey(cfg: AzureConfig, text: string, rate: number): string {
+    return `${cfg.region}|${cfg.voice}|${rate}|${text}`;
+  }
+
   /** Fetches (or reuses) synthesized audio for a chunk. */
   synthesize(text: string, rate: number): Promise<Blob> {
     const cfg = this.getConfig();
     if (!cfg?.key || !cfg.region) return Promise.reject(new SpeechEngineError("config"));
-    const cacheKey = `${cfg.region}|${cfg.voice}|${rate}|${text}`;
+    const cacheKey = this.cacheKey(cfg, text, rate);
     let pending = this.cache.get(cacheKey);
     if (pending) {
       // Refresh LRU position.
@@ -248,7 +295,9 @@ export class AzureSpeechEngine implements SpeechEngine {
     pending = this.fetchAudio(cfg, text, rate);
     this.cache.set(cacheKey, pending);
     pending.catch(() => this.cache.delete(cacheKey));
-    while (this.cache.size > CACHE_SIZE) this.cache.delete(this.cache.keys().next().value!);
+    // Room for the buffered chunks plus a few recent ones (pause/resume, rate change).
+    const capacity = Math.max(8, this.prefetchCount * 2 + 4);
+    while (this.cache.size > capacity) this.cache.delete(this.cache.keys().next().value!);
     return pending;
   }
 
@@ -269,8 +318,9 @@ export class AzureSpeechEngine implements SpeechEngine {
           timeoutMs: REQUEST_TIMEOUT_MS,
         });
       } catch (err) {
-        if (err instanceof NetworkError && attempt < 1) {
-          await wait(1500);
+        // Flaky mobile networks: retry with backoff before giving up.
+        if (err instanceof NetworkError && attempt < 2) {
+          await wait(1000 * 3 ** attempt);
           continue;
         }
         throw new SpeechEngineError("network");
@@ -279,13 +329,13 @@ export class AzureSpeechEngine implements SpeechEngine {
         this.options.onUsage?.(billableChars(text));
         return new Blob([res.body], { type: "audio/mpeg" });
       }
-      // 429 is also used for short-term throttling (F0: 20 requests/min): retry once.
-      if (res.status === 429 && attempt < 1) {
-        await wait(3000);
+      const code = azureErrorCode(res.status, bodyText(res));
+      if ((code === "throttled" || code === "server") && attempt < 2) {
+        await wait(code === "throttled" ? 3000 * (attempt + 1) : 1000 * 3 ** attempt);
         continue;
       }
       log.warn("Azure TTS failed", res.status, bodyText(res).slice(0, 200));
-      throw new SpeechEngineError(azureErrorCode(res.status));
+      throw new SpeechEngineError(code);
     }
   }
 
