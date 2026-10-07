@@ -37,6 +37,9 @@ export interface ViewCallbacks {
   onAzureKey(key: string): void;
   /** Speak a short sample with the Azure voice (called from a tap). */
   onAzureTest(): void;
+  /** Try Azure again now after it fell back to the system voice. */
+  onAzureRetry(): void;
+  onCopyDiagnostics(): void;
   onOpenOriginal(): void;
   onRestartChapter(): void;
 }
@@ -91,6 +94,7 @@ export class ReaderView {
   private azureKeySet = false;
   private azureStatus = "";
   private azureUsage = 0;
+  private azureFallback = false;
   private systemDark = globalThis.matchMedia?.("(prefers-color-scheme: dark)");
 
   constructor(
@@ -494,7 +498,14 @@ export class ReaderView {
     this.renderSheetIfOpen();
   }
 
-  setAzureState(state: { voices?: AzureVoice[]; keySet?: boolean; status?: string; usage?: number }): void {
+  setAzureState(state: {
+    voices?: AzureVoice[];
+    keySet?: boolean;
+    status?: string;
+    usage?: number;
+    fallback?: boolean;
+  }): void {
+    if (state.fallback !== undefined) this.azureFallback = state.fallback;
     if (state.voices) this.azureVoices = state.voices.length ? state.voices : AZURE_PRESET_VOICES;
     if (state.keySet !== undefined) this.azureKeySet = state.keySet;
     if (state.status !== undefined) this.azureStatus = state.status;
@@ -638,6 +649,7 @@ export class ReaderView {
         { class: "br-sheet-actions" },
         h("button", { class: "br-btn", onclick: () => (close(), this.cb.onRestartChapter()) }, "从本章开头阅读"),
         h("button", { class: "br-btn", onclick: () => (close(), this.cb.onOpenOriginal()) }, "打开当前页原网页"),
+        h("button", { class: "br-btn", onclick: () => this.cb.onCopyDiagnostics() }, "复制诊断信息"),
         h("button", { class: "br-btn", onclick: () => (close(), this.cb.onExit()) }, "退出阅读模式"),
         h("button", { class: "br-btn primary", onclick: close }, "完成"),
       ),
@@ -690,6 +702,7 @@ export class ReaderView {
       "div",
       { class: "br-seg" },
       h("button", { onclick: () => this.cb.onAzureTest() }, "试听"),
+      this.azureFallback ? h("button", { onclick: () => this.cb.onAzureRetry() }, "立即重试 Azure") : null,
       this.azureKeySet ? h("button", { onclick: () => this.cb.onAzureKey("") }, "清除密钥") : null,
     );
 
@@ -697,6 +710,20 @@ export class ReaderView {
       row("密钥", keyInput),
       row("区域", regionInput),
       row("声音", voiceSelect),
+      row(
+        "预缓冲",
+        h(
+          "div",
+          { class: "br-seg" },
+          ...[1, 3, 5, 8].map((n) =>
+            h(
+              "button",
+              { "aria-pressed": s.azureBuffer === n ? "true" : "false", onclick: () => this.update({ azureBuffer: n }) },
+              `${n} 句`,
+            ),
+          ),
+        ),
+      ),
       row("", actions),
       h("div", { class: "br-note" }, this.azureStatus ? `${this.azureStatus}\n${usage}` : usage),
     ];

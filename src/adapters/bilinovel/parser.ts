@@ -137,22 +137,49 @@ export function markStyleRuleHidden(doc: Document): void {
   }
 }
 
+const TRANSPARENT = /^(transparent|rgba\([^)]*,\s*0(\.0+)?\))$/i;
+
 /**
- * Copies "is this rendered?" from a live element tree onto its clone, using
- * computed styles (covers CSS inserted through CSSOM, which a clone loses).
- * `clone` must be an unmodified deep clone of `live`. Returns the number of
- * hidden non-empty paragraphs (decoys).
+ * Is a rendered element invisible to the reader? Covers the usual ways of
+ * hiding text: display/visibility/opacity, zero font size, transparent
+ * colour, zero-size or clipped boxes, and positions far outside the content.
+ * Geometry checks only apply when layout is available (`contentRect`).
  */
-export function markComputedHidden(live: Element, clone: Element, win: Window): number {
+export function isInvisible(el: Element, win: Window, contentRect?: DOMRect): boolean {
+  const cs = win.getComputedStyle(el);
+  if (cs.display === "none" || cs.visibility === "hidden" || cs.visibility === "collapse") return true;
+  if (parseFloat(cs.opacity) === 0) return true;
+  const check = (el as Element & { checkVisibility?: (o?: object) => boolean }).checkVisibility;
+  if (typeof check === "function" && !check.call(el, { opacityProperty: true, visibilityProperty: true })) return true;
+  const tag = el.tagName.toLowerCase();
+  if (tag === "img" || !el.textContent?.trim()) return false;
+  if (parseFloat(cs.fontSize) < 2) return true;
+  if (TRANSPARENT.test(cs.color.trim())) return true;
+  if (/^rect\(0(px)?,?\s*0(px)?,?\s*0(px)?,?\s*0(px)?\)$/.test(cs.clip) || /inset\((50|100)%\)/.test(cs.clipPath)) return true;
+  if (contentRect && contentRect.width > 0 && contentRect.height > 0) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) return true;
+    const margin = 40;
+    if (r.right < contentRect.left - margin || r.left > contentRect.right + margin) return true;
+    if (r.bottom < contentRect.top - margin || r.top > contentRect.bottom + margin) return true;
+  }
+  return false;
+}
+
+/**
+ * Marks invisible elements of a rendered tree onto `target` (the same tree,
+ * or an unmodified deep clone of it, so the live page is never touched).
+ * Returns the number of invisible non-empty paragraphs.
+ */
+export function markComputedHidden(live: Element, target: Element, win: Window): number {
   const liveEls = live.querySelectorAll("*");
-  const cloneEls = clone.querySelectorAll("*");
-  if (liveEls.length !== cloneEls.length) return 0;
+  const targetEls = target === live ? liveEls : target.querySelectorAll("*");
+  if (liveEls.length !== targetEls.length) return 0;
+  const contentRect = live.getBoundingClientRect();
   let n = 0;
   liveEls.forEach((el, i) => {
-    const cs = win.getComputedStyle(el);
-    if (cs.display === "none" || cs.visibility === "hidden") {
-      cloneEls[i].setAttribute(HIDDEN_ATTR, "");
-      // Count hidden paragraphs only (scripts/styles are display:none too).
+    if (isInvisible(el, win, contentRect)) {
+      targetEls[i].setAttribute(HIDDEN_ATTR, "");
       if (el.tagName.toLowerCase() === "p" && el.textContent?.trim()) n++;
     }
   });

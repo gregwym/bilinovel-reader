@@ -198,19 +198,44 @@ describe("sortChineseVoices", () => {
 
 describe("SpeechPlayer engine integration", () => {
   it("prefetches the next chunk/paragraph and can switch engines mid-play", async () => {
-    const prefetched: string[] = [];
+    const prefetched: string[][] = [];
     const a = new FakeEngine();
     a.hold = true;
-    (a as FakeEngine & { prefetch: (t: string) => void }).prefetch = (t: string) => prefetched.push(t);
+    (a as FakeEngine & { prefetch: (t: string[]) => void }).prefetch = (t: string[]) => void prefetched.push(t);
     const b = new FakeEngine();
     b.hold = true;
     const player = new SpeechPlayer(a, new FakeSource(["a", "b"]));
     player.play();
     await settle();
-    expect(prefetched).toEqual(["文本b。"]);
+    expect(prefetched).toEqual([["文本b。"]]);
     player.setEngine(b);
     await settle();
     expect(b.spoken).toEqual(["文本a。"]);
     expect(player.state).toBe("playing");
+  });
+});
+
+describe("SpeechPlayer buffering hints", () => {
+  it("asks the engine for the next N chunks across paragraphs", async () => {
+    const hints: string[][] = [];
+    const e = new FakeEngine() as FakeEngine & { prefetch: (t: string[]) => void; prefetchCount: number };
+    e.hold = true;
+    e.prefetchCount = 3;
+    e.prefetch = (t) => void hints.push(t);
+    new SpeechPlayer(e, new FakeSource(["a", "b", "c", "d", "e"])).play();
+    await settle();
+    expect(hints[0]).toEqual(["文本b。", "文本c。", "文本d。"]);
+  });
+
+  it("starts with a short first chunk after a jump, then normal chunks", async () => {
+    const e = new FakeEngine() as FakeEngine & { maxChunkLength: number; firstChunkLength: number };
+    e.maxChunkLength = 60;
+    e.firstChunkLength = 10;
+    const src = new FakeSource(["a"]);
+    src.text.a = "第一句话有点长，需要分开读。第二句话也有一些长度。第三句。";
+    new SpeechPlayer(e, src).play("a");
+    await settle();
+    expect(e.spoken[0].length).toBeLessThanOrEqual(15);
+    expect(e.spoken.join("")).toBe(src.text.a);
   });
 });

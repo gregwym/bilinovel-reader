@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { BilinovelAdapter } from "../src/adapters/bilinovel";
 import { parseChapterLogScript } from "../src/adapters/bilinovel/deobfuscate";
-import { parseBilinovelDocument } from "../src/adapters/bilinovel/parser";
+import { isInvisible, parseBilinovelDocument } from "../src/adapters/bilinovel/parser";
 import { FetchError, type FrameHost } from "../src/adapters/types";
 import { RequestQueue } from "../src/utils/RequestQueue";
 import { ORIGIN, fixture, loadFixture } from "./helpers";
@@ -56,16 +56,6 @@ describe("rendered page (site scripts already ran)", () => {
     expect(page.paragraphs.map((p) => p.text)).toEqual(expected);
   });
 
-  it("loadCurrentPage trusts a rendered page that shows decoys (no request)", async () => {
-    const queue = new RequestQueue({
-      fetchImpl: (() => {
-        throw new Error("should not fetch");
-      }) as typeof fetch,
-    });
-    const page = await new BilinovelAdapter(queue).loadCurrentPage(document, URL_7);
-    expect(page.paragraphs).toHaveLength(40);
-  });
-
   it("does not modify the live page", async () => {
     const before = document.getElementById("acontent")!.innerHTML;
     await new BilinovelAdapter().parseRenderedDocument(document, URL_7);
@@ -73,63 +63,112 @@ describe("rendered page (site scripts already ran)", () => {
   });
 });
 
-describe("bot challenge on fetch", () => {
-  it("switches to frame loading and stays there", async () => {
-    let fetches = 0;
-    const queue = new RequestQueue({
-      minIntervalMs: 0,
-      fetchImpl: (async () => {
-        fetches++;
-        return { ok: false, status: 403, text: async () => "<title>Just a moment...</title>" } as Response;
-      }) as typeof fetch,
-    });
-    const framed: string[] = [];
-    const frameLoader = (async (url: string) => {
-      framed.push(url);
-      renderLikeSite("shuffled-2026-05.html", "180207");
-      return { doc: document, win: window, dispose: () => undefined };
-    }) as unknown as ConstructorParameters<typeof BilinovelAdapter>[2];
-    const host: FrameHost = { attach() {}, reveal() {}, detach() {} };
-    const adapter = new BilinovelAdapter(queue, host, frameLoader);
+const TEMPLATE_2026_05 = { fixedLength: 20, seedMultiplier: 135, seedOffset: 234, a: 9302, c: 49397, mod: 233280 };
 
-    const p1 = await adapter.fetchPage(URL_7.href);
-    expect(p1.paragraphs.map((p) => p.text)).toEqual(expected);
-    await adapter.fetchPage(`${ORIGIN}/novel/5369/180207_2.html`);
-    expect(fetches).toBe(1); // second page went straight to the frame
-    expect(framed).toHaveLength(2);
+function cacheTemplate(): void {
+  localStorage.setItem(
+    "biliReader.chapterlogTemplate",
+    JSON.stringify({ src: `${ORIGIN}/scripts/chapterlog.js?v1006b8-5`, template: TEMPLATE_2026_05 }),
+  );
+}
+
+type Loader = ConstructorParameters<typeof BilinovelAdapter>[2];
+const host: FrameHost = { attach() {}, reveal() {}, detach() {} };
+const queue = () => new RequestQueue({ minIntervalMs: 0 });
+
+/**
+ * Fake frame loader: a script-less frame gets the server HTML (or a challenge),
+ * a scripted frame gets the page after the site's chapterlog.js ran.
+ */
+function fakeFrames(opts: { staticChallenge?: boolean } = {}) {
+  const calls: string[] = [];
+  const loader = (async (url: string, _host: FrameHost, o: { scripts?: boolean }) => {
+    calls.push(`${o.scripts ? "scripted" : "static"} ${new URL(url).pathname}`);
+    if (!o.scripts) {
+      if (opts.staticChallenge) throw new FetchError("challenge", url, 403, true);
+      const doc = new DOMParser().parseFromString(fixture("shuffled-2026-05.html"), "text/html");
+      return { doc, win: window, dispose: () => undefined };
+    }
+    renderLikeSite("shuffled-2026-05.html", "180207");
+    return { doc: document, win: window, dispose: () => undefined };
+  }) as unknown as Loader;
+  return { loader, calls };
+}
+
+describe("page loading through frames", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    cacheTemplate();
   });
 
-  it("surfaces non-challenge fetch errors", async () => {
-    const queue = new RequestQueue({
-      minIntervalMs: 0,
-      maxRetries: 0,
-      fetchImpl: (async () => ({ ok: false, status: 404, text: async () => "nope" }) as Response) as typeof fetch,
-    });
-    await expect(new BilinovelAdapter(queue).fetchPage(URL_7.href)).rejects.toBeInstanceOf(FetchError);
+  it("loads server HTML in a script-less frame: no decoys can exist, order restored", async () => {
+    const { loader, calls } = fakeFrames();
+    const page = await new BilinovelAdapter(queue(), host, loader).fetchPage(URL_7.href);
+    expect(page.paragraphs.map((p) => p.text)).toEqual(expected);
+    expect(calls).toEqual(["static /novel/5369/180207.html"]);
+  });
+
+  it("falls back to a scripted frame (rendered, decoys filtered) on a challenge", async () => {
+    const { loader, calls } = fakeFrames({ staticChallenge: true });
+    const adapter = new BilinovelAdapter(queue(), host, loader);
+    const page = await adapter.fetchPage(URL_7.href);
+    expect(page.paragraphs.map((p) => p.text)).toEqual(expected);
+    expect(calls).toEqual(["static /novel/5369/180207.html", "scripted /novel/5369/180207.html"]);
+    expect(adapter.getDiagnostics().some((d) => d.reason === "challenge")).toBe(true);
+  });
+
+  it("uses a scripted frame when the shuffle constants are unknown", async () => {
+    localStorage.clear();
+    const fetchSpy = globalThis.fetch;
+    globalThis.fetch = (async () => ({ text: async () => "not a script" }) as Response) as typeof fetch;
+    try {
+      const { loader, calls } = fakeFrames();
+      const page = await new BilinovelAdapter(queue(), host, loader).fetchPage(URL_7.href);
+      expect(page.paragraphs.map((p) => p.text)).toEqual(expected);
+      expect(calls[1]).toBe("scripted /novel/5369/180207.html");
+    } finally {
+      globalThis.fetch = fetchSpy;
+    }
+  });
+
+  it("current page: loads the server HTML and cross-checks it against the rendered page", async () => {
+    renderLikeSite("shuffled-2026-05.html", "180207");
+    const { loader } = fakeFrames();
+    const adapter = new BilinovelAdapter(queue(), host, loader);
+    const page = await adapter.loadCurrentPage(document, URL_7);
+    expect(page.paragraphs).toHaveLength(40);
+    const check = adapter.getDiagnostics().find((d) => d.method === "cross-check");
+    expect(check).toMatchObject({ match: true, static: 40, live: 40 });
+  });
+
+  it("current page: falls back to the rendered page when loading fails", async () => {
+    renderLikeSite("shuffled-2026-05.html", "180207");
+    const loader = (async () => {
+      throw new FetchError("offline", URL_7.href);
+    }) as unknown as Loader;
+    const page = await new BilinovelAdapter(queue(), host, loader).loadCurrentPage(document, URL_7);
+    expect(page.paragraphs.map((p) => p.text)).toEqual(expected);
   });
 });
 
-describe("loadCurrentPage without evidence of de-obfuscation", () => {
-  it("loads the page instead of trusting a scrambled live DOM", async () => {
-    // Live DOM still scrambled (site script not run), with a hidden <script> in the content.
-    const html = fixture("paginated-page-1.html");
-    document.documentElement.innerHTML = html.replace(/^[\s\S]*?<html[^>]*>/i, "").replace(/<\/html>\s*$/i, "");
-    let fetched = 0;
-    const queue = new RequestQueue({
-      minIntervalMs: 0,
-      fetchImpl: (async () => (fetched++, { ok: true, status: 200, text: async () => html }) as Response) as typeof fetch,
-    });
-    const adapter = new BilinovelAdapter(queue);
-    // Avoid a network fetch of chapterlog.js: provide the constants through the cache.
-    localStorage.setItem(
-      "biliReader.chapterlogTemplate",
-      JSON.stringify({
-        src: `${ORIGIN}/scripts/chapterlog.js?v1006b8-5`,
-        template: { fixedLength: 20, seedMultiplier: 127, seedOffset: 235, a: 9302, c: 49397, mod: 233280 },
-      }),
-    );
-    const page = await adapter.loadCurrentPage(document, new URL(`${ORIGIN}/novel/5369/180204.html`));
-    expect(fetched).toBe(1);
-    expect(page.paragraphs[25].text).toContain("第26段");
+describe("isInvisible", () => {
+  const make = (style: string) => {
+    document.body.innerHTML = `<div id="c"><p style="${style}">一段文字</p></div>`;
+    return document.querySelector("p")!;
+  };
+  it.each([
+    ["display:none"],
+    ["visibility:hidden"],
+    ["opacity:0"],
+    ["font-size:0"],
+    ["color:transparent"],
+    ["color:rgba(0, 0, 0, 0)"],
+    ["position:absolute;clip:rect(0px, 0px, 0px, 0px)"],
+  ])("treats %s as hidden", (style) => {
+    expect(isInvisible(make(style), window)).toBe(true);
+  });
+
+  it("keeps normal paragraphs", () => {
+    expect(isInvisible(make("color:#333;font-size:18px"), window)).toBe(false);
   });
 });

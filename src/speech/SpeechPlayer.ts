@@ -61,6 +61,10 @@ export class SpeechPlayer {
   private _state: PlayerState = "idle";
   private current?: string;
   private chunkIndex = 0;
+  /** Chunks of the current paragraph; stable while it is being read (chunkIndex points into it). */
+  private chunks?: { id: string; list: string[] };
+  /** Next paragraph entered should start with a short chunk (after a jump or a fresh start). */
+  private quickStart = false;
   /** Incremented to invalidate the running loop. */
   private generation = 0;
   private rate: number;
@@ -94,9 +98,13 @@ export class SpeechPlayer {
     if (fromId) {
       this.current = fromId;
       this.chunkIndex = 0;
+      this.chunks = undefined;
+      this.quickStart = true;
     } else if (!this.current || this._state === "idle") {
       this.current = this.source.cursor() ?? this.current;
       this.chunkIndex = 0;
+      this.chunks = undefined;
+      this.quickStart = true;
     }
     if (!this.current) return;
     this.restartLoop();
@@ -124,6 +132,7 @@ export class SpeechPlayer {
     this.generation++;
     this.engine.stop();
     this.chunkIndex = 0;
+    this.chunks = undefined;
     this.setState("idle");
   }
 
@@ -189,20 +198,37 @@ export class SpeechPlayer {
     }
   }
 
-  /** First chunk of the next text paragraph, if it is already loaded. */
-  private firstChunkAfter(id: string): string | undefined {
-    let next = this.source.next(id);
-    for (let hops = 0; hops < 5 && next !== "pending" && next !== "end"; hops++) {
-      const text = this.source.textOf(next);
-      if (text) return splitIntoChunks(text, this.engine.maxChunkLength)[0];
-      next = this.source.next(next);
+  /** Chunk list for a paragraph, computed once when it is entered. */
+  private chunksFor(id: string, text: string): string[] {
+    if (this.chunks?.id === id) return this.chunks.list;
+    let list = splitIntoChunks(text, this.engine.maxChunkLength);
+    const first = this.engine.firstChunkLength;
+    if (this.quickStart && first && this.chunkIndex === 0 && list[0] && list[0].length > first * 1.5) {
+      list = [...splitIntoChunks(list[0], first), ...list.slice(1)];
     }
-    return undefined;
+    this.quickStart = false;
+    this.chunks = { id, list };
+    return list;
+  }
+
+  /** The next `n` chunks after the current one, across already-loaded paragraphs. */
+  private upcomingChunks(id: string, chunks: string[], index: number, n: number): string[] {
+    const out = chunks.slice(index + 1, index + 1 + n);
+    let cursor: string | "pending" | "end" = id;
+    for (let hops = 0; out.length < n && hops < 20; hops++) {
+      cursor = this.source.next(cursor);
+      if (cursor === "pending" || cursor === "end") break;
+      const text = this.source.textOf(cursor);
+      if (text) out.push(...splitIntoChunks(text, this.engine.maxChunkLength).slice(0, n - out.length));
+    }
+    return out;
   }
 
   private moveTo(id: string): void {
     this.current = id;
     this.chunkIndex = 0;
+    this.chunks = undefined;
+    this.quickStart = true;
     if (this.isActive) this.restartLoop();
     else this.events.onParagraph?.(id);
   }
@@ -232,13 +258,15 @@ export class SpeechPlayer {
         this.events.onParagraph?.(id);
       }
       if (text) {
-        const chunks = splitIntoChunks(text, this.engine.maxChunkLength);
+        const chunks = this.chunksFor(id, text);
         while (alive() && this.chunkIndex < chunks.length) {
           try {
             const opts = { rate: this.rate, voiceURI: this.voiceURI };
             const speaking = this.engine.speak(chunks[this.chunkIndex], opts);
-            const upcoming = this.chunkIndex + 1 < chunks.length ? chunks[this.chunkIndex + 1] : this.firstChunkAfter(id);
-            if (upcoming) this.engine.prefetch?.(upcoming, opts);
+            if (this.engine.prefetch) {
+              const upcoming = this.upcomingChunks(id, chunks, this.chunkIndex, this.engine.prefetchCount ?? 1);
+              if (upcoming.length) this.engine.prefetch(upcoming, opts);
+            }
             const r = await speaking;
             if (!alive()) return;
             if (r === "cancelled") {
@@ -288,6 +316,7 @@ export class SpeechPlayer {
       }
       this.current = next;
       this.chunkIndex = 0;
+      this.chunks = undefined;
     }
   }
 }
