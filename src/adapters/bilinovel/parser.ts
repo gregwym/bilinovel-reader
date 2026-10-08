@@ -12,7 +12,7 @@
  *   <script src="/scripts/chapterlog.js?v…">  paragraph shuffle (see deobfuscate.ts)
  */
 
-import { ParseError, type PageContent, type Paragraph } from "../types";
+import { ParseError, type PageContent, type PageRef, type Paragraph } from "../types";
 import {
   DEFAULT_SHUFFLE_TEMPLATE,
   decodeText,
@@ -21,7 +21,7 @@ import {
   restoreParagraphOrder,
   type ShuffleTemplate,
 } from "./deobfuscate";
-import { classifyNext, stripPageSuffix } from "./pagination";
+import { classifyNext, pageCountFromTitle, stripPageSuffix } from "./pagination";
 import { buildPageUrl, parseChapterUrl, resolveHref } from "./url";
 import { log } from "../../utils/log";
 
@@ -268,6 +268,19 @@ function findNext(doc: Document, base: URL, rp: ReadParams): { nextUrl?: string;
   return { nextUrl, linkText: match?.textContent?.trim() || undefined };
 }
 
+const PREV_TEXT = /上一[页頁章节節]/;
+
+/** The site's "previous" link (ReadParams preferred), if it points at a page of the same book. */
+function findPrev(doc: Document, base: URL, rp: ReadParams, bookId: string): PageRef | undefined {
+  const anchor =
+    doc.querySelector("a.prevlink") ??
+    Array.from(doc.querySelectorAll("#footlink a, .mlfy_page a")).find((a) => PREV_TEXT.test(a.textContent ?? ""));
+  const url = resolveHref(rp.url_previous, base) ?? resolveHref(anchor?.getAttribute("href"), base);
+  const info = url ? parseChapterUrl(url) : null;
+  if (!url || !info || info.bookId !== bookId) return undefined;
+  return { url, chapterId: info.chapterId, pageIndex: info.pageIndex };
+}
+
 /**
  * Parses a Bilinovel chapter page. `doc` is modified (junk removed, paragraphs
  * reordered) so pass a disposable document, not the live page.
@@ -311,8 +324,9 @@ export function parseBilinovelDocument(doc: Document, url: URL, options: ParseOp
     log.warn("Some characters could not be de-obfuscated (private-use-area code points remain)", href);
   }
 
+  const rawTitle = textOf(doc.querySelector("#atitle"));
   const chapterTitle =
-    stripPageSuffix(textOf(doc.querySelector("#atitle"))) ||
+    stripPageSuffix(rawTitle) ||
     stripPageSuffix(decodeText(rp.chaptername ?? "")) ||
     stripPageSuffix(textOf(doc.querySelector("#mlfy_main_text h1, h1"))) ||
     "";
@@ -342,5 +356,7 @@ export function parseBilinovelDocument(doc: Document, url: URL, options: ParseOp
     nextUrl,
     nextType,
     chapterUrl: buildPageUrl(url.origin, bookId, chapterId, 0),
+    pageCount: pageCountFromTitle(rawTitle) ?? (nextType === "same-chapter-page" ? undefined : pageIndex + 1),
+    prev: findPrev(doc, url, rp, bookId),
   };
 }

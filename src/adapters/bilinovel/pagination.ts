@@ -45,3 +45,10 @@ export function classifyNext({ current, nextUrl, linkText }: NextLinkInput): Nex
 export function stripPageSuffix(title: string): string {
   return title.replace(/\s*[（(]\s*\d+\s*\/\s*\d+\s*[）)]\s*$/, "").trim();
 }
+
+/** Total page count from a title such as "第一章（2/3）". */
+export function pageCountFromTitle(title: string): number | undefined {
+  const m = /[（(]\s*\d+\s*\/\s*(\d+)\s*[）)]\s*$/.exec(title);
+  const n = m ? Number(m[1]) : NaN;
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}

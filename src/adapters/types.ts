@@ -26,6 +26,34 @@ export interface PageContent {
   nextType: NextType;
   /** Absolute URL of the logical chapter's first page. */
   chapterUrl: string;
+  /** Number of site pages in this chapter, when the page says so. */
+  pageCount?: number;
+  /** The site's "previous" link (previous page, or the previous chapter). */
+  prev?: PageRef;
+}
+
+/** A chapter page reference. */
+export interface PageRef {
+  url: string;
+  chapterId: string;
+  pageIndex: number;
+}
+
+export interface CatalogChapter {
+  title: string;
+  /** Missing when the catalog only has a placeholder link for it. */
+  chapterId?: string;
+  url?: string;
+}
+
+export interface CatalogVolume {
+  title: string;
+  chapters: CatalogChapter[];
+}
+
+export interface Catalog {
+  bookId: string;
+  volumes: CatalogVolume[];
 }
 
 /** Where an adapter may place an iframe used to load pages (and show bot challenges). */
@@ -54,6 +82,8 @@ export interface SiteAdapter {
   getDiagnostics?(): Record<string, unknown>[];
   /** Lets the UI host the adapter's loader frames. */
   setFrameHost?(host: FrameHost): void;
+  /** Loads the book's table of contents. */
+  fetchCatalog?(bookId: string): Promise<Catalog>;
   /** Builds the URL of a given page of a chapter (used for progress restore). */
   pageUrl(bookId: string, chapterId: string, pageIndex: number): string;
 }

@@ -1,4 +1,4 @@
-import type { FrameHost, Paragraph } from "../adapters/types";
+import type { Catalog, CatalogChapter, FrameHost, Paragraph } from "../adapters/types";
 import type { PlayerState } from "../speech/SpeechPlayer";
 import type { VoiceInfo } from "../speech/VoiceManager";
 import { AZURE_PRESET_VOICES, AzureUsageMeter, type AzureVoice } from "../speech/AzureSpeechEngine";
@@ -42,6 +42,25 @@ export interface ViewCallbacks {
   onCopyDiagnostics(): void;
   onOpenOriginal(): void;
   onRestartChapter(): void;
+  onOpenToc(): void;
+  onTocStep(step: TocStep): void;
+  onTocPage(pageIndex: number): void;
+  onTocChapter(chapter: CatalogChapter): void;
+  onTocRetry(): void;
+  /** The "previous page/chapter" button above the loaded content. */
+  onTopNav(): void;
+}
+
+export type TocStep = "prev-chapter" | "prev-page" | "next-page" | "next-chapter";
+
+export interface TocState {
+  chapterId?: string;
+  chapterTitle?: string;
+  pageIndex?: number;
+  pageCount?: number;
+  catalog?: Catalog;
+  loading: boolean;
+  error?: string;
 }
 
 export const formatRate = (r: number): string => `${Number.isInteger(r * 10) ? r.toFixed(1) : String(r)}x`;
@@ -73,6 +92,9 @@ export class ReaderView {
   private rateLabel!: HTMLElement;
   private rateSelect!: HTMLSelectElement;
   private sheetEl?: HTMLElement;
+  private tocEl?: HTMLElement;
+  private tocState?: TocState;
+  private topNavEl!: HTMLElement;
   private pillEl!: HTMLButtonElement;
   private fatalEl?: HTMLElement;
   private frameLayer!: HTMLElement;
@@ -86,6 +108,8 @@ export class ReaderView {
   private selectedId?: string;
   private lastUserScroll = 0;
   private lastReportedTop?: string;
+  /** Paragraph a restore/jump wants at the top, kept until the user scrolls (content may still be loading). */
+  private anchor?: { id: string; since: number };
   private scrollRaf = 0;
   private chipTimer?: ReturnType<typeof setTimeout>;
   private savedPageStyles?: { html: string; body: string };
@@ -126,6 +150,7 @@ export class ReaderView {
       { class: "br-top" },
       iconBtn(ICONS.back, "退出阅读模式", () => this.cb.onExit()),
       h("div", { class: "br-title" }, this.titleEl, this.subtitleEl),
+      iconBtn(ICONS.toc, "目录", () => this.cb.onOpenToc()),
       iconBtn(ICONS.more, "设置", () => this.openSheet()),
     );
 
@@ -133,7 +158,8 @@ export class ReaderView {
     this.contentEl = h("article", { class: "br-content", lang: "zh" });
     this.statusEl = h("div", { class: "br-status" });
     this.sentinel = h("div", { class: "br-sentinel" });
-    this.scrollEl = h("main", { class: "br-scroll" }, this.contentEl, this.statusEl, this.sentinel);
+    this.topNavEl = h("div", { class: "br-topnav", hidden: true });
+    this.scrollEl = h("main", { class: "br-scroll" }, this.topNavEl, this.contentEl, this.statusEl, this.sentinel);
 
     this.chipEl = h("button", { class: "br-chip", hidden: true }, "▶ 从这里开始朗读");
     this.chipEl.addEventListener("click", () => {
@@ -231,6 +257,7 @@ export class ReaderView {
 
   collapse(): void {
     this.closeSheet();
+    this.closeToc();
     this.root.hidden = true;
     this.pillEl.hidden = false;
     this.unlockPageScroll();
@@ -267,6 +294,7 @@ export class ReaderView {
     this.activeId = undefined;
     this.selectedId = undefined;
     this.lastReportedTop = undefined;
+    this.anchor = undefined;
     this.fatalEl?.remove();
     this.fatalEl = undefined;
     this.scrollEl.hidden = false;
@@ -294,6 +322,7 @@ export class ReaderView {
       frag.append(el);
     }
     section.append(frag);
+    this.realignAnchor();
   }
 
   private renderImage(p: Paragraph): HTMLElement {
@@ -321,6 +350,20 @@ export class ReaderView {
     if (kind === "idle") return;
     this.statusEl.append(h("div", {}, message));
     if (actions.length) this.statusEl.append(this.actionRow(actions, "br-status-actions"));
+  }
+
+  /** Button above the loaded content to load what comes before it (undefined hides it). */
+  setTopNav(label: string | undefined): void {
+    if ((this.topNavEl.textContent || undefined) === label && this.topNavEl.hidden === !label) return;
+    const before = this.topNavEl.offsetHeight;
+    this.topNavEl.replaceChildren();
+    if (label) {
+      this.topNavEl.append(h("button", { class: "br-btn", onclick: () => this.cb.onTopNav() }, label));
+    }
+    this.topNavEl.hidden = !label;
+    // Keep the visible text in place when the button appears/disappears above it.
+    const diff = this.topNavEl.offsetHeight - before;
+    if (diff && this.scrollEl.scrollTop > 0) this.scrollEl.scrollTop += diff;
   }
 
   showBanner(text: string, actions: ViewAction[]): void {
@@ -384,26 +427,34 @@ export class ReaderView {
 
   /** Puts a paragraph near the top of the reading area (used for restore / jumps). */
   scrollToParagraph(id: string): void {
-    const el = this.byId.get(id);
-    if (!el) return;
-    const align = () => {
-      const top = el.getBoundingClientRect().top - this.scrollEl.getBoundingClientRect().top;
-      this.scrollEl.scrollTop += top - 12;
-      this.lastReportedTop = id;
-    };
-    align();
+    if (!this.byId.has(id)) return;
+    this.anchor = { id, since: Date.now() };
+    this.realignAnchor();
     // Images above may still change height while loading; re-align unless the user took over.
-    const start = Date.now();
-    for (const delay of [250, 800, 1600]) {
-      setTimeout(() => {
-        if (this.lastUserScroll < start) align();
-      }, delay);
+    for (const delay of [250, 800, 1600]) setTimeout(() => this.realignAnchor(), delay);
+  }
+
+  /**
+   * Re-applies the pending anchor. Also runs when content is appended: on a
+   * short page the paragraph can only reach the top once more text is below.
+   */
+  private realignAnchor(): void {
+    const a = this.anchor;
+    if (!a) return;
+    const el = this.byId.get(a.id);
+    if (!el || this.lastUserScroll >= a.since || Date.now() - a.since > 60_000) {
+      this.anchor = undefined;
+      return;
     }
+    const top = el.getBoundingClientRect().top - this.scrollEl.getBoundingClientRect().top;
+    this.scrollEl.scrollTop += top - 12;
+    this.lastReportedTop = a.id;
   }
 
   /** Keeps the spoken paragraph in view without fighting a user who is scrolling. */
   follow(id: string): void {
     if (this.userScrolledRecently) return;
+    if (this.anchor?.id !== id) this.anchor = undefined;
     const el = this.byId.get(id);
     if (!el) return;
     const view = this.scrollEl.getBoundingClientRect();
@@ -514,6 +565,122 @@ export class ReaderView {
   }
 
   // ---------------------------------------------------------------------------
+  // Table of contents
+
+  openToc(state: TocState): void {
+    this.closeSheet();
+    this.closeToc();
+    this.tocEl = h("div");
+    this.root.append(this.tocEl);
+    this.tocState = state;
+    this.renderToc(true);
+  }
+
+  updateToc(state: TocState): void {
+    this.tocState = state;
+    if (this.tocEl) this.renderToc(false);
+  }
+
+  closeToc(): void {
+    this.tocEl?.remove();
+    this.tocEl = undefined;
+  }
+
+  get tocOpen(): boolean {
+    return !!this.tocEl;
+  }
+
+  private renderToc(first: boolean): void {
+    const st = this.tocState;
+    if (!this.tocEl || !st) return;
+    const oldList = this.tocEl.querySelector(".br-toc-list");
+    const keepScroll = !first && oldList ? oldList.scrollTop : undefined;
+    const close = () => this.closeToc();
+    const act = (fn: () => void) => () => (close(), fn());
+
+    const pageInfo =
+      st.pageIndex === undefined
+        ? ""
+        : st.pageCount
+          ? `第 ${st.pageIndex + 1} / ${st.pageCount} 页`
+          : `第 ${st.pageIndex + 1} 页`;
+    const step = (label: string, s: TocStep) => h("button", { onclick: act(() => this.cb.onTocStep(s)) }, label);
+
+    let pageRow: HTMLElement | null = null;
+    if (st.pageCount && st.pageCount > 1 && st.pageIndex !== undefined) {
+      const select = h("select", { "aria-label": "跳到本章第几页" });
+      for (let i = 0; i < st.pageCount; i++) select.append(h("option", { value: String(i) }, `第 ${i + 1} 页`));
+      select.value = String(st.pageIndex);
+      select.addEventListener("change", () => {
+        const i = Number(select.value);
+        close();
+        this.cb.onTocPage(i);
+      });
+      pageRow = h("div", { class: "br-row" }, h("span", {}, "本章分页"), select);
+    }
+
+    const list = h("div", { class: "br-toc-list" });
+    let current: HTMLElement | undefined;
+    if (st.catalog) {
+      for (const vol of st.catalog.volumes) {
+        if (vol.title) list.append(h("div", { class: "br-toc-vol" }, vol.title));
+        for (const ch of vol.chapters) {
+          const isCurrent = !!ch.chapterId && ch.chapterId === st.chapterId;
+          const btn = h(
+            "button",
+            {
+              class: `br-toc-ch${ch.url ? "" : " no-link"}`,
+              "aria-current": isCurrent ? "true" : "false",
+              onclick: act(() => this.cb.onTocChapter(ch)),
+            },
+            ch.title,
+          );
+          if (isCurrent) current = btn;
+          list.append(btn);
+        }
+      }
+    } else if (st.loading) {
+      list.append(h("div", { class: "br-toc-msg" }, "正在加载目录…"));
+    } else {
+      list.append(
+        h("div", { class: "br-toc-msg" }, st.error ? `目录加载失败：${st.error}` : "暂无目录"),
+        h("div", { class: "br-toc-msg" }, h("button", { class: "br-btn", onclick: () => this.cb.onTocRetry() }, "重试")),
+      );
+    }
+
+    const sheet = h(
+      "div",
+      { class: "br-sheet br-toc", role: "dialog", "aria-label": "目录" },
+      h("h3", {}, "目录"),
+      h(
+        "div",
+        { class: "br-toc-current" },
+        h("div", { class: "br-toc-current-title" }, st.chapterTitle || "当前章节"),
+        pageInfo ? h("div", { class: "br-toc-current-page" }, pageInfo) : null,
+      ),
+      h(
+        "div",
+        { class: "br-seg br-toc-steps" },
+        step("上一章", "prev-chapter"),
+        step("上一页", "prev-page"),
+        step("下一页", "next-page"),
+        step("下一章", "next-chapter"),
+      ),
+      pageRow,
+      list,
+      h("div", { class: "br-sheet-actions" }, h("button", { class: "br-btn primary", onclick: close }, "关闭")),
+    );
+    this.tocEl.replaceChildren(h("div", { class: "br-sheet-backdrop", onclick: close }), sheet);
+    if (keepScroll !== undefined) list.scrollTop = keepScroll;
+    else if (current) {
+      const target = current;
+      requestAnimationFrame(() => {
+        list.scrollTop = Math.max(0, target.offsetTop - list.offsetTop - list.clientHeight / 2 + target.offsetHeight / 2);
+      });
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Settings
 
   applySettings(s: Settings): void {
@@ -544,6 +711,7 @@ export class ReaderView {
 
   private openSheet(): void {
     this.closeSheet();
+    this.closeToc();
     this.sheetEl = h("div");
     this.root.append(this.sheetEl);
     this.renderSheet();

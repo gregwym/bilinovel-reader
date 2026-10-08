@@ -54,6 +54,8 @@ export interface SavedProgress extends Omit<ReaderPosition, "bookId"> {
   bookTitle?: string;
   chapterTitle?: string;
   url?: string;
+  /** Start of the paragraph's text, to find it again if paragraph indexes shift. */
+  snippet?: string;
   updatedAt: number;
 }
 
@@ -62,7 +64,7 @@ const SETTINGS_KEY = "biliReader.settings";
 const MAX_BOOKS = 200;
 
 export class ProgressStore {
-  constructor(private readonly kv: KeyValueStore = new LocalStorageStore()) {}
+  constructor(private readonly kv: KeyValueStore = new DurableStore()) {}
 
   private async readAll(): Promise<Record<string, SavedProgress>> {
     try {
@@ -81,10 +83,15 @@ export class ProgressStore {
     return p;
   }
 
-  async save(position: ReaderPosition, meta: Omit<SavedProgress, keyof ReaderPosition | "updatedAt"> = {}): Promise<void> {
+  /** Saves and returns the stored record. */
+  async save(
+    position: ReaderPosition,
+    meta: Omit<SavedProgress, keyof ReaderPosition | "updatedAt"> = {},
+  ): Promise<SavedProgress> {
     const all = await this.readAll();
     const { bookId, ...rest } = position;
-    all[bookId] = { ...rest, ...meta, updatedAt: Date.now() };
+    const record: SavedProgress = { ...rest, ...meta, updatedAt: Date.now() };
+    all[bookId] = record;
     // Keep the store bounded: drop the least recently read books.
     const ids = Object.keys(all);
     if (ids.length > MAX_BOOKS) {
@@ -94,6 +101,7 @@ export class ProgressStore {
         .forEach((id) => delete all[id]);
     }
     await this.kv.set(PROGRESS_KEY, JSON.stringify(all));
+    return record;
   }
 }
 
@@ -170,7 +178,7 @@ export function sanitizeSettings(s: Settings): Settings {
   };
 }
 
-interface GmStorage {
+export interface GmStorage {
   getValue?(key: string, defaultValue?: unknown): Promise<unknown>;
   setValue?(key: string, value: unknown): Promise<void>;
 }
@@ -220,3 +228,28 @@ export class SecretStore implements KeyValueStore {
 }
 
 export const AZURE_KEY_SECRET = "biliReader.azureKey";
+
+/**
+ * Durable storage for reading progress: the userscript manager's storage
+ * survives Safari clearing site data, is shared by all tabs and by
+ * bilinovel.net/.com. Values written to localStorage by older versions are
+ * still read until the first save.
+ */
+export class DurableStore extends SecretStore {
+  private readonly legacy: KeyValueStore;
+
+  constructor(gm?: GmStorage, legacy: KeyValueStore = new LocalStorageStore()) {
+    super(gm ?? (globalThis as { GM?: GmStorage }).GM, legacy);
+    this.legacy = legacy;
+  }
+
+  override async get(key: string): Promise<string | null> {
+    return (await super.get(key)) ?? (this.isPrivate ? this.legacy.get(key) : null);
+  }
+
+  override async set(key: string, value: string): Promise<void> {
+    await super.set(key, value);
+    // Keep a local copy in case the manager's storage becomes unavailable.
+    if (this.isPrivate) await this.legacy.set(key, value);
+  }
+}

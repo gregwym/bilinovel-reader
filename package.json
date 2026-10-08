@@ -1,6 +1,6 @@
 {
   "name": "bili-reader",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Continuous reader and TTS userscript for Bilinovel (iOS Safari + Userscripts)",
   "private": true,
   "type": "module",

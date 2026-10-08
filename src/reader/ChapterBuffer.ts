@@ -1,4 +1,4 @@
-import type { NextType, PageContent, Paragraph } from "../adapters/types";
+import type { NextType, PageContent, PageRef, Paragraph } from "../adapters/types";
 
 /** A paragraph placed in the logical (chapter-level) reading order. */
 export interface ReaderParagraph extends Paragraph {
@@ -15,6 +15,10 @@ export interface Chapter {
   chapterUrl: string;
   /** Site page indexes loaded into this chapter, in order. */
   pageIndexes: number[];
+  /** Total site pages in the chapter, when known. */
+  pageCount?: number;
+  /** "Previous" link of the first loaded page (previous page or chapter). */
+  prev?: PageRef;
   paragraphs: ReaderParagraph[];
 }
 
@@ -77,6 +81,7 @@ export class ChapterBuffer {
     const last = this.chapters[this.chapters.length - 1];
     if (last && last.chapterId === page.chapterId) {
       last.pageIndexes.push(page.pageIndex);
+      last.pageCount = maxDefined(last.pageCount, page.pageCount);
       last.paragraphs.push(...added);
       if (!last.title && page.chapterTitle) last.title = page.chapterTitle;
       return { kind: "same-chapter", chapter: last, added };
@@ -86,6 +91,8 @@ export class ChapterBuffer {
       title: page.chapterTitle,
       chapterUrl: page.chapterUrl,
       pageIndexes: [page.pageIndex],
+      pageCount: page.pageCount,
+      prev: page.prev,
       paragraphs: added,
     };
     this.chapters.push(chapter);
@@ -104,6 +111,12 @@ export class ChapterBuffer {
   find(chapterId: string, pageIndex: number, indexInPage: number): ReaderParagraph | undefined {
     const ch = this.chapters.find((c) => c.chapterId === chapterId);
     return ch?.paragraphs.find((p) => p.pageIndex === pageIndex && p.indexInPage === indexInPage);
+  }
+
+  /** Loaded paragraphs of one site page, in order. */
+  pageParagraphs(chapterId: string, pageIndex: number): ReaderParagraph[] {
+    const ch = this.chapters.find((c) => c.chapterId === chapterId);
+    return ch ? ch.paragraphs.filter((p) => p.pageIndex === pageIndex) : [];
   }
 
   first(): ReaderParagraph | undefined {
@@ -160,4 +173,8 @@ export class ChapterBuffer {
     const pi = this.chapters[ci].paragraphs.indexOf(p);
     return pi < 0 ? undefined : { ci, pi };
   }
+}
+
+function maxDefined(a: number | undefined, b: number | undefined): number | undefined {
+  return a === undefined ? b : b === undefined ? a : Math.max(a, b);
 }
