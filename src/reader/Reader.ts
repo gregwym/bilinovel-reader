@@ -1,4 +1,11 @@
-import { FetchError, ParseError, type PageContent, type SiteAdapter } from "../adapters/types";
+import {
+  FetchError,
+  ParseError,
+  type Catalog,
+  type CatalogChapter,
+  type PageContent,
+  type SiteAdapter,
+} from "../adapters/types";
 import { SpeechPlayer, type PlaybackSource } from "../speech/SpeechPlayer";
 import { WebSpeechEngine, type SpeechEngine } from "../speech/SpeechEngine";
 import {
@@ -10,7 +17,7 @@ import {
 import { FallbackSpeechEngine } from "../speech/FallbackSpeechEngine";
 import { SpeechEngineError } from "../speech/SpeechEngine";
 import { VoiceManager } from "../speech/VoiceManager";
-import { ReaderView, type ViewAction } from "../ui/ReaderView";
+import { ReaderView, type TocState, type TocStep, type ViewAction } from "../ui/ReaderView";
 import { debounce } from "../utils/async";
 import { log } from "../utils/log";
 import { ChapterBuffer, type ReaderParagraph } from "./ChapterBuffer";
@@ -20,7 +27,6 @@ import {
   ProgressStore,
   SecretStore,
   SettingsStore,
-  type ReaderPosition,
   type SavedProgress,
   type Settings,
 } from "./ProgressStore";
@@ -30,7 +36,24 @@ const PREFETCH_REMAINING = 8;
 /** Rolling buffer: chapters kept in memory/DOM. */
 const MAX_CHAPTERS = 4;
 
+/** Scroll reports that count as "reading on here" while the restore prompt is open. */
+const AUTO_ACCEPT_SCROLLS = 40;
+
 export const EXITED_URL_KEY = "biliReader.exitedUrl";
+
+/** A place to move the cursor to. */
+interface JumpTarget {
+  /** Unknown only when `url` is given. */
+  chapterId?: string;
+  pageIndex: number;
+  /** Clamped to the page's last paragraph. */
+  paragraphIndex: number;
+  /** Start of the paragraph's text; wins over the index when it still matches. */
+  snippet?: string;
+  url?: string;
+}
+
+const snippetOf = (p: ReaderParagraph): string | undefined => p.text?.slice(0, 24) || undefined;
 
 function describeError(err: unknown): { message: string; detail: string } {
   if (err instanceof FetchError && err.challenge) {
@@ -71,6 +94,16 @@ export class Reader implements PlaybackSource {
   /** Saving is held back while the "continue where you left off?" prompt is open. */
   private savingEnabled = false;
   private scrollReportsWhilePrompt = 0;
+  /** The cursor moved since the last save (only then may this tab overwrite saved progress). */
+  private dirty = false;
+  /** `updatedAt` of the newest saved progress this tab knows about. */
+  private knownUpdatedAt = 0;
+  /** Bumped whenever the buffer is replaced, so late page loads for old content are dropped. */
+  private generation = 0;
+  private jumpSeq = 0;
+  private catalog?: Catalog;
+  private catalogLoading?: Promise<Catalog | undefined>;
+  private catalogError?: string;
   private readonly originalUrl = location.href;
   private readonly originalTitle = document.title;
   private active = false;
@@ -155,9 +188,31 @@ export class Reader implements PlaybackSource {
         onCopyDiagnostics: () => this.copyDiagnostics(),
         onOpenOriginal: () => this.openOriginal(),
         onRestartChapter: () => {
-          const p = this.cursorId ? this.buffer.get(this.cursorId) : undefined;
-          if (p) void this.jumpTo({ bookId: this.buffer.bookId, chapterId: p.chapterId, pageIndex: 0, paragraphIndex: 0 });
+          const p = this.cursorParagraph();
+          if (!p) return;
+          this.navigating();
+          void this.jumpTo({ chapterId: p.chapterId, pageIndex: 0, paragraphIndex: 0 });
         },
+        onOpenToc: () => this.openToc(),
+        onTocStep: (step) => {
+          this.navigating();
+          void this.tocStep(step);
+        },
+        onTocPage: (pageIndex) => {
+          const p = this.cursorParagraph();
+          if (!p) return;
+          this.navigating();
+          void this.jumpTo({ chapterId: p.chapterId, pageIndex, paragraphIndex: 0 });
+        },
+        onTocChapter: (chapter) => {
+          this.navigating();
+          void this.gotoCatalogChapter(chapter);
+        },
+        onTocRetry: () => {
+          void this.ensureCatalog(true).then(() => this.view.updateToc(this.tocState()));
+          this.view.updateToc(this.tocState());
+        },
+        onTopNav: () => this.topNav(),
       },
       DEFAULT_SETTINGS,
       version,
@@ -186,10 +241,16 @@ export class Reader implements PlaybackSource {
     this.voices.onChange(() => this.view.setVoices(this.voices.list()));
 
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") this.player.recoverIfStalled();
-      else void this.saveNow();
+      if (document.visibilityState === "visible") {
+        this.player.recoverIfStalled();
+        void this.checkExternalProgress();
+      } else void this.saveNow();
     });
     window.addEventListener("pagehide", () => void this.saveNow());
+    // Back/forward cache: the page comes back as it was, but another tab may have read on.
+    window.addEventListener("pageshow", (ev) => {
+      if (ev.persisted) void this.checkExternalProgress();
+    });
 
     await this.loadInitial();
   }
@@ -210,7 +271,7 @@ export class Reader implements PlaybackSource {
       ]);
       return;
     }
-    this.buffer.reset();
+    this.resetBuffer();
     this.appendPage(page);
     const first = this.buffer.first();
     if (first) this.setCursor(first.id, { save: false });
@@ -235,6 +296,18 @@ export class Reader implements PlaybackSource {
     } catch {
       /* ignore */
     }
+  }
+
+  private resetBuffer(): void {
+    this.generation++;
+    this.loadFailed = false;
+    this.buffer.reset();
+    this.view.clearContent();
+    this.cursorId = undefined;
+  }
+
+  private cursorParagraph(): ReaderParagraph | undefined {
+    return this.cursorId ? this.buffer.get(this.cursorId) : undefined;
   }
 
   private enter(): void {
@@ -273,6 +346,7 @@ export class Reader implements PlaybackSource {
     }
     this.renderTailStatus();
     this.trimBuffer();
+    this.renderTopNav();
   }
 
   private renderTailStatus(): void {
@@ -286,14 +360,19 @@ export class Reader implements PlaybackSource {
     const pending = this.buffer.pending;
     if (!pending) return Promise.resolve(false);
     this.view.setStatus("loading", pending.type === "next-chapter" ? "正在加载下一章…" : "正在加载…");
+    const generation = this.generation;
+    let stale = false;
     this.loading = this.adapter
       .fetchPage(pending.url)
       .then((page) => {
+        // The buffer was replaced (jump) while this page loaded: it no longer continues anything.
+        if (generation !== this.generation) return !(stale = true);
         this.loadFailed = false;
         this.appendPage(page);
         return true;
       })
       .catch((err: unknown) => {
+        if (generation !== this.generation) return !(stale = true);
         log.error("loading next page failed", pending.url, err);
         this.loadFailed = true;
         const { message, detail } = describeError(err);
@@ -313,6 +392,7 @@ export class Reader implements PlaybackSource {
       })
       .finally(() => {
         this.loading = undefined;
+        if (stale && this.cursorId) this.prefetchAround(this.cursorId);
       });
     return this.loading;
   }
@@ -328,40 +408,221 @@ export class Reader implements PlaybackSource {
     for (const ch of this.buffer.dropBefore(drop)) this.view.removeChapter(ch.chapterId);
   }
 
-  /** Moves to a saved/selected position, loading its page if it is not in the buffer. */
-  private async jumpTo(pos: ReaderPosition): Promise<void> {
-    const local = this.buffer.find(pos.chapterId, pos.pageIndex, pos.paragraphIndex);
+  /** Picks the target paragraph among one page's paragraphs (snippet first, then index). */
+  private pickParagraph(list: ReaderParagraph[], target: JumpTarget): ReaderParagraph | undefined {
+    if (!list.length) return undefined;
+    const idx = Math.min(Math.max(0, target.paragraphIndex), list.length - 1);
+    const snippet = target.snippet;
+    if (!snippet || list[idx].text?.startsWith(snippet)) return list[idx];
+    let best: ReaderParagraph | undefined;
+    let bestDistance = Infinity;
+    list.forEach((p, i) => {
+      if (p.text?.startsWith(snippet) && Math.abs(i - idx) < bestDistance) {
+        best = p;
+        bestDistance = Math.abs(i - idx);
+      }
+    });
+    return best ?? list[idx];
+  }
+
+  /** Moves the cursor to a position, loading its page (and replacing the buffer) if needed. */
+  private async jumpTo(target: JumpTarget): Promise<boolean> {
+    const wasPlaying = this.player.isActive;
+    const local =
+      target.chapterId !== undefined
+        ? this.pickParagraph(this.buffer.pageParagraphs(target.chapterId, target.pageIndex), target)
+        : undefined;
     if (local) {
-      this.view.scrollToParagraph(local.id);
-      this.setCursor(local.id);
-      return;
+      this.moveCursorTo(local.id, wasPlaying);
+      return true;
     }
+    const url = target.url ?? this.adapter.pageUrl(this.buffer.bookId, target.chapterId!, target.pageIndex);
+    const seq = ++this.jumpSeq;
     this.player.stop();
-    const url = this.adapter.pageUrl(pos.bookId, pos.chapterId, pos.pageIndex);
-    this.view.setStatus("loading", "正在跳转…");
+    this.view.showBanner("正在跳转…", []);
     try {
       const page = await this.adapter.fetchPage(url);
-      this.buffer.reset();
-      this.view.clearContent();
+      if (seq !== this.jumpSeq) return false;
+      this.view.hideBanner();
+      this.resetBuffer();
       this.appendPage(page);
-      const chapter = this.buffer.chapters[0];
-      this.view.setTitles(this.buffer.bookTitle, chapter?.title);
-      const target =
-        this.buffer.find(pos.chapterId, pos.pageIndex, Math.min(pos.paragraphIndex, page.paragraphs.length - 1)) ??
-        this.buffer.first();
-      if (target) {
-        this.view.scrollToParagraph(target.id);
-        this.setCursor(target.id);
-      }
+      const p =
+        this.pickParagraph(this.buffer.pageParagraphs(page.chapterId, page.pageIndex), target) ?? this.buffer.first();
+      if (p) this.moveCursorTo(p.id, wasPlaying);
+      return true;
     } catch (err) {
+      if (seq !== this.jumpSeq) return false;
       log.error("jump failed", url, err);
-      this.renderTailStatus();
       const { message } = describeError(err);
       this.view.showBanner(`跳转失败：${message}`, [
-        { label: "重试", primary: true, onClick: () => (this.view.hideBanner(), void this.jumpTo(pos)) },
+        { label: "重试", primary: true, onClick: () => (this.view.hideBanner(), void this.jumpTo(target)) },
         { label: "关闭", onClick: () => this.view.hideBanner() },
       ]);
+      return false;
     }
+  }
+
+  private moveCursorTo(id: string, play: boolean): void {
+    // A paused utterance would otherwise resume at the old place.
+    if (this.player.state === "paused") this.player.stop();
+    this.view.setSelected(undefined);
+    this.view.scrollToParagraph(id);
+    this.setCursor(id);
+    if (play) this.player.play(id);
+    else this.player.select(id);
+  }
+
+  /** The user navigated on purpose: that answers any pending "continue?" prompt. */
+  private navigating(): void {
+    if (this.savingEnabled) return;
+    this.view.hideBanner();
+    this.savingEnabled = true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Table of contents and page/chapter navigation
+
+  private openToc(): void {
+    this.view.openToc(this.tocState());
+    void this.ensureCatalog().then(() => this.view.updateToc(this.tocState()));
+  }
+
+  private tocState(): TocState {
+    const p = this.cursorParagraph();
+    const ch = p ? this.buffer.chapterOf(p.id) : undefined;
+    return {
+      chapterId: p?.chapterId,
+      chapterTitle: ch?.title,
+      pageIndex: p?.pageIndex,
+      pageCount: ch?.pageCount,
+      catalog: this.catalog,
+      loading: !!this.catalogLoading,
+      error: this.catalogError,
+    };
+  }
+
+  /** Loads the book's catalog once per session (on demand: it shares the page request queue). */
+  private ensureCatalog(force = false): Promise<Catalog | undefined> {
+    const bookId = this.buffer.bookId;
+    if (!this.adapter.fetchCatalog || !bookId) return Promise.resolve(undefined);
+    if (!force && this.catalog?.bookId === bookId) return Promise.resolve(this.catalog);
+    if (this.catalogLoading) return this.catalogLoading;
+    this.catalogError = undefined;
+    this.catalogLoading = this.adapter
+      .fetchCatalog(bookId)
+      .then(
+        (catalog) => (this.catalog = catalog),
+        (err: unknown) => {
+          log.error("catalog failed", err);
+          this.catalogError = describeError(err).message;
+          return undefined;
+        },
+      )
+      .finally(() => {
+        this.catalogLoading = undefined;
+      });
+    return this.catalogLoading;
+  }
+
+  private async tocStep(step: TocStep): Promise<void> {
+    const cur = this.cursorParagraph();
+    const ch = cur && this.buffer.chapterOf(cur.id);
+    if (!cur || !ch) return;
+    switch (step) {
+      case "prev-page":
+        if (cur.pageIndex > 0) {
+          await this.jumpTo({ chapterId: cur.chapterId, pageIndex: cur.pageIndex - 1, paragraphIndex: 0 });
+        } else if (ch.pageIndexes[0] === 0 && ch.prev && ch.prev.chapterId !== ch.chapterId) {
+          // The site's "previous" from a chapter's first page: the previous chapter's last page.
+          await this.jumpTo({ ...ch.prev, paragraphIndex: 0 });
+        } else await this.stepChapter(-1);
+        return;
+      case "next-page":
+        if (ch.pageCount !== undefined && cur.pageIndex + 1 >= ch.pageCount) await this.stepChapter(1);
+        else await this.jumpTo({ chapterId: cur.chapterId, pageIndex: cur.pageIndex + 1, paragraphIndex: 0 });
+        return;
+      case "prev-chapter":
+        return this.stepChapter(-1);
+      case "next-chapter":
+        return this.stepChapter(1);
+    }
+  }
+
+  private async stepChapter(dir: 1 | -1): Promise<void> {
+    const cur = this.cursorParagraph();
+    const ch = cur && this.buffer.chapterOf(cur.id);
+    if (!cur || !ch) return;
+    const catalog = await this.ensureCatalog();
+    const list = catalog ? catalog.volumes.flatMap((v) => v.chapters) : [];
+    const idx = list.findIndex((c) => c.chapterId === cur.chapterId);
+    if (idx >= 0) {
+      const target = list[idx + dir];
+      if (target) await this.gotoCatalogChapter(target);
+      else this.view.setPlayerMessage(dir > 0 ? "已经是最后一章" : "已经是第一章");
+      return;
+    }
+    // No usable catalog: follow the site's own links.
+    if (dir < 0) {
+      if (ch.pageIndexes[0] === 0 && ch.prev && ch.prev.chapterId !== ch.chapterId) {
+        await this.jumpTo({ chapterId: ch.prev.chapterId, pageIndex: 0, paragraphIndex: 0 });
+        return;
+      }
+    } else {
+      const after = this.buffer.chapters[this.buffer.chapters.indexOf(ch) + 1];
+      if (after) {
+        await this.jumpTo({ chapterId: after.chapterId, pageIndex: after.pageIndexes[0] ?? 0, paragraphIndex: 0 });
+        return;
+      }
+      const pending = this.buffer.pending;
+      if (pending?.type === "next-chapter") {
+        await this.jumpTo({ url: pending.url, pageIndex: 0, paragraphIndex: 0 });
+        return;
+      }
+    }
+    this.view.showBanner(`无法确定${dir > 0 ? "下" : "上"}一章（目录未能加载）`, [
+      { label: "关闭", onClick: () => this.view.hideBanner() },
+    ]);
+  }
+
+  private async gotoCatalogChapter(chapter: CatalogChapter): Promise<void> {
+    if (chapter.chapterId) {
+      await this.jumpTo({ chapterId: chapter.chapterId, pageIndex: 0, paragraphIndex: 0 });
+      return;
+    }
+    // The site lists this chapter without a link: the next linked chapter's "previous" link leads to it.
+    const list = this.catalog ? this.catalog.volumes.flatMap((v) => v.chapters) : [];
+    const next = list.slice(list.indexOf(chapter) + 1).find((c) => c.chapterId && c.url);
+    if (next?.url) {
+      this.view.showBanner("正在查找这一章的链接…", []);
+      try {
+        const page = await this.adapter.fetchPage(next.url);
+        if (page.prev && page.prev.chapterId !== page.chapterId) {
+          chapter.chapterId = page.prev.chapterId;
+          this.view.hideBanner();
+          await this.jumpTo({ chapterId: page.prev.chapterId, pageIndex: 0, paragraphIndex: 0 });
+          return;
+        }
+      } catch (err) {
+        log.warn("could not resolve chapter link", err);
+      }
+    }
+    this.view.showBanner("网站目录中这一章没有链接", [{ label: "关闭", onClick: () => this.view.hideBanner() }]);
+  }
+
+  /** "Previous page/chapter" button above the loaded content. */
+  private renderTopNav(): void {
+    const first = this.buffer.chapters[0];
+    const page = first?.pageIndexes[0] ?? 0;
+    this.view.setTopNav(first && page > 0 ? `↑ 本章上一页（第 ${page} 页）` : first?.prev ? "↑ 上一章" : undefined);
+  }
+
+  private topNav(): void {
+    const first = this.buffer.chapters[0];
+    if (!first) return;
+    this.navigating();
+    const page = first.pageIndexes[0] ?? 0;
+    if (page > 0) void this.jumpTo({ chapterId: first.chapterId, pageIndex: page - 1, paragraphIndex: 0 });
+    else if (first.prev) void this.jumpTo({ ...first.prev, paragraphIndex: 0 });
   }
 
   // ---------------------------------------------------------------------------
@@ -369,38 +630,49 @@ export class Reader implements PlaybackSource {
 
   private async offerRestore(page: PageContent): Promise<void> {
     const saved = await this.progress.get(page.bookId);
+    this.knownUpdatedAt = saved?.updatedAt ?? 0;
+    this.savingEnabled = true;
     if (!saved) {
-      this.savingEnabled = true;
+      this.dirty = true;
       this.saveSoon();
       return;
     }
-    if (saved.chapterId === page.chapterId && saved.pageIndex === page.pageIndex) {
-      // Same page: restore silently.
-      this.savingEnabled = true;
-      const p = this.buffer.find(saved.chapterId, saved.pageIndex, saved.paragraphIndex);
-      if (p && saved.paragraphIndex > 0) {
-        this.view.scrollToParagraph(p.id);
-        this.setCursor(p.id);
+    const target: JumpTarget = {
+      chapterId: saved.chapterId,
+      pageIndex: saved.pageIndex,
+      paragraphIndex: saved.paragraphIndex,
+      snippet: saved.snippet,
+    };
+    if (saved.chapterId === page.chapterId) {
+      if (saved.pageIndex === page.pageIndex) {
+        // Same page: restore silently.
+        const p = this.pickParagraph(this.buffer.pageParagraphs(page.chapterId, page.pageIndex), target);
+        if (p && p.id !== this.cursorId) {
+          this.view.scrollToParagraph(p.id);
+          this.setCursor(p.id, { save: false });
+          this.player.select(p.id);
+        }
+      } else if (await this.jumpTo(target)) {
+        // Same chapter, other page (e.g. the tab reopened at the chapter's first page).
+        this.view.setPlayerMessage("已回到上次阅读位置");
       }
       return;
     }
-    this.promptRestore(page, saved);
+    this.savingEnabled = false;
+    this.promptRestore(saved, target);
   }
 
-  private promptRestore(page: PageContent, saved: SavedProgress): void {
-    const where =
-      saved.chapterId === page.chapterId
-        ? `本章第 ${saved.pageIndex + 1} 页`
-        : `「${saved.chapterTitle || `章节 ${saved.chapterId}`}」`;
+  private promptRestore(saved: SavedProgress, target: JumpTarget): void {
+    const page = saved.pageIndex > 0 ? ` 第 ${saved.pageIndex + 1} 页` : "";
     this.scrollReportsWhilePrompt = 0;
-    this.view.showBanner(`上次读到${where}，要继续吗？`, [
+    this.view.showBanner(`上次读到「${saved.chapterTitle || `章节 ${saved.chapterId}`}」${page}，要继续吗？`, [
       {
         label: "继续",
         primary: true,
         onClick: () => {
           this.view.hideBanner();
           this.savingEnabled = true;
-          void this.jumpTo({ bookId: page.bookId, ...saved });
+          void this.jumpTo(target);
         },
       },
       { label: "留在此处", onClick: () => this.acceptCurrentPosition() },
@@ -412,14 +684,61 @@ export class Reader implements PlaybackSource {
     if (this.savingEnabled) return;
     this.view.hideBanner();
     this.savingEnabled = true;
+    this.dirty = true;
     this.saveSoon();
+  }
+
+  /**
+   * Another tab (or device sharing the storage) saved newer progress for this
+   * book while this one sat in the background: offer to go there instead of
+   * silently overwriting it.
+   */
+  private async checkExternalProgress(): Promise<void> {
+    if (!this.active || !this.savingEnabled || !this.buffer.bookId || this.player.isActive) return;
+    const saved = await this.progress.get(this.buffer.bookId);
+    if (!saved || saved.updatedAt <= this.knownUpdatedAt) return;
+    this.knownUpdatedAt = saved.updatedAt;
+    const cur = this.cursorParagraph();
+    if (
+      cur &&
+      cur.chapterId === saved.chapterId &&
+      cur.pageIndex === saved.pageIndex &&
+      Math.abs(cur.indexInPage - saved.paragraphIndex) <= 2
+    ) {
+      return;
+    }
+    this.dirty = false;
+    const page = saved.pageIndex > 0 ? ` 第 ${saved.pageIndex + 1} 页` : "";
+    this.view.showBanner(`在其他页面读到了「${saved.chapterTitle || `章节 ${saved.chapterId}`}」${page}，要跳过去吗？`, [
+      {
+        label: "跳转",
+        primary: true,
+        onClick: () => {
+          this.view.hideBanner();
+          void this.jumpTo({
+            chapterId: saved.chapterId,
+            pageIndex: saved.pageIndex,
+            paragraphIndex: saved.paragraphIndex,
+            snippet: saved.snippet,
+          });
+        },
+      },
+      {
+        label: "留在此处",
+        onClick: () => {
+          this.view.hideBanner();
+          this.dirty = true;
+          this.saveSoon();
+        },
+      },
+    ]);
   }
 
   // ---------------------------------------------------------------------------
   // Cursor
 
   private onUserScrolledTo(id: string): void {
-    if (this.view.bannerVisible && !this.savingEnabled && ++this.scrollReportsWhilePrompt >= 6) {
+    if (this.view.bannerVisible && !this.savingEnabled && ++this.scrollReportsWhilePrompt >= AUTO_ACCEPT_SCROLLS) {
       this.acceptCurrentPosition();
     }
     if (this.player.isActive) {
@@ -452,7 +771,10 @@ export class Reader implements PlaybackSource {
     }
     this.syncUrl(id);
     this.prefetchAround(id);
-    if (opts.save !== false) this.saveSoon();
+    if (opts.save !== false) {
+      this.dirty = true;
+      this.saveSoon();
+    }
   }
 
   private prefetchAround(id: string): void {
@@ -477,13 +799,20 @@ export class Reader implements PlaybackSource {
   }
 
   private async saveNow(): Promise<void> {
-    if (!this.savingEnabled || !this.cursorId) return;
+    if (!this.savingEnabled || !this.dirty || !this.cursorId) return;
     const p: ReaderParagraph | undefined = this.buffer.get(this.cursorId);
     if (!p) return;
-    await this.progress.save(
+    this.dirty = false;
+    const saved = await this.progress.save(
       { bookId: this.buffer.bookId, chapterId: p.chapterId, pageIndex: p.pageIndex, paragraphIndex: p.indexInPage },
-      { bookTitle: this.buffer.bookTitle, chapterTitle: this.buffer.chapterOf(p.id)?.title, url: p.pageUrl },
+      {
+        bookTitle: this.buffer.bookTitle,
+        chapterTitle: this.buffer.chapterOf(p.id)?.title,
+        url: p.pageUrl,
+        snippet: snippetOf(p),
+      },
     );
+    this.knownUpdatedAt = Math.max(this.knownUpdatedAt, saved.updatedAt);
     log.debug("progress saved", p.id);
   }
 

@@ -1,4 +1,4 @@
-import type { PageContent, SiteAdapter } from "../types";
+import type { Catalog, PageContent, SiteAdapter } from "../types";
 import { FetchError } from "../types";
 import { RequestQueue } from "../../utils/RequestQueue";
 import { log } from "../../utils/log";
@@ -7,6 +7,7 @@ import { parseChapterLogScript, type ShuffleTemplate } from "./deobfuscate";
 import { findChapterLogScript, findContent, markComputedHidden, parseBilinovelDocument } from "./parser";
 import { defaultFrameHost, loadInFrame, type FrameHost, type LoadedFrame } from "./frameLoader";
 import { SUPPORTED_HOSTS, buildPageUrl, isChapterUrl } from "./url";
+import { catalogUrl, hasCatalog, parseCatalogDocument } from "./catalog";
 
 const TEMPLATE_CACHE_KEY = "biliReader.chapterlogTemplate";
 
@@ -124,6 +125,26 @@ export class BilinovelAdapter implements SiteAdapter {
     return page;
   }
 
+  /** Loads the table of contents (same loading strategy as chapter pages). */
+  fetchCatalog(bookId: string): Promise<Catalog> {
+    const url = catalogUrl(location.origin, bookId);
+    const u = new URL(url);
+    const parse = async (doc: Document) => {
+      const catalog = parseCatalogDocument(doc, u, bookId);
+      this.record({ url, method: "catalog", chapters: catalog.volumes.reduce((n, v) => n + v.chapters.length, 0) });
+      return catalog;
+    };
+    return this.queue.run(async () => {
+      try {
+        return await this.withFrame(url, false, parse, hasCatalog);
+      } catch (err) {
+        if (!(err instanceof FetchError && err.challenge)) throw err;
+        this.record({ url, method: "fallback", reason: "challenge" });
+        return this.withFrame(url, true, parse, hasCatalog);
+      }
+    });
+  }
+
   /** Loads a page through the rate-limited queue. */
   fetchPage(url: string): Promise<PageContent> {
     return this.queue.run(() => this.loadPage(url));
@@ -152,7 +173,12 @@ export class BilinovelAdapter implements SiteAdapter {
     }
   }
 
-  private async withFrame<T>(url: string, scripts: boolean, use: (doc: Document, win: Window) => Promise<T>): Promise<T> {
+  private async withFrame<T>(
+    url: string,
+    scripts: boolean,
+    use: (doc: Document, win: Window) => Promise<T>,
+    hasContent: (doc: Document) => boolean = (d) => !!findContent(d),
+  ): Promise<T> {
     const start = Date.now();
     let frame: LoadedFrame | undefined;
     try {
@@ -160,7 +186,7 @@ export class BilinovelAdapter implements SiteAdapter {
         scripts,
         // Without scripts, wait for stylesheets (load event) so visibility can be judged; don't wait forever on images.
         isReady: (d) =>
-          !!findContent(d) &&
+          hasContent(d) &&
           (d.readyState === "complete" || (d.readyState === "interactive" && (scripts || Date.now() - start > 3000))),
       });
       return await use(frame.doc, frame.win);

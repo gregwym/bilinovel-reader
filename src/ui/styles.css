@@ -564,3 +564,94 @@ svg {
   border: 0;
   background: #fff;
 }
+
+/* Table of contents */
+.br-toc {
+  display: flex;
+  flex-direction: column;
+  height: 85%;
+  max-height: 85%;
+  overflow: hidden;
+}
+
+.br-toc-current {
+  text-align: center;
+  margin-bottom: 10px;
+}
+
+.br-toc-current-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.br-toc-current-page {
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.br-toc-steps {
+  justify-content: center;
+  flex-wrap: nowrap;
+}
+
+.br-toc-steps button {
+  flex: 1;
+  padding: 8px 4px;
+}
+
+.br-toc-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.br-toc-vol {
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  padding: 10px 4px 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.br-toc-ch {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 15px;
+}
+
+.br-toc-ch[aria-current="true"] {
+  color: var(--accent);
+  font-weight: 600;
+  background: var(--active-bg);
+}
+
+.br-toc-ch.no-link {
+  color: var(--muted);
+}
+
+.br-toc-msg {
+  padding: 24px 8px 0;
+  text-align: center;
+  color: var(--muted);
+}
+
+.br-toc .br-sheet-actions {
+  margin-top: 10px;
+}
+
+.br-topnav {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0 0;
+}
