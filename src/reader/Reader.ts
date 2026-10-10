@@ -13,7 +13,18 @@ import {
   AzureUsageMeter,
   describeAzureError,
   listAzureChineseVoices,
+  type AzureVoice,
 } from "../speech/AzureSpeechEngine";
+import {
+  GOOGLE_FREE_CHARS,
+  GoogleSpeechEngine,
+  GoogleUsageMeter,
+  describeGoogleError,
+  googleTier,
+  googleTierLabel,
+  listGoogleChineseVoices,
+} from "../speech/GoogleSpeechEngine";
+import type { CloudSpeechEngine } from "../speech/CloudSpeechEngine";
 import { FallbackSpeechEngine } from "../speech/FallbackSpeechEngine";
 import { SpeechEngineError } from "../speech/SpeechEngine";
 import { VoiceManager } from "../speech/VoiceManager";
@@ -24,6 +35,8 @@ import { ChapterBuffer, type ReaderParagraph } from "./ChapterBuffer";
 import {
   AZURE_KEY_SECRET,
   DEFAULT_SETTINGS,
+  GOOGLE_KEY_SECRET,
+  type CloudProvider,
   ProgressStore,
   SecretStore,
   SettingsStore,
@@ -53,7 +66,40 @@ interface JumpTarget {
   url?: string;
 }
 
+/** A network TTS service (Azure, Google) with its key and system-voice fallback. */
+interface CloudSlot {
+  name: string;
+  secret: string;
+  key: string;
+  engine: CloudSpeechEngine;
+  withFallback: FallbackSpeechEngine;
+  describe(code: string): string;
+  usageText(): string;
+  listVoices(key: string): Promise<AzureVoice[]>;
+  sample: string;
+}
+
 const snippetOf = (p: ReaderParagraph): string | undefined => p.text?.slice(0, 24) || undefined;
+
+/** This tab's own position, kept in `history.state` (survives Safari reloading or restoring the tab). */
+interface TabPosition {
+  bookId: string;
+  chapterId: string;
+  pageIndex: number;
+  paragraphIndex: number;
+  snippet?: string;
+  updatedAt: number;
+}
+const TAB_STATE_KEY = "biliReader";
+
+function readTabPosition(): TabPosition | undefined {
+  try {
+    const t = (history.state as Record<string, unknown> | null)?.[TAB_STATE_KEY] as TabPosition | undefined;
+    return t && typeof t.chapterId === "string" && typeof t.updatedAt === "number" ? t : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function describeError(err: unknown): { message: string; detail: string } {
   if (err instanceof FetchError && err.challenge) {
@@ -82,11 +128,10 @@ export class Reader implements PlaybackSource {
   private readonly voices = new VoiceManager();
   private readonly player: SpeechPlayer;
   private readonly webEngine: WebSpeechEngine;
-  private readonly azureEngine: AzureSpeechEngine;
-  private readonly azureWithFallback: FallbackSpeechEngine;
+  private readonly cloud: Record<CloudProvider, CloudSlot>;
   private readonly secrets = new SecretStore();
-  private readonly usage = new AzureUsageMeter();
-  private azureKey = "";
+  private readonly azureUsage = new AzureUsageMeter();
+  private readonly googleUsage = new GoogleUsageMeter();
   private settings!: Settings;
   private cursorId?: string;
   private loading?: Promise<boolean>;
@@ -117,28 +162,55 @@ export class Reader implements PlaybackSource {
     private readonly version = "dev",
   ) {
     this.webEngine = new WebSpeechEngine(globalThis.speechSynthesis, (uri) => this.voices.resolve(uri));
-    this.azureEngine = new AzureSpeechEngine(
-      () =>
-        this.azureKey
-          ? { key: this.azureKey, region: this.settings.azureRegion, voice: this.settings.azureVoice }
-          : undefined,
-      { onUsage: (chars) => this.view.setAzureState({ usage: this.usage.add(chars) }) },
+    const azure = new AzureSpeechEngine(
+      () => {
+        const key = this.cloud.azure.key;
+        return key ? { key, region: this.settings.azureRegion, voice: this.settings.azureVoice } : undefined;
+      },
+      { onUsage: (chars) => (this.azureUsage.add(chars), this.renderUsage("azure")) },
     );
-    this.azureWithFallback = new FallbackSpeechEngine(this.azureEngine, this.webEngine, {
-      onFallback: (code, retryAt) => {
-        const when = Number.isFinite(retryAt)
-          ? `，${Math.max(1, Math.round((retryAt - Date.now()) / 60_000))} 分钟内自动重试`
-          : "，请检查设置";
-        const msg = `${describeAzureError(code)}，暂用系统语音${when}`;
-        log.warn(msg);
-        this.view.setPlayerMessage(msg);
-        this.view.setAzureState({ status: msg, fallback: true });
+    const google = new GoogleSpeechEngine(
+      () => {
+        const key = this.cloud.google.key;
+        return key ? { key, voice: this.settings.googleVoice } : undefined;
       },
-      onRecover: () => {
-        this.view.setPlayerMessage("已恢复 Azure 语音");
-        this.view.setAzureState({ status: "已恢复 Azure 语音", fallback: false });
+      { meter: this.googleUsage, onUsage: () => this.renderUsage("google") },
+    );
+    this.cloud = {
+      azure: {
+        name: "Azure",
+        secret: AZURE_KEY_SECRET,
+        key: "",
+        engine: azure,
+        withFallback: this.withFallback("azure", azure),
+        describe: describeAzureError,
+        usageText: () => {
+          const used = this.azureUsage.get();
+          const pct = Math.min(100, Math.round((used / AzureUsageMeter.FREE_CHARS) * 100));
+          return `本月约用 ${used.toLocaleString()} / ${AzureUsageMeter.FREE_CHARS.toLocaleString()} 字符（${pct}%，中文按 2 计，以 Azure 后台为准）`;
+        },
+        listVoices: (key) => listAzureChineseVoices({ key, region: this.settings.azureRegion }),
+        sample: "你好，这是 Azure 神经网络语音的试听。轻小说朗读听起来会是这个样子。",
       },
-    });
+      google: {
+        name: "Google",
+        secret: GOOGLE_KEY_SECRET,
+        key: "",
+        engine: google,
+        withFallback: this.withFallback("google", google),
+        describe: describeGoogleError,
+        usageText: () => {
+          const tier = googleTier(this.settings.googleVoice);
+          if (!tier) return "该声音没有免费额度，不会使用";
+          const used = this.googleUsage.get(tier);
+          const free = GOOGLE_FREE_CHARS[tier];
+          const pct = Math.min(100, Math.round((used / free) * 100));
+          return `${googleTierLabel(tier)} 本月约用 ${used.toLocaleString()} / ${free.toLocaleString()} 字符（${pct}%，本机统计；用满即停用、改用系统语音，不会产生费用。以 Google 后台为准）`;
+        },
+        listVoices: (key) => listGoogleChineseVoices(key),
+        sample: "你好，这是 Google 语音的试听。轻小说朗读听起来会是这个样子。",
+      },
+    };
     this.player = new SpeechPlayer(this.webEngine, this, {
       onState: (state, message) => {
         this.view.setPlayerState(state, message);
@@ -165,11 +237,7 @@ export class Reader implements PlaybackSource {
           this.acceptCurrentPosition();
           this.player.play(id);
         },
-        onTogglePlay: () => {
-          this.acceptCurrentPosition();
-          if (this.player.state === "error") this.loadFailed = false;
-          this.player.toggle();
-        },
+        onTogglePlay: () => this.togglePlay(),
         onPrev: () => this.player.previousParagraph(),
         onNext: () => this.player.nextParagraph(),
         onRate: (rate) => {
@@ -178,11 +246,11 @@ export class Reader implements PlaybackSource {
         },
         onVoice: (uri) => this.player.setVoice(uri),
         onSettings: (s) => this.updateSettings(s),
-        onAzureKey: (key) => void this.setAzureKey(key),
-        onAzureTest: () => this.testAzureVoice(),
-        onAzureRetry: () => {
-          this.azureWithFallback.reset();
-          this.view.setAzureState({ status: "正在重试 Azure…", fallback: false });
+        onCloudKey: (provider, key) => void this.setCloudKey(provider, key),
+        onCloudTest: (provider) => this.testCloudVoice(provider),
+        onCloudRetry: (provider) => {
+          this.cloud[provider].withFallback.reset();
+          this.view.setCloudState(provider, { status: `正在重试 ${this.cloud[provider].name}…`, fallback: false });
           this.player.restartCurrent();
         },
         onCopyDiagnostics: () => this.copyDiagnostics(),
@@ -232,10 +300,13 @@ export class Reader implements PlaybackSource {
     this.active = true;
     this.player.setRate(this.settings.rate);
     this.player.setVoice(this.settings.voiceURI);
-    this.azureKey = (await this.secrets.get(AZURE_KEY_SECRET)) ?? "";
-    this.view.setAzureState({ keySet: !!this.azureKey, usage: this.usage.get() });
+    for (const provider of ["azure", "google"] as const) {
+      const slot = this.cloud[provider];
+      slot.key = (await this.secrets.get(slot.secret)) ?? "";
+      this.view.setCloudState(provider, { keySet: !!slot.key, usage: slot.usageText() });
+    }
     this.applyEngine();
-    if (this.settings.ttsEngine === "azure") void this.refreshAzureVoices();
+    if (this.settings.ttsEngine !== "system") void this.refreshCloudVoices(this.settings.ttsEngine);
     this.setupMediaSession();
     this.view.setVoices(this.voices.list());
     this.voices.onChange(() => this.view.setVoices(this.voices.list()));
@@ -632,6 +703,13 @@ export class Reader implements PlaybackSource {
     const saved = await this.progress.get(page.bookId);
     this.knownUpdatedAt = saved?.updatedAt ?? 0;
     this.savingEnabled = true;
+    const tab = readTabPosition();
+    // (The shared record of this same position is written a moment after the tab's own copy.)
+    if (tab && tab.bookId === page.bookId && (!saved || tab.updatedAt >= saved.updatedAt - 5000)) {
+      // This tab was reloaded/restored (e.g. Safari dropped it in the background): its own position is the newest.
+      await this.restoreTo(page, { ...tab });
+      return;
+    }
     if (!saved) {
       this.dirty = true;
       this.saveSoon();
@@ -644,22 +722,26 @@ export class Reader implements PlaybackSource {
       snippet: saved.snippet,
     };
     if (saved.chapterId === page.chapterId) {
-      if (saved.pageIndex === page.pageIndex) {
-        // Same page: restore silently.
-        const p = this.pickParagraph(this.buffer.pageParagraphs(page.chapterId, page.pageIndex), target);
-        if (p && p.id !== this.cursorId) {
-          this.view.scrollToParagraph(p.id);
-          this.setCursor(p.id, { save: false });
-          this.player.select(p.id);
-        }
-      } else if (await this.jumpTo(target)) {
-        // Same chapter, other page (e.g. the tab reopened at the chapter's first page).
-        this.view.setPlayerMessage("已回到上次阅读位置");
-      }
+      await this.restoreTo(page, target);
       return;
     }
     this.savingEnabled = false;
     this.promptRestore(saved, target);
+  }
+
+  /** Silently moves to a position in (or near) the page that was just loaded. */
+  private async restoreTo(page: PageContent, target: JumpTarget): Promise<void> {
+    if (target.chapterId === page.chapterId && target.pageIndex === page.pageIndex) {
+      const p = this.pickParagraph(this.buffer.pageParagraphs(page.chapterId, page.pageIndex), target);
+      if (p && p.id !== this.cursorId) {
+        this.view.scrollToParagraph(p.id);
+        this.setCursor(p.id, { save: false });
+        this.player.select(p.id);
+      }
+    } else if (await this.jumpTo(target)) {
+      // E.g. the tab reopened at the chapter's first page.
+      this.view.setPlayerMessage("已回到上次阅读位置");
+    }
   }
 
   private promptRestore(saved: SavedProgress, target: JumpTarget): void {
@@ -737,6 +819,24 @@ export class Reader implements PlaybackSource {
   // ---------------------------------------------------------------------------
   // Cursor
 
+  /**
+   * Play/pause. Resuming continues the paused paragraph only while it is still
+   * on screen; if the user has scrolled or navigated elsewhere since, playback
+   * starts where they are now (the cursor) instead of jumping back.
+   */
+  private togglePlay(): void {
+    this.acceptCurrentPosition();
+    if (this.player.state === "error") this.loadFailed = false;
+    const at = this.player.currentId;
+    const cur = this.cursorId;
+    if (!this.player.isActive && this.player.state !== "idle" && cur && at && cur !== at && !this.view.isOnScreen(at)) {
+      this.view.setSelected(undefined);
+      this.player.play(cur);
+      return;
+    }
+    this.player.toggle();
+  }
+
   private onUserScrolledTo(id: string): void {
     if (this.view.bannerVisible && !this.savingEnabled && ++this.scrollReportsWhilePrompt >= AUTO_ACCEPT_SCROLLS) {
       this.acceptCurrentPosition();
@@ -803,6 +903,7 @@ export class Reader implements PlaybackSource {
     const p: ReaderParagraph | undefined = this.buffer.get(this.cursorId);
     if (!p) return;
     this.dirty = false;
+    this.writeTabPosition(p);
     const saved = await this.progress.save(
       { bookId: this.buffer.bookId, chapterId: p.chapterId, pageIndex: p.pageIndex, paragraphIndex: p.indexInPage },
       {
@@ -816,18 +917,42 @@ export class Reader implements PlaybackSource {
     log.debug("progress saved", p.id);
   }
 
+  /** Synchronous, per tab: lands even if the page is frozen before the async store finishes. */
+  private writeTabPosition(p: ReaderParagraph): void {
+    if (!this.active) return;
+    const pos: TabPosition = {
+      bookId: this.buffer.bookId,
+      chapterId: p.chapterId,
+      pageIndex: p.pageIndex,
+      paragraphIndex: p.indexInPage,
+      snippet: snippetOf(p),
+      updatedAt: Date.now(),
+    };
+    try {
+      const state = (history.state as Record<string, unknown> | null) ?? {};
+      history.replaceState({ ...state, [TAB_STATE_KEY]: pos }, "", p.pageUrl);
+    } catch (err) {
+      log.debug("replaceState failed", err);
+    }
+  }
+
   private updateSettings(s: Settings): void {
     const prev = this.settings;
     this.settings = s;
     this.view.applySettings(s);
     void this.settingsStore.save(s);
-    if (prev.azureBuffer !== s.azureBuffer) this.azureEngine.setPrefetchCount(s.azureBuffer);
-    const azureChanged =
-      prev.ttsEngine !== s.ttsEngine || prev.azureRegion !== s.azureRegion || prev.azureVoice !== s.azureVoice;
-    if (azureChanged) {
+    if (prev.azureBuffer !== s.azureBuffer) for (const slot of Object.values(this.cloud)) slot.engine.setPrefetchCount(s.azureBuffer);
+    const engineChanged =
+      prev.ttsEngine !== s.ttsEngine ||
+      prev.azureRegion !== s.azureRegion ||
+      prev.azureVoice !== s.azureVoice ||
+      prev.googleVoice !== s.googleVoice;
+    if (engineChanged) {
       this.applyEngine();
-      if (s.ttsEngine === "azure" && (prev.ttsEngine !== "azure" || prev.azureRegion !== s.azureRegion)) {
-        void this.refreshAzureVoices();
+      if (prev.googleVoice !== s.googleVoice) this.renderUsage("google");
+      const provider = s.ttsEngine;
+      if (provider !== "system" && (prev.ttsEngine !== provider || prev.azureRegion !== s.azureRegion)) {
+        void this.refreshCloudVoices(provider);
       }
     }
   }
@@ -835,52 +960,85 @@ export class Reader implements PlaybackSource {
   // ---------------------------------------------------------------------------
   // Speech engines
 
-  private currentEngine(): SpeechEngine {
-    return this.settings.ttsEngine === "azure" ? this.azureWithFallback : this.webEngine;
+  private withFallback(provider: CloudProvider, engine: CloudSpeechEngine): FallbackSpeechEngine {
+    const name = provider === "azure" ? "Azure" : "Google";
+    return new FallbackSpeechEngine(engine, this.webEngine, {
+      onFallback: (code, retryAt) => {
+        const when = Number.isFinite(retryAt)
+          ? `，${Math.max(1, Math.round((retryAt - Date.now()) / 60_000))} 分钟内自动重试`
+          : "，请检查设置";
+        const msg = `${this.cloud[provider].describe(code)}，暂用系统语音${when}`;
+        log.warn(msg);
+        this.view.setPlayerMessage(msg);
+        this.view.setCloudState(provider, { status: msg, fallback: true });
+      },
+      onRecover: () => {
+        this.view.setPlayerMessage(`已恢复 ${name} 语音`);
+        this.view.setCloudState(provider, { status: `已恢复 ${name} 语音`, fallback: false });
+      },
+    });
   }
 
-  /** Selects the engine for the current settings; a fresh choice retries Azure after a fallback. */
+  private renderUsage(provider: CloudProvider): void {
+    this.view.setCloudState(provider, { usage: this.cloud[provider].usageText() });
+  }
+
+  private currentEngine(): SpeechEngine {
+    const t = this.settings.ttsEngine;
+    return t === "system" ? this.webEngine : this.cloud[t].withFallback;
+  }
+
+  /** Selects the engine for the current settings; a fresh choice retries the cloud service after a fallback. */
   private applyEngine(): void {
-    this.azureWithFallback.reset();
-    this.azureEngine.setPrefetchCount(this.settings.azureBuffer);
-    this.view.setAzureState({ fallback: false });
-    this.view.setAzureState({ status: this.settings.ttsEngine === "azure" && !this.azureKey ? "请先填写密钥" : "" });
+    for (const provider of ["azure", "google"] as const) {
+      const slot = this.cloud[provider];
+      slot.withFallback.reset();
+      slot.engine.setPrefetchCount(this.settings.azureBuffer);
+      this.view.setCloudState(provider, {
+        fallback: false,
+        status: this.settings.ttsEngine === provider && !slot.key ? "请先填写密钥" : "",
+      });
+    }
     const engine = this.currentEngine();
     // Either way the current chunk restarts with the new engine/voice when playing.
     if (this.player.engineIs(engine)) this.player.restartCurrent();
     else this.player.setEngine(engine);
   }
 
-  private async setAzureKey(key: string): Promise<void> {
-    this.azureKey = key;
-    await this.secrets.set(AZURE_KEY_SECRET, key);
-    this.view.setAzureState({ keySet: !!key });
+  private async setCloudKey(provider: CloudProvider, key: string): Promise<void> {
+    const slot = this.cloud[provider];
+    slot.key = key;
+    await this.secrets.set(slot.secret, key);
+    this.view.setCloudState(provider, { keySet: !!key });
     this.applyEngine();
-    if (key) void this.refreshAzureVoices();
+    if (key) void this.refreshCloudVoices(provider);
   }
 
-  private async refreshAzureVoices(): Promise<void> {
-    if (!this.azureKey) return;
+  private async refreshCloudVoices(provider: CloudProvider): Promise<void> {
+    const slot = this.cloud[provider];
+    if (!slot.key) return;
     try {
-      const voices = await listAzureChineseVoices({ key: this.azureKey, region: this.settings.azureRegion });
-      this.view.setAzureState({ voices, status: `已连接 Azure（${this.settings.azureRegion}）` });
+      const voices = await slot.listVoices(slot.key);
+      const where = provider === "azure" ? `（${this.settings.azureRegion}）` : "";
+      this.view.setCloudState(provider, { voices, status: `已连接 ${slot.name}${where}` });
     } catch (err) {
       const code = err instanceof SpeechEngineError ? err.code : String(err);
-      this.view.setAzureState({ status: `无法获取声音列表：${describeAzureError(code)}` });
+      this.view.setCloudState(provider, { status: `无法获取声音列表：${slot.describe(code)}` });
     }
   }
 
-  /** Plays a sample sentence with the configured Azure voice (runs inside the tap). */
-  private testAzureVoice(): void {
+  /** Plays a sample sentence with the configured cloud voice (runs inside the tap). */
+  private testCloudVoice(provider: CloudProvider): void {
+    const slot = this.cloud[provider];
     this.player.pause();
-    this.azureEngine.unlock();
-    this.view.setAzureState({ status: "正在试听…" });
-    this.azureEngine
-      .speak("你好，这是 Azure 神经网络语音的试听。轻小说朗读听起来会是这个样子。", { rate: this.settings.rate })
-      .then(() => this.view.setAzureState({ status: "试听完成" }))
+    slot.engine.unlock();
+    this.view.setCloudState(provider, { status: "正在试听…" });
+    slot.engine
+      .speak(slot.sample, { rate: this.settings.rate })
+      .then(() => this.view.setCloudState(provider, { status: "试听完成" }))
       .catch((err: unknown) => {
         const code = err instanceof SpeechEngineError ? err.code : String(err);
-        this.view.setAzureState({ status: `试听失败：${describeAzureError(code)}` });
+        this.view.setCloudState(provider, { status: `试听失败：${slot.describe(code)}` });
       });
   }
 
@@ -892,7 +1050,7 @@ export class Reader implements PlaybackSource {
         userAgent: navigator.userAgent,
         url: location.href,
         engine: this.settings.ttsEngine,
-        azureFallback: this.azureWithFallback.fallbackReason ?? null,
+        cloudFallback: this.settings.ttsEngine === "system" ? null : (this.cloud[this.settings.ttsEngine].withFallback.fallbackReason ?? null),
         loads: this.adapter.getDiagnostics?.() ?? [],
       },
       null,
@@ -903,12 +1061,12 @@ export class Reader implements PlaybackSource {
     if (!navigator.clipboard) window.prompt("复制以下诊断信息", data);
   }
 
-  /** Lock-screen / Control Center controls (effective while the Azure audio element plays). */
+  /** Lock-screen / Control Center controls (effective while a cloud voice's audio element plays). */
   private setupMediaSession(): void {
     const ms = (navigator as Navigator & { mediaSession?: MediaSession }).mediaSession;
     if (!ms) return;
     const handlers: [MediaSessionAction, () => void][] = [
-      ["play", () => this.player.toggle()],
+      ["play", () => !this.player.isActive && this.togglePlay()],
       ["pause", () => this.player.pause()],
       ["nexttrack", () => this.player.nextParagraph()],
       ["previoustrack", () => this.player.previousParagraph()],

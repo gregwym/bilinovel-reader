@@ -10,11 +10,13 @@
 - 站点内部的分页（`180204.html → 180204_2.html → …`）对用户不可见，一章就是一章
 - 滚动到底部自动加载下一页 / 下一章，不刷新页面（`fetch` + `DOMParser`），地址栏用 `history.replaceState` 同步
 - 逐段朗读：当前段落高亮并跟随滚动，自动跨页、跨章继续
-- 两种朗读引擎：系统语音（Safari Web Speech）或 **Azure 神经网络语音**（更自然，可在后台/锁屏继续播放，锁屏可控制）
+- 三种朗读引擎：系统语音（Safari Web Speech）、**Azure 神经网络语音**或 **Google Cloud 语音**（后两者更自然，可在后台/锁屏继续播放，锁屏可控制）
 - 播放 / 暂停 / 上一段 / 下一段，点击段落「从这里开始朗读」，语速（0.75–1.5x）与中文声音可选
 - 目录与跳转：右上角 ☰ 打开目录（按卷分组、高亮当前章），可上一章 / 下一章、上一页 / 下一页、跳到本章任意分页；内容顶部有「↑ 本章上一页 / 上一章」按钮，无需退出阅读模式
 - 阅读与收听共用一个光标；按书保存进度（精确到段落，并记录段落开头文字以便定位）。重新打开同一章的任意一页会直接回到上次位置；打开其他章时提示「上次读到…，要继续吗？」
 - 进度保存在 Userscripts 自身的存储里（不受 Safari 清除网站数据影响，所有标签页共享）；后台标签页不会覆盖其他标签页更新的进度，切回时会提示跳到较新的位置
+- 每个标签页还在自己的历史记录里记住位置：Safari 回收后台标签页再重新加载时，直接回到这个标签页离开时的位置，不会被较旧的共享进度拉回去
+- 暂停后滚动到别处再点 ▶，从当前看到的段落开始朗读；暂停的段落仍在屏幕上时则继续朗读该段。来电、其他 App 播放等系统打断会正确进入暂停状态
 - 字号、行距、字体（黑体/宋体）、主题（自动/浅色/护眼/深色），设置持久化
 - 插图按原顺序内联显示（懒加载、自适应宽度）
 - 保守抓取：串行队列、两次请求间隔 ≥ 4 秒、只预取下一页、临时错误指数退避重试；出错时显示「重试 / 打开原网页」，已加载内容和进度都不会丢
@@ -66,6 +68,18 @@ https://gregwym.github.io/bilinovel-reader/bili-reader.user.js
 - 每次请求约 300 字；可设置「预缓冲」1–8 句（默认 3 句，最多 2 个并发请求），跳转后的第一句会截短以便尽快开始播放。
 - 出错时按类型处理：网络/限流/服务器错误会先重试，仍失败则这一句临时用系统语音，20 秒起逐步延长后自动重试 Azure；额度用完 30 分钟后重试；密钥错误需修改设置。设置里也可「立即重试 Azure」。
 
+## Google Cloud 语音（可选）
+
+Google Cloud Text-to-Speech 每月免费额度按声音类型分别计算：**Chirp 3 HD 100 万字符、WaveNet 100 万字符、Standard 400 万字符**（中文每个字计 1 个字符）。与 Azure F0 不同，Google 需要绑定结算账号，**超出免费额度会扣费**；因此阅读器在本机按类型统计当月用量，**到达免费额度即停止使用 Google**、改用系统语音（下月自动恢复）。本机统计只覆盖这台设备，多设备共用同一个密钥时请另外设置预算提醒。
+
+1. 在 [Google Cloud 控制台](https://console.cloud.google.com/) 创建项目，绑定结算账号（新账号有试用赠金）。
+2. 启用 **Cloud Text-to-Speech API**。
+3. 「API 和服务 → 凭据」创建 **API 密钥**，并在「API 限制」里只允许 Cloud Text-to-Speech API。
+4. 建议在「结算 → 预算和提醒」设一个很小的预算（如 1 美元）提醒。
+5. 阅读器 ⋯ →「朗读」选 **Google**，粘贴密钥，选择声音（默认 Chirp 3 HD Aoede），点「试听」。
+
+说明：密钥同样保存在 Userscripts 私有存储；请求通过 `GM.xmlHttpRequest` 发往 `texttospeech.googleapis.com`；出错时的重试、临时改用系统语音等行为与 Azure 相同。价格与额度以 [Google 官方价格页](https://cloud.google.com/text-to-speech/pricing) 为准。
+
 ## 开发
 
 ```bash
@@ -106,8 +120,10 @@ src/
 │   └── ProgressStore.ts       进度与设置（异步 KV 接口，可换成 IndexedDB）
 ├── speech/
 │   ├── SpeechEngine.ts        SpeechEngine 接口 + WebSpeechEngine（可替换为原生引擎）
-│   ├── AzureSpeechEngine.ts   Azure 神经网络语音（REST + <audio>，预取、用量估算）
-│   ├── FallbackSpeechEngine.ts Azure 失败（额度/密钥/网络）时自动改用系统语音
+│   ├── CloudSpeechEngine.ts   云端语音公共部分（<audio> 播放、预取、缓存）
+│   ├── AzureSpeechEngine.ts   Azure 神经网络语音（REST、用量估算）
+│   ├── GoogleSpeechEngine.ts  Google Cloud 语音（REST、按类型统计并限制在免费额度内）
+│   ├── FallbackSpeechEngine.ts 云端语音失败（额度/密钥/网络）时自动改用系统语音
 │   ├── SpeechPlayer.ts        逐段朗读状态机 idle/playing/paused/buffering/error
 │   └── VoiceManager.ts        中文声音列表
 ├── ui/                        ReaderView（Shadow DOM）与样式
@@ -147,7 +163,7 @@ src/
 
 Bili Reader 没有后端，不会向开发者发送任何阅读数据。所有阅读进度和设置都只保存在你的设备上（Userscripts 的脚本存储和浏览器本地存储）。脚本只会向你正在浏览的 Bilinovel 站点请求你接下来要读的页面。
 
-例外：如果你启用了 Azure 语音，正在朗读的文字会直接从你的设备发送到你自己的 Azure Speech 资源（微软）以合成语音；默认的系统语音不会发送任何内容。
+例外：如果你启用了 Azure 或 Google 语音，正在朗读的文字会直接从你的设备发送到你自己的 Azure Speech 资源（微软）或 Google Cloud 项目以合成语音；默认的系统语音不会发送任何内容。
 
 ## 许可
 

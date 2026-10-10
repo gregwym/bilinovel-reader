@@ -63,8 +63,25 @@ const PROGRESS_KEY = "biliReader.progress";
 const SETTINGS_KEY = "biliReader.settings";
 const MAX_BOOKS = 200;
 
+/** Combines two copies of the progress map, keeping each book's most recent record. */
+export function mergeProgress(a: string, b: string): string {
+  try {
+    const x = JSON.parse(a) as Record<string, SavedProgress>;
+    const y = JSON.parse(b) as Record<string, SavedProgress>;
+    if (!x || typeof x !== "object") return b;
+    if (!y || typeof y !== "object") return a;
+    const out = { ...x };
+    for (const [id, p] of Object.entries(y)) {
+      if (!out[id] || (p?.updatedAt ?? 0) > (out[id]?.updatedAt ?? 0)) out[id] = p;
+    }
+    return JSON.stringify(out);
+  } catch {
+    return a;
+  }
+}
+
 export class ProgressStore {
-  constructor(private readonly kv: KeyValueStore = new DurableStore()) {}
+  constructor(private readonly kv: KeyValueStore = new DurableStore(undefined, undefined, mergeProgress)) {}
 
   private async readAll(): Promise<Record<string, SavedProgress>> {
     try {
@@ -107,7 +124,8 @@ export class ProgressStore {
 
 export type Theme = "system" | "light" | "dark" | "sepia";
 export type FontFamily = "sans" | "serif";
-export type TtsEngine = "system" | "azure";
+export type TtsEngine = "system" | "azure" | "google";
+export type CloudProvider = Exclude<TtsEngine, "system">;
 
 export interface Settings {
   fontSize: number;
@@ -119,7 +137,8 @@ export interface Settings {
   ttsEngine: TtsEngine;
   azureRegion: string;
   azureVoice: string;
-  /** Azure sentences synthesized ahead of playback. */
+  googleVoice: string;
+  /** Sentences synthesized ahead of playback (Azure and Google). */
   azureBuffer: number;
 }
 
@@ -132,6 +151,7 @@ export const DEFAULT_SETTINGS: Settings = {
   ttsEngine: "system",
   azureRegion: "eastasia",
   azureVoice: "zh-CN-XiaoxiaoNeural",
+  googleVoice: "cmn-CN-Chirp3-HD-Aoede",
   azureBuffer: 3,
 };
 
@@ -167,13 +187,17 @@ export function sanitizeSettings(s: Settings): Settings {
     fontFamily: s.fontFamily === "serif" ? "serif" : "sans",
     voiceURI: typeof s.voiceURI === "string" ? s.voiceURI : undefined,
     rate: clamp(s.rate, 0.5, 2, DEFAULT_SETTINGS.rate),
-    ttsEngine: s.ttsEngine === "azure" ? "azure" : "system",
+    ttsEngine: s.ttsEngine === "azure" || s.ttsEngine === "google" ? s.ttsEngine : "system",
     azureRegion:
       typeof s.azureRegion === "string" && /^[a-z0-9]+$/.test(s.azureRegion.trim().toLowerCase())
         ? s.azureRegion.trim().toLowerCase()
         : DEFAULT_SETTINGS.azureRegion,
     azureVoice:
       typeof s.azureVoice === "string" && /^[A-Za-z0-9-]+$/.test(s.azureVoice) ? s.azureVoice : DEFAULT_SETTINGS.azureVoice,
+    googleVoice:
+      typeof s.googleVoice === "string" && /^[A-Za-z0-9-]+$/.test(s.googleVoice)
+        ? s.googleVoice
+        : DEFAULT_SETTINGS.googleVoice,
     azureBuffer: Math.round(clamp(s.azureBuffer, 1, 10, DEFAULT_SETTINGS.azureBuffer)),
   };
 }
@@ -228,28 +252,53 @@ export class SecretStore implements KeyValueStore {
 }
 
 export const AZURE_KEY_SECRET = "biliReader.azureKey";
+export const GOOGLE_KEY_SECRET = "biliReader.googleKey";
+
+/** GM storage calls go through the userscript manager and can stall (e.g. while Safari is in the background). */
+const GM_TIMEOUT_MS = 3000;
+
+function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(fallback), ms);
+    p.then(
+      (v) => (clearTimeout(t), resolve(v)),
+      () => (clearTimeout(t), resolve(fallback)),
+    );
+  });
+}
 
 /**
  * Durable storage for reading progress: the userscript manager's storage
  * survives Safari clearing site data, is shared by all tabs and by
- * bilinovel.net/.com. Values written to localStorage by older versions are
- * still read until the first save.
+ * bilinovel.net/.com. Every write also goes to localStorage first
+ * (synchronous, so it lands even if the page is suspended right after), and
+ * reads combine both copies with `merge` (or prefer the manager's copy).
  */
 export class DurableStore extends SecretStore {
   private readonly legacy: KeyValueStore;
 
-  constructor(gm?: GmStorage, legacy: KeyValueStore = new LocalStorageStore()) {
+  constructor(
+    gm?: GmStorage,
+    legacy: KeyValueStore = new LocalStorageStore(),
+    private readonly merge?: (managerValue: string, localValue: string) => string,
+  ) {
     super(gm ?? (globalThis as { GM?: GmStorage }).GM, legacy);
     this.legacy = legacy;
   }
 
   override async get(key: string): Promise<string | null> {
-    return (await super.get(key)) ?? (this.isPrivate ? this.legacy.get(key) : null);
+    if (!this.isPrivate) return super.get(key);
+    const [managed, local] = await Promise.all([
+      withTimeout(super.get(key), GM_TIMEOUT_MS, null),
+      this.legacy.get(key),
+    ]);
+    if (managed !== null && local !== null && this.merge) return this.merge(managed, local);
+    return managed ?? local;
   }
 
   override async set(key: string, value: string): Promise<void> {
-    await super.set(key, value);
-    // Keep a local copy in case the manager's storage becomes unavailable.
-    if (this.isPrivate) await this.legacy.set(key, value);
+    if (!this.isPrivate) return super.set(key, value);
+    await this.legacy.set(key, value);
+    await withTimeout(super.set(key, value), GM_TIMEOUT_MS, undefined);
   }
 }
