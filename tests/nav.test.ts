@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { parseCatalogDocument } from "../src/adapters/bilinovel/catalog";
 import { pageCountFromTitle } from "../src/adapters/bilinovel/pagination";
 import { parseBilinovelDocument } from "../src/adapters/bilinovel/parser";
 import { ChapterBuffer } from "../src/reader/ChapterBuffer";
-import { DurableStore, MemoryStore, ProgressStore } from "../src/reader/ProgressStore";
+import { DurableStore, MemoryStore, ProgressStore, mergeProgress } from "../src/reader/ProgressStore";
 import { ORIGIN, loadFixture, parseHtml } from "./helpers";
 
 const url = (path: string) => new URL(ORIGIN + path);
@@ -112,5 +112,40 @@ describe("DurableStore", () => {
     const rec = await progress.save({ bookId: "1", chapterId: "2", pageIndex: 0, paragraphIndex: 3 }, { snippet: "开头" });
     expect(rec.snippet).toBe("开头");
     expect((await progress.get("1"))?.updatedAt).toBe(rec.updatedAt);
+  });
+
+  it("keeps each book's newest record when the two copies disagree", async () => {
+    const gm = gmStore();
+    const legacy = new MemoryStore();
+    // The manager's copy is stale (its write was lost); localStorage has the newer position.
+    gm.data.set("biliReader.progress", JSON.stringify({ "1": { chapterId: "c", pageIndex: 0, paragraphIndex: 1, updatedAt: 100 } }));
+    await legacy.set(
+      "biliReader.progress",
+      JSON.stringify({
+        "1": { chapterId: "c", pageIndex: 2, paragraphIndex: 7, updatedAt: 200 },
+        "2": { chapterId: "x", pageIndex: 0, paragraphIndex: 0, updatedAt: 50 },
+      }),
+    );
+    const progress = new ProgressStore(new DurableStore(gm, legacy, mergeProgress));
+    expect((await progress.get("1"))?.paragraphIndex).toBe(7);
+    expect((await progress.get("2"))?.chapterId).toBe("x");
+  });
+
+  it("writes localStorage even if the manager's storage never answers", async () => {
+    vi.useFakeTimers();
+    try {
+      const legacy = new MemoryStore();
+      const hung = { getValue: () => new Promise<unknown>(() => {}), setValue: () => new Promise<void>(() => {}) };
+      const store = new DurableStore(hung, legacy, mergeProgress);
+      const write = store.set("k", "v");
+      await vi.advanceTimersByTimeAsync(3000);
+      await write;
+      expect(await legacy.get("k")).toBe("v");
+      const read = store.get("k");
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(await read).toBe("v");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -1,11 +1,13 @@
 import type { Catalog, CatalogChapter, FrameHost, Paragraph } from "../adapters/types";
 import type { PlayerState } from "../speech/SpeechPlayer";
 import type { VoiceInfo } from "../speech/VoiceManager";
-import { AZURE_PRESET_VOICES, AzureUsageMeter, type AzureVoice } from "../speech/AzureSpeechEngine";
+import { AZURE_PRESET_VOICES, type AzureVoice } from "../speech/AzureSpeechEngine";
+import { GOOGLE_PRESET_VOICES } from "../speech/GoogleSpeechEngine";
 import {
   FONT_SIZE_RANGE,
   LINE_HEIGHT_OPTIONS,
   RATE_OPTIONS,
+  type CloudProvider,
   type Settings,
   type Theme,
 } from "../reader/ProgressStore";
@@ -33,12 +35,12 @@ export interface ViewCallbacks {
   onRate(rate: number): void;
   onVoice(voiceURI: string | undefined): void;
   onSettings(settings: Settings): void;
-  /** New Azure key entered (empty string clears it). */
-  onAzureKey(key: string): void;
-  /** Speak a short sample with the Azure voice (called from a tap). */
-  onAzureTest(): void;
-  /** Try Azure again now after it fell back to the system voice. */
-  onAzureRetry(): void;
+  /** New Azure/Google key entered (empty string clears it). */
+  onCloudKey(provider: CloudProvider, key: string): void;
+  /** Speak a short sample with the cloud voice (called from a tap). */
+  onCloudTest(provider: CloudProvider): void;
+  /** Try the cloud service again now after it fell back to the system voice. */
+  onCloudRetry(provider: CloudProvider): void;
   onCopyDiagnostics(): void;
   onOpenOriginal(): void;
   onRestartChapter(): void;
@@ -50,6 +52,21 @@ export interface ViewCallbacks {
   /** The "previous page/chapter" button above the loaded content. */
   onTopNav(): void;
 }
+
+export interface CloudState {
+  voices: AzureVoice[];
+  keySet: boolean;
+  status: string;
+  /** Usage line shown under the settings. */
+  usage: string;
+  fallback: boolean;
+}
+
+const PRESET_VOICES: Record<CloudProvider, AzureVoice[]> = { azure: AZURE_PRESET_VOICES, google: GOOGLE_PRESET_VOICES };
+const CLOUD_LABELS: Record<CloudProvider, { name: string; keyHint: string }> = {
+  azure: { name: "Azure", keyHint: "粘贴 Speech 资源密钥" },
+  google: { name: "Google", keyHint: "粘贴 Google Cloud API 密钥" },
+};
 
 export type TocStep = "prev-chapter" | "prev-page" | "next-page" | "next-chapter";
 
@@ -114,11 +131,10 @@ export class ReaderView {
   private chipTimer?: ReturnType<typeof setTimeout>;
   private savedPageStyles?: { html: string; body: string };
   private voices: VoiceInfo[] = [];
-  private azureVoices: AzureVoice[] = AZURE_PRESET_VOICES;
-  private azureKeySet = false;
-  private azureStatus = "";
-  private azureUsage = 0;
-  private azureFallback = false;
+  private cloud: Record<CloudProvider, CloudState> = {
+    azure: { voices: AZURE_PRESET_VOICES, keySet: false, status: "", usage: "", fallback: false },
+    google: { voices: GOOGLE_PRESET_VOICES, keySet: false, status: "", usage: "", fallback: false },
+  };
   private systemDark = globalThis.matchMedia?.("(prefers-color-scheme: dark)");
 
   constructor(
@@ -467,6 +483,15 @@ export class ReaderView {
     }
   }
 
+  /** True if any part of the paragraph is inside the reading area. */
+  isOnScreen(id: string): boolean {
+    const el = this.byId.get(id);
+    if (!el || !this.scrollEl) return false;
+    const view = this.scrollEl.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    return r.bottom > view.top && r.top < view.bottom;
+  }
+
   isRendered(id: string): boolean {
     return this.byId.has(id);
   }
@@ -549,18 +574,10 @@ export class ReaderView {
     this.renderSheetIfOpen();
   }
 
-  setAzureState(state: {
-    voices?: AzureVoice[];
-    keySet?: boolean;
-    status?: string;
-    usage?: number;
-    fallback?: boolean;
-  }): void {
-    if (state.fallback !== undefined) this.azureFallback = state.fallback;
-    if (state.voices) this.azureVoices = state.voices.length ? state.voices : AZURE_PRESET_VOICES;
-    if (state.keySet !== undefined) this.azureKeySet = state.keySet;
-    if (state.status !== undefined) this.azureStatus = state.status;
-    if (state.usage !== undefined) this.azureUsage = state.usage;
+  setCloudState(provider: CloudProvider, state: Partial<CloudState>): void {
+    const cur = this.cloud[provider];
+    const voices = state.voices && !state.voices.length ? PRESET_VOICES[provider] : state.voices;
+    this.cloud[provider] = { ...cur, ...state, voices: voices ?? cur.voices };
     this.renderSheetIfOpen();
   }
 
@@ -751,7 +768,7 @@ export class ReaderView {
       this.cb.onVoice(uri);
     });
 
-    const azureRows = s.ttsEngine === "azure" ? this.renderAzureRows(row) : [row("声音", voiceSelect)];
+    const engineRows = s.ttsEngine === "system" ? [row("声音", voiceSelect)] : this.renderCloudRows(s.ttsEngine, row);
 
     const close = () => this.closeSheet();
     const sheet = h(
@@ -806,12 +823,13 @@ export class ReaderView {
           [
             ["system", "系统语音"],
             ["azure", "Azure"],
+            ["google", "Google"],
           ],
           s.ttsEngine,
           (v) => this.update({ ttsEngine: v }),
         ),
       ),
-      ...azureRows,
+      ...engineRows,
       h(
         "div",
         { class: "br-sheet-actions" },
@@ -826,19 +844,21 @@ export class ReaderView {
     this.sheetEl.replaceChildren(h("div", { class: "br-sheet-backdrop", onclick: close }), sheet);
   }
 
-  private renderAzureRows(row: (label: string, control: Node) => HTMLElement): HTMLElement[] {
+  private renderCloudRows(provider: CloudProvider, row: (label: string, control: Node) => HTMLElement): HTMLElement[] {
     const s = this.settings;
+    const st = this.cloud[provider];
+    const { name, keyHint } = CLOUD_LABELS[provider];
     const keyInput = h("input", {
       type: "password",
       autocomplete: "off",
       autocapitalize: "off",
       spellcheck: "false",
-      placeholder: this.azureKeySet ? "已保存（输入新密钥以替换）" : "粘贴 Speech 资源密钥",
-      "aria-label": "Azure 密钥",
+      placeholder: st.keySet ? "已保存（输入新密钥以替换）" : keyHint,
+      "aria-label": `${name} 密钥`,
     });
     keyInput.addEventListener("change", () => {
       const v = keyInput.value.trim();
-      if (v) this.cb.onAzureKey(v);
+      if (v) this.cb.onCloudKey(provider, v);
     });
 
     const regionInput = h("input", {
@@ -855,28 +875,28 @@ export class ReaderView {
       if (v && v !== s.azureRegion) this.update({ azureRegion: v });
     });
 
-    const voiceSelect = h("select", { "aria-label": "Azure 声音" });
-    const voices = this.azureVoices.some((v) => v.shortName === s.azureVoice)
-      ? this.azureVoices
-      : [{ shortName: s.azureVoice, label: s.azureVoice, locale: "" }, ...this.azureVoices];
+    const current = provider === "azure" ? s.azureVoice : s.googleVoice;
+    const voiceSelect = h("select", { "aria-label": `${name} 声音` });
+    const voices = st.voices.some((v) => v.shortName === current)
+      ? st.voices
+      : [{ shortName: current, label: current, locale: "" }, ...st.voices];
     for (const v of voices) voiceSelect.append(h("option", { value: v.shortName }, v.label));
-    voiceSelect.value = s.azureVoice;
-    voiceSelect.addEventListener("change", () => this.update({ azureVoice: voiceSelect.value }));
-
-    const pct = Math.min(100, Math.round((this.azureUsage / AzureUsageMeter.FREE_CHARS) * 100));
-    const usage = `本月约用 ${this.azureUsage.toLocaleString()} / ${AzureUsageMeter.FREE_CHARS.toLocaleString()} 字符（${pct}%，中文按 2 计，以 Azure 后台为准）`;
+    voiceSelect.value = current;
+    voiceSelect.addEventListener("change", () =>
+      this.update(provider === "azure" ? { azureVoice: voiceSelect.value } : { googleVoice: voiceSelect.value }),
+    );
 
     const actions = h(
       "div",
       { class: "br-seg" },
-      h("button", { onclick: () => this.cb.onAzureTest() }, "试听"),
-      this.azureFallback ? h("button", { onclick: () => this.cb.onAzureRetry() }, "立即重试 Azure") : null,
-      this.azureKeySet ? h("button", { onclick: () => this.cb.onAzureKey("") }, "清除密钥") : null,
+      h("button", { onclick: () => this.cb.onCloudTest(provider) }, "试听"),
+      st.fallback ? h("button", { onclick: () => this.cb.onCloudRetry(provider) }, `立即重试 ${name}`) : null,
+      st.keySet ? h("button", { onclick: () => this.cb.onCloudKey(provider, "") }, "清除密钥") : null,
     );
 
     return [
       row("密钥", keyInput),
-      row("区域", regionInput),
+      provider === "azure" ? row("区域", regionInput) : null,
       row("声音", voiceSelect),
       row(
         "预缓冲",
@@ -893,7 +913,7 @@ export class ReaderView {
         ),
       ),
       row("", actions),
-      h("div", { class: "br-note" }, this.azureStatus ? `${this.azureStatus}\n${usage}` : usage),
-    ];
+      h("div", { class: "br-note" }, st.status ? `${st.status}\n${st.usage}` : st.usage),
+    ].filter((el): el is HTMLElement => !!el);
   }
 }

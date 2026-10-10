@@ -3,7 +3,7 @@ import { SpeechEngineError, type SpeakOptions, type SpeechEngine } from "./Speec
 /** Errors that go away by themselves: retry the primary engine soon. */
 const TRANSIENT = new Set(["network", "throttled", "server", "audio-error", "timeout"]);
 /** Errors that need a settings change (or the user pressing "retry"). */
-const UNTIL_RESET = new Set(["config", "auth", "bad-request"]);
+const UNTIL_RESET = new Set(["config", "auth", "bad-request", "billing", "api-disabled"]);
 /** Monthly quota used up: probe again occasionally. */
 const QUOTA_COOLDOWN_MS = 30 * 60_000;
 const TRANSIENT_BASE_MS = 20_000;
