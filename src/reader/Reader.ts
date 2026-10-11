@@ -24,7 +24,14 @@ import {
   googleTierLabel,
   listGoogleChineseVoices,
 } from "../speech/GoogleSpeechEngine";
-import type { CloudSpeechEngine } from "../speech/CloudSpeechEngine";
+import {
+  GEMINI_PRESET_MODELS,
+  GEMINI_VOICES,
+  GeminiSpeechEngine,
+  GeminiUsageMeter,
+  describeGeminiError,
+  listGeminiTtsModels,
+} from "../speech/GeminiSpeechEngine";
 import { FallbackSpeechEngine } from "../speech/FallbackSpeechEngine";
 import { SpeechEngineError } from "../speech/SpeechEngine";
 import { VoiceManager } from "../speech/VoiceManager";
@@ -36,6 +43,7 @@ import {
   AZURE_KEY_SECRET,
   DEFAULT_SETTINGS,
   GOOGLE_KEY_SECRET,
+  GEMINI_KEY_SECRET,
   type CloudProvider,
   ProgressStore,
   SecretStore,
@@ -66,12 +74,12 @@ interface JumpTarget {
   url?: string;
 }
 
-/** A network TTS service (Azure, Google) with its key and system-voice fallback. */
+/** A network speech service (Azure, Google, Gemini) with its key and system-voice fallback. */
 interface CloudSlot {
   name: string;
   secret: string;
   key: string;
-  engine: CloudSpeechEngine;
+  engine: SpeechEngine & { setPrefetchCount(n: number): void };
   withFallback: FallbackSpeechEngine;
   describe(code: string): string;
   usageText(): string;
@@ -132,6 +140,9 @@ export class Reader implements PlaybackSource {
   private readonly secrets = new SecretStore();
   private readonly azureUsage = new AzureUsageMeter();
   private readonly googleUsage = new GoogleUsageMeter();
+  private readonly geminiUsage = new GeminiUsageMeter();
+  private readonly gemini: GeminiSpeechEngine;
+  private geminiCacheBytes = 0;
   private settings!: Settings;
   private cursorId?: string;
   private loading?: Promise<boolean>;
@@ -176,6 +187,33 @@ export class Reader implements PlaybackSource {
       },
       { meter: this.googleUsage, onUsage: () => this.renderUsage("google") },
     );
+    const gemini = (this.gemini = new GeminiSpeechEngine(
+      () => {
+        const key = this.cloud.gemini.key;
+        const s = this.settings;
+        return key
+          ? {
+              key,
+              model: s.geminiModel,
+              voice: s.geminiVoice,
+              style: s.geminiStyle.trim(),
+              segmentChars: s.geminiSegment,
+              ahead: s.geminiAhead,
+            }
+          : undefined;
+      },
+      {
+        usage: this.geminiUsage,
+        onStatus: (msg) => {
+          this.view.setCloudState("gemini", { status: msg });
+          if (msg) this.view.setPlayerMessage(msg);
+        },
+        onUsage: (bytes) => {
+          this.geminiCacheBytes = bytes;
+          this.renderUsage("gemini");
+        },
+      },
+    ));
     this.cloud = {
       azure: {
         name: "Azure",
@@ -209,6 +247,25 @@ export class Reader implements PlaybackSource {
         },
         listVoices: (key) => listGoogleChineseVoices(key),
         sample: "你好，这是 Google 语音的试听。轻小说朗读听起来会是这个样子。",
+      },
+      gemini: {
+        name: "Gemini",
+        secret: GEMINI_KEY_SECRET,
+        key: "",
+        engine: gemini,
+        withFallback: this.withFallback("gemini", gemini),
+        describe: describeGeminiError,
+        usageText: () => {
+          const used = this.geminiUsage.get();
+          const mb = (this.geminiCacheBytes / 1024 / 1024).toFixed(0);
+          return `今天约 ${used.requests} 次请求、${used.chars.toLocaleString()} 字；本机缓存 ${mb} MB（本机统计。免费层按每日请求数限制，未开结算的项目才免费；以 AI Studio 为准）`;
+        },
+        listVoices: async (key) => {
+          const models = await listGeminiTtsModels(key).catch(() => [] as string[]);
+          this.view.setCloudState("gemini", { models: models.length ? models : GEMINI_PRESET_MODELS });
+          return GEMINI_VOICES;
+        },
+        sample: "你好，这是 Gemini 语音的试听。轻小说朗读听起来会是这个样子。",
       },
     };
     this.player = new SpeechPlayer(this.webEngine, this, {
@@ -248,6 +305,9 @@ export class Reader implements PlaybackSource {
         onSettings: (s) => this.updateSettings(s),
         onCloudKey: (provider, key) => void this.setCloudKey(provider, key),
         onCloudTest: (provider) => this.testCloudVoice(provider),
+        onClearGeminiCache: () => {
+          void this.gemini.clearCache().then(() => this.view.setCloudState("gemini", { status: "已清除缓存" }));
+        },
         onCloudRetry: (provider) => {
           this.cloud[provider].withFallback.reset();
           this.view.setCloudState(provider, { status: `正在重试 ${this.cloud[provider].name}…`, fallback: false });
@@ -300,11 +360,15 @@ export class Reader implements PlaybackSource {
     this.active = true;
     this.player.setRate(this.settings.rate);
     this.player.setVoice(this.settings.voiceURI);
-    for (const provider of ["azure", "google"] as const) {
+    for (const provider of ["azure", "google", "gemini"] as const) {
       const slot = this.cloud[provider];
       slot.key = (await this.secrets.get(slot.secret)) ?? "";
       this.view.setCloudState(provider, { keySet: !!slot.key, usage: slot.usageText() });
     }
+    void this.gemini.cacheBytes().then((bytes) => {
+      this.geminiCacheBytes = bytes;
+      this.renderUsage("gemini");
+    });
     this.applyEngine();
     if (this.settings.ttsEngine !== "system") void this.refreshCloudVoices(this.settings.ttsEngine);
     this.setupMediaSession();
@@ -946,7 +1010,12 @@ export class Reader implements PlaybackSource {
       prev.ttsEngine !== s.ttsEngine ||
       prev.azureRegion !== s.azureRegion ||
       prev.azureVoice !== s.azureVoice ||
-      prev.googleVoice !== s.googleVoice;
+      prev.googleVoice !== s.googleVoice ||
+      prev.geminiModel !== s.geminiModel ||
+      prev.geminiVoice !== s.geminiVoice ||
+      prev.geminiStyle !== s.geminiStyle ||
+      prev.geminiSegment !== s.geminiSegment ||
+      prev.geminiAhead !== s.geminiAhead;
     if (engineChanged) {
       this.applyEngine();
       if (prev.googleVoice !== s.googleVoice) this.renderUsage("google");
@@ -960,8 +1029,8 @@ export class Reader implements PlaybackSource {
   // ---------------------------------------------------------------------------
   // Speech engines
 
-  private withFallback(provider: CloudProvider, engine: CloudSpeechEngine): FallbackSpeechEngine {
-    const name = provider === "azure" ? "Azure" : "Google";
+  private withFallback(provider: CloudProvider, engine: SpeechEngine): FallbackSpeechEngine {
+    const name = { azure: "Azure", google: "Google", gemini: "Gemini" }[provider];
     return new FallbackSpeechEngine(engine, this.webEngine, {
       onFallback: (code, retryAt) => {
         const when = Number.isFinite(retryAt)
@@ -990,7 +1059,7 @@ export class Reader implements PlaybackSource {
 
   /** Selects the engine for the current settings; a fresh choice retries the cloud service after a fallback. */
   private applyEngine(): void {
-    for (const provider of ["azure", "google"] as const) {
+    for (const provider of ["azure", "google", "gemini"] as const) {
       const slot = this.cloud[provider];
       slot.withFallback.reset();
       slot.engine.setPrefetchCount(this.settings.azureBuffer);

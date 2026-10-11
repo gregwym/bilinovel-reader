@@ -10,7 +10,7 @@
 - 站点内部的分页（`180204.html → 180204_2.html → …`）对用户不可见，一章就是一章
 - 滚动到底部自动加载下一页 / 下一章，不刷新页面（`fetch` + `DOMParser`），地址栏用 `history.replaceState` 同步
 - 逐段朗读：当前段落高亮并跟随滚动，自动跨页、跨章继续
-- 三种朗读引擎：系统语音（Safari Web Speech）、**Azure 神经网络语音**或 **Google Cloud 语音**（后两者更自然，可在后台/锁屏继续播放，锁屏可控制）
+- 四种朗读引擎：系统语音（Safari Web Speech）、**Azure 神经网络语音**、**Google Cloud 语音**（逐句合成），以及 **Gemini 语音**（大模型整段生成、本机缓存）；云端语音更自然，可在后台/锁屏继续播放，锁屏可控制
 - 播放 / 暂停 / 上一段 / 下一段，点击段落「从这里开始朗读」，语速（0.75–1.5x）与中文声音可选
 - 目录与跳转：右上角 ☰ 打开目录（按卷分组、高亮当前章），可上一章 / 下一章、上一页 / 下一页、跳到本章任意分页；内容顶部有「↑ 本章上一页 / 上一章」按钮，无需退出阅读模式
 - 阅读与收听共用一个光标；按书保存进度（精确到段落，并记录段落开头文字以便定位）。重新打开同一章的任意一页会直接回到上次位置；打开其他章时提示「上次读到…，要继续吗？」
@@ -80,6 +80,21 @@ Google Cloud Text-to-Speech 每月免费额度按声音类型分别计算：**Ch
 
 说明：密钥同样保存在 Userscripts 私有存储；请求通过 `GM.xmlHttpRequest` 发往 `texttospeech.googleapis.com`；出错时的重试、临时改用系统语音等行为与 Azure 相同。价格与额度以 [Google 官方价格页](https://cloud.google.com/text-to-speech/pricing) 为准。
 
+## Gemini 语音（可选）
+
+Gemini 用大模型生成语音，语气更像有声书，但工作方式与 Azure/Google 不同：
+
+- **整段生成**：每次请求约 1500 字（可选 800 / 1500 / 3000），约几分钟音频；朗读时还会提前生成后面几段（默认 4 段），网络慢或请求受限时也能连续播放。
+- **本机缓存**：生成的音频存在浏览器 IndexedDB（最多约 400 MB，超出时删最久未听的），重听、刷新页面都不再请求。设置里可「清除缓存」。
+- **高亮**：一段音频对应多个段落，段落起点按字数估算、再对齐到音频里的停顿，高亮可能偶尔早晚一两秒。语速通过播放速度调节（Gemini 本身没有语速参数）。
+- **额度**：Gemini Developer API 的免费层按每分钟/每天的**请求次数**限制（以 AI Studio 显示为准），因此大段请求比逐句请求省额度。只有**未开启结算**的项目才免费；开启结算后按用量计费。免费层的内容可能被 Google 用于改进产品。
+
+1. 打开 [Google AI Studio](https://aistudio.google.com/apikey) 创建 API 密钥。
+2. 阅读器 ⋯ →「朗读」选 **Gemini**，粘贴密钥；选择模型（会自动列出可用的 TTS 模型）和声音，点「试听」。
+3. 「风格」是放在文字前的朗读要求，可改成自己喜欢的语气；改动模型、声音或风格后会重新生成。
+
+被限流时会按服务器建议的时间等待重试；当天次数用完会暂用系统语音，30 分钟后再试。请求通过 `GM.xmlHttpRequest` 发往 `generativelanguage.googleapis.com`。参考：[Gemini 语音生成文档](https://ai.google.dev/gemini-api/docs/speech-generation)、[速率限制](https://ai.google.dev/gemini-api/docs/rate-limits)。
+
 ## 开发
 
 ```bash
@@ -123,6 +138,7 @@ src/
 │   ├── CloudSpeechEngine.ts   云端语音公共部分（<audio> 播放、预取、缓存）
 │   ├── AzureSpeechEngine.ts   Azure 神经网络语音（REST、用量估算）
 │   ├── GoogleSpeechEngine.ts  Google Cloud 语音（REST、按类型统计并限制在免费额度内）
+│   ├── GeminiSpeechEngine.ts  Gemini 语音（整段生成、提前生成、IndexedDB 缓存、按停顿对齐段落）
 │   ├── FallbackSpeechEngine.ts 云端语音失败（额度/密钥/网络）时自动改用系统语音
 │   ├── SpeechPlayer.ts        逐段朗读状态机 idle/playing/paused/buffering/error
 │   └── VoiceManager.ts        中文声音列表
@@ -163,7 +179,7 @@ src/
 
 Bili Reader 没有后端，不会向开发者发送任何阅读数据。所有阅读进度和设置都只保存在你的设备上（Userscripts 的脚本存储和浏览器本地存储）。脚本只会向你正在浏览的 Bilinovel 站点请求你接下来要读的页面。
 
-例外：如果你启用了 Azure 或 Google 语音，正在朗读的文字会直接从你的设备发送到你自己的 Azure Speech 资源（微软）或 Google Cloud 项目以合成语音；默认的系统语音不会发送任何内容。
+例外：如果你启用了 Azure、Google 或 Gemini 语音，正在朗读（及提前生成）的文字会直接从你的设备发送到你自己的 Azure Speech 资源（微软）或 Google 项目以合成语音；默认的系统语音不会发送任何内容。
 
 ## 许可
 

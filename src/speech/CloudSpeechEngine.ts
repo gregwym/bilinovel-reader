@@ -4,7 +4,7 @@ import { sleep } from "../utils/async";
 import { SpeechEngineError, type SpeakOptions, type SpeechEngine } from "./SpeechEngine";
 
 /** A short silent WAV, used to unlock the audio element inside a user gesture. */
-function silentWavUrl(): string {
+export function silentWavUrl(): string {
   const samples = 800; // 0.1s at 8kHz
   const buf = new ArrayBuffer(44 + samples);
   const v = new DataView(buf);

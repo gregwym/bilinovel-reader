@@ -215,7 +215,7 @@ export class SpeechPlayer {
   private upcomingChunks(id: string, chunks: string[], index: number, n: number): string[] {
     const out = chunks.slice(index + 1, index + 1 + n);
     let cursor: string | "pending" | "end" = id;
-    for (let hops = 0; out.length < n && hops < 20; hops++) {
+    for (let hops = 0; out.length < n && hops < Math.max(20, n); hops++) {
       cursor = this.source.next(cursor);
       if (cursor === "pending" || cursor === "end") break;
       const text = this.source.textOf(cursor);
