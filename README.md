@@ -70,7 +70,7 @@ https://gregwym.github.io/bilinovel-reader/bili-reader.user.js
 
 ## Google Cloud 语音（可选）
 
-Google Cloud Text-to-Speech 每月免费额度按声音类型分别计算：**Chirp 3 HD 100 万字符、WaveNet 100 万字符、Standard 400 万字符**（中文每个字计 1 个字符）。与 Azure F0 不同，Google 需要绑定结算账号，**超出免费额度会扣费**；因此阅读器在本机按类型统计当月用量，**到达免费额度即停止使用 Google**、改用系统语音（下月自动恢复）。本机统计只覆盖这台设备，多设备共用同一个密钥时请另外设置预算提醒。
+Google Cloud Text-to-Speech 每月免费额度按声音类型分别计算：**Chirp 3 HD 100 万字符、WaveNet 400 万字符、Standard 400 万字符**（中文每个字计 1 个字符）。与 Azure F0 不同，Google 需要绑定结算账号，**超出免费额度会扣费**；因此阅读器在本机按类型统计当月用量，**到达免费额度即停止使用 Google**、改用系统语音（下月自动恢复）。本机统计只覆盖这台设备，多设备共用同一个密钥时请另外设置预算提醒。
 
 1. 在 [Google Cloud 控制台](https://console.cloud.google.com/) 创建项目，绑定结算账号（新账号有试用赠金）。
 2. 启用 **Cloud Text-to-Speech API**。

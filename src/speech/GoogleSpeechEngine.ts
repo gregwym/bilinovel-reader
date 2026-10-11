@@ -28,7 +28,7 @@ export const GOOGLE_DEFAULT_VOICE = "cmn-CN-Chirp3-HD-Aoede";
 export type GoogleTier = "chirp3-hd" | "wavenet" | "standard";
 export const GOOGLE_FREE_CHARS: Record<GoogleTier, number> = {
   "chirp3-hd": 1_000_000,
-  wavenet: 1_000_000,
+  wavenet: 4_000_000,
   standard: 4_000_000,
 };
 const TIER_LABEL: Record<GoogleTier, string> = { "chirp3-hd": "Chirp 3 HD", wavenet: "WaveNet", standard: "Standard" };
