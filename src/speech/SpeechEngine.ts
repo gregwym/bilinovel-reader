@@ -4,6 +4,8 @@ export interface SpeakOptions {
   rate: number;
   voiceURI?: string;
   lang?: string;
+  /** Paragraph the text belongs to (engines that plan by page use it). */
+  paragraphId?: string;
 }
 
 /**

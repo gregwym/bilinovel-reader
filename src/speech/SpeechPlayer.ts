@@ -215,7 +215,7 @@ export class SpeechPlayer {
   private upcomingChunks(id: string, chunks: string[], index: number, n: number): string[] {
     const out = chunks.slice(index + 1, index + 1 + n);
     let cursor: string | "pending" | "end" = id;
-    for (let hops = 0; out.length < n && hops < Math.max(20, n); hops++) {
+    for (let hops = 0; out.length < n && hops < 20; hops++) {
       cursor = this.source.next(cursor);
       if (cursor === "pending" || cursor === "end") break;
       const text = this.source.textOf(cursor);
@@ -261,7 +261,7 @@ export class SpeechPlayer {
         const chunks = this.chunksFor(id, text);
         while (alive() && this.chunkIndex < chunks.length) {
           try {
-            const opts = { rate: this.rate, voiceURI: this.voiceURI };
+            const opts = { rate: this.rate, voiceURI: this.voiceURI, paragraphId: id };
             const speaking = this.engine.speak(chunks[this.chunkIndex], opts);
             if (this.engine.prefetch) {
               const upcoming = this.upcomingChunks(id, chunks, this.chunkIndex, this.engine.prefetchCount ?? 1);
