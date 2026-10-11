@@ -30,6 +30,7 @@ const metadata = `// ==UserScript==
 // @grant        GM.setValue
 // @connect      speech.microsoft.com
 // @connect      texttospeech.googleapis.com
+// @connect      generativelanguage.googleapis.com
 // @homepageURL  ${PAGES_URL}/
 // @updateURL    ${SCRIPT_URL}
 // @downloadURL  ${SCRIPT_URL}

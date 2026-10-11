@@ -6,6 +6,14 @@
  * callers.
  */
 
+import {
+  GEMINI_AHEAD_OPTIONS,
+  GEMINI_DEFAULT_MODEL,
+  GEMINI_DEFAULT_STYLE,
+  GEMINI_DEFAULT_VOICE,
+  GEMINI_SEGMENT_OPTIONS,
+} from "../speech/GeminiSpeechEngine";
+
 export interface KeyValueStore {
   get(key: string): Promise<string | null>;
   set(key: string, value: string): Promise<void>;
@@ -124,7 +132,7 @@ export class ProgressStore {
 
 export type Theme = "system" | "light" | "dark" | "sepia";
 export type FontFamily = "sans" | "serif";
-export type TtsEngine = "system" | "azure" | "google";
+export type TtsEngine = "system" | "azure" | "google" | "gemini";
 export type CloudProvider = Exclude<TtsEngine, "system">;
 
 export interface Settings {
@@ -140,6 +148,14 @@ export interface Settings {
   googleVoice: string;
   /** Sentences synthesized ahead of playback (Azure and Google). */
   azureBuffer: number;
+  geminiModel: string;
+  geminiVoice: string;
+  /** Reading direction placed before each Gemini request. */
+  geminiStyle: string;
+  /** Characters per Gemini request. */
+  geminiSegment: number;
+  /** Gemini segments generated ahead of playback. */
+  geminiAhead: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -153,6 +169,11 @@ export const DEFAULT_SETTINGS: Settings = {
   azureVoice: "zh-CN-XiaoxiaoNeural",
   googleVoice: "cmn-CN-Chirp3-HD-Aoede",
   azureBuffer: 3,
+  geminiModel: GEMINI_DEFAULT_MODEL,
+  geminiVoice: GEMINI_DEFAULT_VOICE,
+  geminiStyle: GEMINI_DEFAULT_STYLE,
+  geminiSegment: 1500,
+  geminiAhead: 4,
 };
 
 export const RATE_OPTIONS = [0.75, 0.85, 0.9, 1.0, 1.1, 1.2, 1.35, 1.5];
@@ -187,7 +208,7 @@ export function sanitizeSettings(s: Settings): Settings {
     fontFamily: s.fontFamily === "serif" ? "serif" : "sans",
     voiceURI: typeof s.voiceURI === "string" ? s.voiceURI : undefined,
     rate: clamp(s.rate, 0.5, 2, DEFAULT_SETTINGS.rate),
-    ttsEngine: s.ttsEngine === "azure" || s.ttsEngine === "google" ? s.ttsEngine : "system",
+    ttsEngine: (["azure", "google", "gemini"] as const).includes(s.ttsEngine as "azure") ? s.ttsEngine : "system",
     azureRegion:
       typeof s.azureRegion === "string" && /^[a-z0-9]+$/.test(s.azureRegion.trim().toLowerCase())
         ? s.azureRegion.trim().toLowerCase()
@@ -199,6 +220,13 @@ export function sanitizeSettings(s: Settings): Settings {
         ? s.googleVoice
         : DEFAULT_SETTINGS.googleVoice,
     azureBuffer: Math.round(clamp(s.azureBuffer, 1, 10, DEFAULT_SETTINGS.azureBuffer)),
+    geminiModel:
+      typeof s.geminiModel === "string" && /^[a-z0-9.-]+$/.test(s.geminiModel) ? s.geminiModel : DEFAULT_SETTINGS.geminiModel,
+    geminiVoice:
+      typeof s.geminiVoice === "string" && /^[A-Za-z]+$/.test(s.geminiVoice) ? s.geminiVoice : DEFAULT_SETTINGS.geminiVoice,
+    geminiStyle: typeof s.geminiStyle === "string" ? s.geminiStyle.slice(0, 300) : DEFAULT_SETTINGS.geminiStyle,
+    geminiSegment: GEMINI_SEGMENT_OPTIONS.includes(s.geminiSegment) ? s.geminiSegment : DEFAULT_SETTINGS.geminiSegment,
+    geminiAhead: GEMINI_AHEAD_OPTIONS.includes(s.geminiAhead) ? s.geminiAhead : DEFAULT_SETTINGS.geminiAhead,
   };
 }
 
@@ -253,6 +281,7 @@ export class SecretStore implements KeyValueStore {
 
 export const AZURE_KEY_SECRET = "biliReader.azureKey";
 export const GOOGLE_KEY_SECRET = "biliReader.googleKey";
+export const GEMINI_KEY_SECRET = "biliReader.geminiKey";
 
 /** GM storage calls go through the userscript manager and can stall (e.g. while Safari is in the background). */
 const GM_TIMEOUT_MS = 3000;

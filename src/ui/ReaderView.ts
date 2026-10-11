@@ -4,6 +4,13 @@ import type { VoiceInfo } from "../speech/VoiceManager";
 import { AZURE_PRESET_VOICES, type AzureVoice } from "../speech/AzureSpeechEngine";
 import { GOOGLE_PRESET_VOICES } from "../speech/GoogleSpeechEngine";
 import {
+  GEMINI_AHEAD_OPTIONS,
+  GEMINI_DEFAULT_STYLE,
+  GEMINI_PRESET_MODELS,
+  GEMINI_SEGMENT_OPTIONS,
+  GEMINI_VOICES,
+} from "../speech/GeminiSpeechEngine";
+import {
   FONT_SIZE_RANGE,
   LINE_HEIGHT_OPTIONS,
   RATE_OPTIONS,
@@ -41,6 +48,8 @@ export interface ViewCallbacks {
   onCloudTest(provider: CloudProvider): void;
   /** Try the cloud service again now after it fell back to the system voice. */
   onCloudRetry(provider: CloudProvider): void;
+  /** Delete the locally cached Gemini audio. */
+  onClearGeminiCache(): void;
   onCopyDiagnostics(): void;
   onOpenOriginal(): void;
   onRestartChapter(): void;
@@ -60,13 +69,31 @@ export interface CloudState {
   /** Usage line shown under the settings. */
   usage: string;
   fallback: boolean;
+  /** Gemini only: TTS models offered by the API. */
+  models?: string[];
 }
 
-const PRESET_VOICES: Record<CloudProvider, AzureVoice[]> = { azure: AZURE_PRESET_VOICES, google: GOOGLE_PRESET_VOICES };
+const PRESET_VOICES: Record<CloudProvider, AzureVoice[]> = {
+  azure: AZURE_PRESET_VOICES,
+  google: GOOGLE_PRESET_VOICES,
+  gemini: GEMINI_VOICES,
+};
 const CLOUD_LABELS: Record<CloudProvider, { name: string; keyHint: string }> = {
   azure: { name: "Azure", keyHint: "粘贴 Speech 资源密钥" },
   google: { name: "Google", keyHint: "粘贴 Google Cloud API 密钥" },
+  gemini: { name: "Gemini", keyHint: "粘贴 AI Studio 的 Gemini API 密钥" },
 };
+
+/** Row of toggle buttons, one pressed. */
+function seg<T>(options: [T, string][], current: T, onPick: (v: T) => void): HTMLElement {
+  return h(
+    "div",
+    { class: "br-seg" },
+    ...options.map(([value, label]) =>
+      h("button", { "aria-pressed": value === current ? "true" : "false", onclick: () => onPick(value) }, label),
+    ),
+  );
+}
 
 export type TocStep = "prev-chapter" | "prev-page" | "next-page" | "next-chapter";
 
@@ -134,6 +161,7 @@ export class ReaderView {
   private cloud: Record<CloudProvider, CloudState> = {
     azure: { voices: AZURE_PRESET_VOICES, keySet: false, status: "", usage: "", fallback: false },
     google: { voices: GOOGLE_PRESET_VOICES, keySet: false, status: "", usage: "", fallback: false },
+    gemini: { voices: GEMINI_VOICES, keySet: false, status: "", usage: "", fallback: false, models: GEMINI_PRESET_MODELS },
   };
   private systemDark = globalThis.matchMedia?.("(prefers-color-scheme: dark)");
 
@@ -746,14 +774,6 @@ export class ReaderView {
   private renderSheet(): void {
     if (!this.sheetEl) return;
     const s = this.settings;
-    const seg = <T>(options: [T, string][], current: T, onPick: (v: T) => void) =>
-      h(
-        "div",
-        { class: "br-seg" },
-        ...options.map(([value, label]) =>
-          h("button", { "aria-pressed": value === current ? "true" : "false", onclick: () => onPick(value) }, label),
-        ),
-      );
     const row = (label: string, control: Node) => h("div", { class: "br-row" }, h("span", {}, label), control);
 
     const voiceSelect = h("select", { "aria-label": "声音" });
@@ -821,9 +841,10 @@ export class ReaderView {
         "朗读",
         seg<Settings["ttsEngine"]>(
           [
-            ["system", "系统语音"],
+            ["system", "系统"],
             ["azure", "Azure"],
             ["google", "Google"],
+            ["gemini", "Gemini"],
           ],
           s.ttsEngine,
           (v) => this.update({ ttsEngine: v }),
@@ -875,7 +896,7 @@ export class ReaderView {
       if (v && v !== s.azureRegion) this.update({ azureRegion: v });
     });
 
-    const current = provider === "azure" ? s.azureVoice : s.googleVoice;
+    const current = { azure: s.azureVoice, google: s.googleVoice, gemini: s.geminiVoice }[provider];
     const voiceSelect = h("select", { "aria-label": `${name} 声音` });
     const voices = st.voices.some((v) => v.shortName === current)
       ? st.voices
@@ -883,7 +904,7 @@ export class ReaderView {
     for (const v of voices) voiceSelect.append(h("option", { value: v.shortName }, v.label));
     voiceSelect.value = current;
     voiceSelect.addEventListener("change", () =>
-      this.update(provider === "azure" ? { azureVoice: voiceSelect.value } : { googleVoice: voiceSelect.value }),
+      this.update({ [`${provider}Voice`]: voiceSelect.value } as Partial<Settings>),
     );
 
     const actions = h(
@@ -892,7 +913,51 @@ export class ReaderView {
       h("button", { onclick: () => this.cb.onCloudTest(provider) }, "试听"),
       st.fallback ? h("button", { onclick: () => this.cb.onCloudRetry(provider) }, `立即重试 ${name}`) : null,
       st.keySet ? h("button", { onclick: () => this.cb.onCloudKey(provider, "") }, "清除密钥") : null,
+      provider === "gemini" ? h("button", { onclick: () => this.cb.onClearGeminiCache() }, "清除缓存") : null,
     );
+    const note = h("div", { class: "br-note" }, st.status ? `${st.status}\n${st.usage}` : st.usage);
+
+    if (provider === "gemini") {
+      const models = (st.models ?? GEMINI_PRESET_MODELS).includes(s.geminiModel)
+        ? (st.models ?? GEMINI_PRESET_MODELS)
+        : [s.geminiModel, ...(st.models ?? GEMINI_PRESET_MODELS)];
+      const modelSelect = h("select", { "aria-label": "Gemini 模型" });
+      for (const m of models) modelSelect.append(h("option", { value: m }, m));
+      modelSelect.value = s.geminiModel;
+      modelSelect.addEventListener("change", () => this.update({ geminiModel: modelSelect.value }));
+      const styleInput = h("input", {
+        type: "text",
+        autocomplete: "off",
+        value: s.geminiStyle,
+        placeholder: GEMINI_DEFAULT_STYLE,
+        "aria-label": "朗读风格",
+      });
+      styleInput.addEventListener("change", () => this.update({ geminiStyle: styleInput.value.trim() }));
+      return [
+        row("密钥", keyInput),
+        row("模型", modelSelect),
+        row("声音", voiceSelect),
+        row("风格", styleInput),
+        row(
+          "每次生成",
+          seg(
+            GEMINI_SEGMENT_OPTIONS.map((n) => [n, `${n} 字`] as [number, string]),
+            s.geminiSegment,
+            (v) => this.update({ geminiSegment: v }),
+          ),
+        ),
+        row(
+          "提前生成",
+          seg(
+            GEMINI_AHEAD_OPTIONS.map((n) => [n, `${n} 段`] as [number, string]),
+            s.geminiAhead,
+            (v) => this.update({ geminiAhead: v }),
+          ),
+        ),
+        row("", actions),
+        note,
+      ];
+    }
 
     return [
       row("密钥", keyInput),
@@ -913,7 +978,7 @@ export class ReaderView {
         ),
       ),
       row("", actions),
-      h("div", { class: "br-note" }, st.status ? `${st.status}\n${st.usage}` : st.usage),
+      note,
     ].filter((el): el is HTMLElement => !!el);
   }
 }
