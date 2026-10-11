@@ -9,13 +9,14 @@ import type { AzureVoice } from "./AzureSpeechEngine";
  * Gemini (LLM) speech generation over the Gemini Developer API:
  *   POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
  *
- * Unlike the per-sentence TTS engines, Gemini is asked for long segments
- * (many paragraphs, ~1500 characters, several minutes of audio) a few
- * segments ahead of playback, because the free tier limits requests per day
- * rather than characters. Segments are kept in IndexedDB so listening again
- * (or after a reload) costs nothing. One segment is one audio file; the
- * player still moves paragraph by paragraph, using paragraph start times
- * estimated from text length and snapped to pauses in the audio.
+ * Unlike the per-sentence TTS engines, Gemini is asked for one site page at
+ * a time (a few minutes of audio), a few pages ahead of playback, because the
+ * free tier limits requests per day rather than characters. A page longer
+ * than one request allows is split the same way every time, so a page always
+ * maps to the same audio wherever reading starts, and the audio is kept in
+ * IndexedDB: listening again (or after a reload) costs nothing. The player
+ * still moves paragraph by paragraph, using paragraph start times estimated
+ * from text length and snapped to pauses in the audio.
  */
 
 export const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
@@ -23,7 +24,12 @@ export const GEMINI_DEFAULT_MODEL = "gemini-3.8-flash-tts";
 export const GEMINI_PRESET_MODELS = ["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts", "gemini-3.1-flash-tts"];
 export const GEMINI_DEFAULT_VOICE = "Kore";
 export const GEMINI_DEFAULT_STYLE = "用自然、生动、富有感情的有声书语气朗读下面的轻小说片段：";
-export const GEMINI_SEGMENT_OPTIONS = [800, 1500, 3000];
+/**
+ * Characters per request. TTS output is capped per request (16k audio tokens
+ * at ~25 tokens/s, about 10 minutes, for Gemini 2.5 TTS); Chinese is read at
+ * roughly 4–5 characters a second, so 2000 characters stay well inside.
+ */
+export const GEMINI_MAX_CHARS = 2000;
 export const GEMINI_AHEAD_OPTIONS = [1, 2, 4, 8];
 /** Local audio cache limit (IndexedDB); least recently used segments are dropped first. */
 export const GEMINI_CACHE_BYTES = 400 * 1024 * 1024;
@@ -74,9 +80,7 @@ export interface GeminiConfig {
   voice: string;
   /** Natural-language direction placed before the text ("read it like…"); may be empty. */
   style: string;
-  /** Target characters per request. */
-  segmentChars: number;
-  /** Segments generated ahead of the one playing. */
+  /** Pages generated ahead of the one playing. */
   ahead: number;
 }
 
@@ -126,7 +130,7 @@ export function describeGeminiError(code: string): string {
     case "bad-request":
       return "Gemini 不接受该请求";
     case "too-long":
-      return "一次生成的文字太多，请把「每次生成」调小";
+      return "这一页的语音超过了模型单次输出上限";
     case "empty":
       return "Gemini 没有返回语音";
     case "audio-error":
@@ -243,21 +247,25 @@ export function paragraphBounds(texts: string[], samples?: Int16Array, sampleRat
   return bounds;
 }
 
-/** Groups consecutive texts into requests of about `maxChars` characters. */
-export function planSegments(texts: string[], maxChars: number): string[][] {
+/**
+ * Splits one page's texts into requests of at most about `maxChars`
+ * characters, in parts of similar size. Depends only on the page, so the same
+ * page always gives the same parts.
+ */
+export function splitPage(texts: string[], maxChars: number = GEMINI_MAX_CHARS): string[][] {
+  const total = texts.reduce((n, t) => n + t.length, 0);
+  const parts = Math.max(1, Math.ceil(total / maxChars));
   const out: string[][] = [];
-  let cur: string[] = [];
-  let len = 0;
+  let acc = 0;
+  let last = -1;
   for (const t of texts) {
-    if (cur.length && len + t.length > maxChars) {
-      out.push(cur);
-      cur = [];
-      len = 0;
-    }
-    cur.push(t);
-    len += t.length;
+    // Each text goes to the part its midpoint falls in.
+    const part = Math.min(parts - 1, Math.floor(((acc + t.length / 2) / total) * parts));
+    if (part !== last) out.push([]);
+    out[out.length - 1].push(t);
+    last = part;
+    acc += t.length;
   }
-  if (cur.length) out.push(cur);
   return out;
 }
 
@@ -496,7 +504,17 @@ interface Segment {
   done?: Rendered;
 }
 
+/** Pages for planning: the one containing a paragraph and the loaded ones after it. */
+export interface PageContext {
+  /** Each page's utterance texts, in order; the first is the current page. */
+  pages: string[][];
+  /** Position of the paragraph's first utterance in `pages[0]`. */
+  index: number;
+}
+
 export interface GeminiEngineOptions {
+  /** Page layout around a paragraph (`count` pages from its page on). */
+  pages?(paragraphId: string, count: number): PageContext | undefined;
   request?: (req: HttpRequest) => Promise<HttpResponse>;
   audio?: HTMLAudioElement;
   sleep?: (ms: number) => Promise<void>;
@@ -521,11 +539,6 @@ export class GeminiSpeechEngine implements SpeechEngine {
   private readonly store: SegmentStore;
   private readonly usage: GeminiUsageMeter;
   private readonly segments = new Map<string, Segment>();
-  /** text -> keys of segments containing it. */
-  private readonly byText = new Map<string, Set<string>>();
-  private index?: Promise<void>;
-  private hint: string[] = [];
-  private hintFresh = false;
   private queue: Segment[] = [];
   private working = false;
   private playing?: { seg: Segment; idx: number; url: string; duration: number };
@@ -546,16 +559,12 @@ export class GeminiSpeechEngine implements SpeechEngine {
     this.usage = options.usage ?? new GeminiUsageMeter();
   }
 
+  /** Paragraphs are split only when one alone exceeds a request. */
   get maxChunkLength(): number {
-    return this.getConfig()?.segmentChars ?? 1500;
+    return GEMINI_MAX_CHARS;
   }
 
-  /** Enough upcoming paragraphs to plan the segments ahead. */
-  get prefetchCount(): number {
-    return 400;
-  }
-
-  /** Look-ahead is set in segments (GeminiConfig.ahead), not utterances. */
+  /** Look-ahead is set in pages (GeminiConfig.ahead), not utterances. */
   setPrefetchCount(): void {}
 
   get speaking(): boolean {
@@ -573,40 +582,30 @@ export class GeminiSpeechEngine implements SpeechEngine {
     }
   }
 
-  prefetch(texts: string[]): void {
-    this.hint = texts;
-    this.hintFresh = true;
-  }
-
   async speak(text: string, options: SpeakOptions): Promise<"done" | "cancelled"> {
     const token = ++this.token;
     this.settleCurrent("cancelled");
-    this.hintFresh = false;
-    // The player sends the look-ahead hint right after calling speak().
-    await Promise.resolve();
-    if (token !== this.token) return "cancelled";
-    const hint = this.hintFresh ? this.hint : [];
-    this.hintFresh = false;
     const cfg = this.getConfig();
     if (!cfg?.key) {
       this.pauseAudio();
       throw new SpeechEngineError("config");
     }
-    await this.loadIndex();
-    if (token !== this.token) return "cancelled";
-
-    const prefix = this.prefix(cfg);
-    const { seg, idx } = this.locate(text, prefix, cfg, hint);
-    this.planAhead(seg, idx, hint, prefix, cfg);
+    const { seg, idx } = this.plan(text, options.paragraphId, cfg);
 
     const p = this.playing;
     const continuing = !!p && p.seg === seg && idx === p.idx + 1 && !this.audio.ended;
     if (!continuing) this.pauseAudio();
+    // The page needed now goes first; the look-ahead follows it.
+    const current = this.render(seg, cfg);
+    current.then(
+      () => void this.pump(cfg),
+      () => undefined,
+    );
     let rendered = seg.done;
     if (!rendered) {
       this.options.onStatus?.(`Gemini 正在生成约 ${seg.texts.join("").length} 字的语音，请稍候…`);
       try {
-        rendered = await this.render(seg, cfg);
+        rendered = await current;
       } finally {
         if (token === this.token) this.options.onStatus?.("");
       }
@@ -632,7 +631,7 @@ export class GeminiSpeechEngine implements SpeechEngine {
   /** Drops all cached audio. */
   async clearCache(): Promise<void> {
     this.queue = [];
-    for (const seg of this.segments.values()) if (seg !== this.playing?.seg) this.forget(seg);
+    for (const seg of this.segments.values()) if (seg !== this.playing?.seg) this.segments.delete(seg.key);
     await this.store.clear().catch(() => undefined);
     this.options.onUsage?.(0);
   }
@@ -653,94 +652,39 @@ export class GeminiSpeechEngine implements SpeechEngine {
     return `${cfg.model}|${cfg.voice}|${hash(cfg.style)}`;
   }
 
-  private loadIndex(): Promise<void> {
-    this.index ??= this.store
-      .list()
-      .then((metas) => {
-        for (const m of metas) this.register(m.key, m.texts);
-      })
-      .catch((err) => log.warn("Gemini cache unavailable", err));
-    return this.index;
-  }
-
-  private register(key: string, texts: string[]): Segment {
+  private segmentFor(texts: string[], prefix: string): Segment {
+    const key = `${prefix}:${hash(texts.join("\n"))}`;
     let seg = this.segments.get(key);
-    if (seg) return seg;
-    seg = { key, texts };
-    this.segments.set(key, seg);
-    for (const t of texts) {
-      let keys = this.byText.get(t);
-      if (!keys) this.byText.set(t, (keys = new Set()));
-      keys.add(key);
-    }
+    if (!seg) this.segments.set(key, (seg = { key, texts }));
     return seg;
   }
 
-  private forget(seg: Segment): void {
-    this.segments.delete(seg.key);
-    for (const t of seg.texts) this.byText.get(t)?.delete(seg.key);
-  }
+  /**
+   * Finds the part of the page to play `text` from and queues the following
+   * parts and pages for generation. Without page information (e.g. the voice
+   * sample) the text is generated on its own.
+   */
+  private plan(text: string, paragraphId: string | undefined, cfg: GeminiConfig): { seg: Segment; idx: number } {
+    const prefix = this.prefix(cfg);
+    const ctx = paragraphId ? this.options.pages?.(paragraphId, cfg.ahead + 1) : undefined;
+    const [page = [], ...later] = ctx?.pages ?? [];
+    let pos = page.indexOf(text, ctx?.index ?? 0);
+    if (pos < 0) pos = page.indexOf(text);
+    if (pos < 0) return { seg: this.segmentFor([text], prefix), idx: 0 };
 
-  private segmentFor(texts: string[], prefix: string): Segment {
-    return this.register(`${prefix}:${hash(texts.join("\n"))}`, texts);
-  }
-
-  /** Segments (for this configuration) that contain `text`, with its position. */
-  private candidates(text: string, prefix: string): { seg: Segment; idx: number }[] {
-    const out: { seg: Segment; idx: number }[] = [];
-    for (const key of this.byText.get(text) ?? []) {
-      if (!key.startsWith(`${prefix}:`)) continue;
-      const seg = this.segments.get(key);
-      if (seg) out.push({ seg, idx: seg.texts.indexOf(text) });
+    const parts = splitPage(page).map((texts) => this.segmentFor(texts, prefix));
+    let start = 0;
+    let at = 0;
+    while (at < parts.length - 1 && pos >= start + parts[at].texts.length) start += parts[at++].texts.length;
+    const seg = parts[at];
+    const ahead = [...parts.slice(at + 1), ...later.flatMap((p) => splitPage(p).map((t) => this.segmentFor(t, prefix)))];
+    // Only what is playing, planned or being generated stays in memory; the rest is in the store.
+    const keep = new Set([seg, ...ahead, this.playing?.seg]);
+    for (const s of this.segments.values()) {
+      if (!keep.has(s) && (!s.rendered || s.done)) this.segments.delete(s.key);
     }
-    return out;
-  }
-
-  /** Finds the segment to play `text` from, creating one starting at `text` if none fits. */
-  private locate(text: string, prefix: string, cfg: GeminiConfig, hint: string[]): { seg: Segment; idx: number } {
-    const p = this.playing;
-    if (p && p.seg.key.startsWith(`${prefix}:`)) {
-      if (p.seg.texts[p.idx + 1] === text) return { seg: p.seg, idx: p.idx + 1 };
-      if (p.seg.texts[p.idx] === text) return { seg: p.seg, idx: p.idx };
-    }
-    // A segment whose following paragraphs match what comes next here.
-    const fits = (c: { seg: Segment; idx: number }) =>
-      c.seg.texts.slice(c.idx + 1).every((t, k) => k >= hint.length || hint[k] === t);
-    const found = this.candidates(text, prefix).filter(fits);
-    const best =
-      found.find((c) => c.idx === 0 && c.seg.done) ??
-      found.find((c) => c.seg.done) ??
-      found.find((c) => c.idx === 0) ??
-      found[0];
-    if (best) return best;
-    const [first] = planSegments([text, ...hint], cfg.segmentChars);
-    return { seg: this.segmentFor(first, prefix), idx: 0 };
-  }
-
-  /** Ensures the segment being played and the next `ahead` ones exist, and queues their generation. */
-  private planAhead(seg: Segment, idx: number, hint: string[], prefix: string, cfg: GeminiConfig): void {
-    const chain = [seg];
-    let h = seg.texts.length - idx - 1;
-    let aligned = seg.texts.slice(idx + 1).every((t, k) => k >= hint.length || hint[k] === t);
-    while (aligned && chain.length <= cfg.ahead && h < hint.length) {
-      const rest = hint.slice(h);
-      const existing = this.candidates(rest[0], prefix).find(
-        (c) => c.idx === 0 && c.seg.texts.every((t, k) => k >= rest.length || rest[k] === t),
-      );
-      let next = existing?.seg;
-      if (!next) {
-        const [texts] = planSegments(rest, cfg.segmentChars);
-        // Wait for more content rather than spending a request on a short tail, unless it is needed next.
-        const size = texts.join("").length;
-        if (texts.length === rest.length && size < cfg.segmentChars * 0.6 && chain.length > 1) break;
-        next = this.segmentFor(texts, prefix);
-      }
-      chain.push(next);
-      h += next.texts.length;
-      aligned = true;
-    }
-    this.queue = chain.slice(1).filter((s) => !s.done);
-    void this.pump(cfg);
+    this.queue = ahead.filter((s) => !s.done);
+    return { seg, idx: pos - start };
   }
 
   private async pump(cfg: GeminiConfig): Promise<void> {
@@ -796,8 +740,7 @@ export class GeminiSpeechEngine implements SpeechEngine {
       if (total <= limit) break;
       if (m.key === this.playing?.seg.key) continue;
       await this.store.delete(m.key);
-      const seg = this.segments.get(m.key);
-      if (seg) this.forget(seg);
+      this.segments.delete(m.key);
       total -= m.bytes;
     }
     this.options.onUsage?.(total);

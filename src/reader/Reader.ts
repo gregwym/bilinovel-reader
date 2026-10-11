@@ -6,7 +6,7 @@ import {
   type PageContent,
   type SiteAdapter,
 } from "../adapters/types";
-import { SpeechPlayer, type PlaybackSource } from "../speech/SpeechPlayer";
+import { SpeechPlayer, splitIntoChunks, type PlaybackSource } from "../speech/SpeechPlayer";
 import { WebSpeechEngine, type SpeechEngine } from "../speech/SpeechEngine";
 import {
   AzureSpeechEngine,
@@ -31,6 +31,7 @@ import {
   GeminiUsageMeter,
   describeGeminiError,
   listGeminiTtsModels,
+  type PageContext,
 } from "../speech/GeminiSpeechEngine";
 import { FallbackSpeechEngine } from "../speech/FallbackSpeechEngine";
 import { SpeechEngineError } from "../speech/SpeechEngine";
@@ -197,12 +198,12 @@ export class Reader implements PlaybackSource {
               model: s.geminiModel,
               voice: s.geminiVoice,
               style: s.geminiStyle.trim(),
-              segmentChars: s.geminiSegment,
               ahead: s.geminiAhead,
             }
           : undefined;
       },
       {
+        pages: (id, count) => this.pagesFrom(id, count),
         usage: this.geminiUsage,
         onStatus: (msg) => {
           this.view.setCloudState("gemini", { status: msg });
@@ -496,18 +497,17 @@ export class Reader implements PlaybackSource {
     if (!pending) return Promise.resolve(false);
     this.view.setStatus("loading", pending.type === "next-chapter" ? "正在加载下一章…" : "正在加载…");
     const generation = this.generation;
-    let stale = false;
     this.loading = this.adapter
       .fetchPage(pending.url)
       .then((page) => {
         // The buffer was replaced (jump) while this page loaded: it no longer continues anything.
-        if (generation !== this.generation) return !(stale = true);
+        if (generation !== this.generation) return false;
         this.loadFailed = false;
         this.appendPage(page);
         return true;
       })
       .catch((err: unknown) => {
-        if (generation !== this.generation) return !(stale = true);
+        if (generation !== this.generation) return false;
         log.error("loading next page failed", pending.url, err);
         this.loadFailed = true;
         const { message, detail } = describeError(err);
@@ -527,7 +527,8 @@ export class Reader implements PlaybackSource {
       })
       .finally(() => {
         this.loading = undefined;
-        if (stale && this.cursorId) this.prefetchAround(this.cursorId);
+        // Keep loading while the cursor (or Gemini's look-ahead) still needs pages.
+        if (this.cursorId) this.prefetchAround(this.cursorId);
       });
     return this.loading;
   }
@@ -942,7 +943,32 @@ export class Reader implements PlaybackSource {
   }
 
   private prefetchAround(id: string): void {
-    if (!this.loadFailed && this.buffer.remainingAfter(id) < PREFETCH_REMAINING) void this.loadMore();
+    if (this.loadFailed) return;
+    // Gemini generates whole pages ahead, so it needs those pages loaded.
+    const pagesAhead = this.settings.ttsEngine === "gemini" ? this.settings.geminiAhead : 0;
+    if (
+      this.buffer.remainingAfter(id) < PREFETCH_REMAINING ||
+      this.pagesFrom(id, pagesAhead + 1).pages.length <= pagesAhead
+    ) {
+      void this.loadMore();
+    }
+  }
+
+  /** Utterance texts of the page holding `id` and of up to `count - 1` loaded pages after it. */
+  private pagesFrom(id: string, count: number): PageContext {
+    const p = this.buffer.get(id);
+    if (!p) return { pages: [], index: 0 };
+    const chunks = (ps: ReaderParagraph[]) =>
+      ps.flatMap((q) => (q.text ? splitIntoChunks(q.text, this.gemini.maxChunkLength) : []));
+    let page = this.buffer.pageParagraphs(p.chapterId, p.pageIndex);
+    const ctx: PageContext = { pages: [chunks(page)], index: chunks(page.slice(0, page.indexOf(p))).length };
+    while (ctx.pages.length < count && page.length) {
+      const next = this.buffer.next(page[page.length - 1].id);
+      if (typeof next === "string") break;
+      page = this.buffer.pageParagraphs(next.chapterId, next.pageIndex);
+      ctx.pages.push(chunks(page));
+    }
+    return ctx;
   }
 
   /** Mirrors the current site page in the address bar without reloading or adding history. */
@@ -1014,7 +1040,6 @@ export class Reader implements PlaybackSource {
       prev.geminiModel !== s.geminiModel ||
       prev.geminiVoice !== s.geminiVoice ||
       prev.geminiStyle !== s.geminiStyle ||
-      prev.geminiSegment !== s.geminiSegment ||
       prev.geminiAhead !== s.geminiAhead;
     if (engineChanged) {
       this.applyEngine();

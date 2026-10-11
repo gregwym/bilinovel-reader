@@ -11,7 +11,6 @@ import {
   GEMINI_DEFAULT_MODEL,
   GEMINI_DEFAULT_STYLE,
   GEMINI_DEFAULT_VOICE,
-  GEMINI_SEGMENT_OPTIONS,
 } from "../speech/GeminiSpeechEngine";
 
 export interface KeyValueStore {
@@ -152,9 +151,7 @@ export interface Settings {
   geminiVoice: string;
   /** Reading direction placed before each Gemini request. */
   geminiStyle: string;
-  /** Characters per Gemini request. */
-  geminiSegment: number;
-  /** Gemini segments generated ahead of playback. */
+  /** Site pages of Gemini audio generated ahead of playback. */
   geminiAhead: number;
 }
 
@@ -172,7 +169,6 @@ export const DEFAULT_SETTINGS: Settings = {
   geminiModel: GEMINI_DEFAULT_MODEL,
   geminiVoice: GEMINI_DEFAULT_VOICE,
   geminiStyle: GEMINI_DEFAULT_STYLE,
-  geminiSegment: 1500,
   geminiAhead: 4,
 };
 
@@ -225,7 +221,6 @@ export function sanitizeSettings(s: Settings): Settings {
     geminiVoice:
       typeof s.geminiVoice === "string" && /^[A-Za-z]+$/.test(s.geminiVoice) ? s.geminiVoice : DEFAULT_SETTINGS.geminiVoice,
     geminiStyle: typeof s.geminiStyle === "string" ? s.geminiStyle.slice(0, 300) : DEFAULT_SETTINGS.geminiStyle,
-    geminiSegment: GEMINI_SEGMENT_OPTIONS.includes(s.geminiSegment) ? s.geminiSegment : DEFAULT_SETTINGS.geminiSegment,
     geminiAhead: GEMINI_AHEAD_OPTIONS.includes(s.geminiAhead) ? s.geminiAhead : DEFAULT_SETTINGS.geminiAhead,
   };
 }

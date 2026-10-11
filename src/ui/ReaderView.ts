@@ -7,7 +7,6 @@ import {
   GEMINI_AHEAD_OPTIONS,
   GEMINI_DEFAULT_STYLE,
   GEMINI_PRESET_MODELS,
-  GEMINI_SEGMENT_OPTIONS,
   GEMINI_VOICES,
 } from "../speech/GeminiSpeechEngine";
 import {
@@ -939,17 +938,9 @@ export class ReaderView {
         row("声音", voiceSelect),
         row("风格", styleInput),
         row(
-          "每次生成",
-          seg(
-            GEMINI_SEGMENT_OPTIONS.map((n) => [n, `${n} 字`] as [number, string]),
-            s.geminiSegment,
-            (v) => this.update({ geminiSegment: v }),
-          ),
-        ),
-        row(
           "提前生成",
           seg(
-            GEMINI_AHEAD_OPTIONS.map((n) => [n, `${n} 段`] as [number, string]),
+            GEMINI_AHEAD_OPTIONS.map((n) => [n, `${n} 页`] as [number, string]),
             s.geminiAhead,
             (v) => this.update({ geminiAhead: v }),
           ),

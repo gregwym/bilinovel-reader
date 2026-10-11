@@ -7,7 +7,7 @@ import {
   geminiRetryDelayMs,
   paragraphBounds,
   pcmToWav,
-  planSegments,
+  splitPage,
   type GeminiConfig,
 } from "../src/speech/GeminiSpeechEngine";
 import { DEFAULT_SETTINGS, sanitizeSettings } from "../src/reader/ProgressStore";
@@ -91,7 +91,12 @@ class FakeAudio {
   }
 }
 
-const cfg: GeminiConfig = { key: "k", model: "gemini-3.8-flash-tts", voice: "Kore", style: "", segmentChars: 1500, ahead: 2 };
+const cfg: GeminiConfig = { key: "k", model: "gemini-3.8-flash-tts", voice: "Kore", style: "", ahead: 2 };
+const BOOK = [
+  ["第一段。", "第二段。", "第三段。"],
+  ["第四段。", "第五段。"],
+  ["第六段。"],
+];
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 function engine(responses: HttpResponse[], store = new MemorySegmentStore(), length = 4.5) {
@@ -99,6 +104,10 @@ function engine(responses: HttpResponse[], store = new MemorySegmentStore(), len
   const waits: number[] = [];
   const audio = new FakeAudio(length);
   const e = new GeminiSpeechEngine(() => cfg, {
+    pages: (id) => {
+      const [page, para] = id.split(":").map(Number);
+      return { pages: BOOK.slice(page, page + cfg.ahead + 1), index: para };
+    },
     audio: audio as unknown as HTMLAudioElement,
     store,
     usage: new GeminiUsageMeter(undefined),
@@ -119,11 +128,6 @@ beforeAll(() => {
 });
 
 describe("Gemini helpers", () => {
-  it("groups paragraphs into requests", () => {
-    expect(planSegments(["aaaa", "bbbb", "cc", "dddddd"], 8)).toEqual([["aaaa", "bbbb"], ["cc", "dddddd"]]);
-    expect(planSegments(["a".repeat(20), "b"], 8)).toEqual([["a".repeat(20)], ["b"]]);
-  });
-
   it("maps API errors", () => {
     expect(geminiErrorCode(400, '{"reason":"API_KEY_INVALID"}')).toBe("auth");
     expect(geminiErrorCode(400, "User location is not supported for the API use.")).toBe("location");
@@ -162,16 +166,15 @@ describe("Gemini helpers", () => {
 });
 
 describe("GeminiSpeechEngine", () => {
-  const texts = ["第一段。", "第二段。", "第三段。"];
+  const book = BOOK;
+  const at = (page: number, para: number) => ({ rate: 1.2, paragraphId: `${page}:${para}` });
 
-  it("generates one segment and plays its paragraphs from the same audio", async () => {
-    const { e, audio, requests } = engine([audioResponse(pcm([1, 1, 1]))], undefined, 4);
-    const first = e.speak(texts[0], { rate: 1.2 });
-    e.prefetch(texts.slice(1));
+  it("generates a page per request and plays its paragraphs from the same audio", async () => {
+    const { e, audio, requests } = engine([1, 2, 3].map(() => audioResponse(pcm([1, 1, 1]))), undefined, 4);
+    const first = e.speak(book[0][0], at(0, 0));
     await flush();
-    expect(requests).toHaveLength(1);
     const body = JSON.parse(requests[0].body as string);
-    expect(body.contents[0].parts[0].text).toBe(texts.join("\n\n"));
+    expect(body.contents[0].parts[0].text).toBe(book[0].join("\n\n"));
     expect(body.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName).toBe("Kore");
     expect(audio.paused).toBe(false);
     expect(audio.playbackRate).toBe(1.2);
@@ -181,32 +184,40 @@ describe("GeminiSpeechEngine", () => {
     await expect(first).resolves.toBe("done");
     expect(audio.paused).toBe(false); // keeps running into the next paragraph
 
-    const second = e.speak(texts[1], { rate: 1.2 });
-    e.prefetch(texts.slice(2));
+    const second = e.speak(book[0][1], at(0, 1));
     await flush();
     audio.at(3.1);
     await expect(second).resolves.toBe("done");
 
-    const third = e.speak(texts[2], { rate: 1.2 });
+    const third = e.speak(book[0][2], at(0, 2));
     await flush();
     audio.end();
     await expect(third).resolves.toBe("done");
-    expect(requests).toHaveLength(1);
     expect(audio.sources).toHaveLength(1);
+    e.stop();
   });
 
-  it("reuses stored segments without new requests", async () => {
+  it("generates the following pages ahead", async () => {
+    const { e, requests } = engine([1, 2, 3].map(() => audioResponse(pcm([1]))));
+    const p = e.speak(book[0][0], at(0, 0));
+    for (let i = 0; i < 5; i++) await flush();
+    expect(requests.map((r) => JSON.parse(r.body as string).contents[0].parts[0].text)).toEqual(
+      book.map((page) => page.join("\n\n")),
+    );
+    e.stop();
+    await p;
+  });
+
+  it("reuses a stored page wherever reading starts", async () => {
     const store = new MemorySegmentStore();
-    const a = engine([audioResponse(pcm([1, 1, 1]))], store, 4);
-    const p = a.e.speak(texts[0], { rate: 1 });
-    a.e.prefetch(texts.slice(1));
-    await flush();
+    const a = engine([1, 2, 3].map(() => audioResponse(pcm([1, 1, 1]))), store, 4);
+    const p = a.e.speak(book[0][0], at(0, 0));
+    for (let i = 0; i < 5; i++) await flush();
     a.e.stop();
     await expect(p).resolves.toBe("cancelled");
 
-    const b = engine([], store, 4);
-    const q = b.e.speak(texts[1], { rate: 1 });
-    b.e.prefetch(texts.slice(2));
+    const b = engine([audioResponse(pcm([1]))], store, 4);
+    const q = b.e.speak(book[0][1], at(0, 1));
     await flush();
     expect(b.requests).toHaveLength(0);
     expect(b.audio.currentTime).toBeGreaterThan(1); // started at the second paragraph
@@ -214,16 +225,20 @@ describe("GeminiSpeechEngine", () => {
     await expect(q).resolves.toBe("cancelled");
   });
 
-  it("generates the following segments ahead", async () => {
-    const long = Array.from({ length: 6 }, (_, i) => `${i}`.repeat(700));
-    const responses = [1, 2, 3].map(() => audioResponse(pcm([1, 1])));
-    const { e, requests } = engine(responses);
-    const p = e.speak(long[0], { rate: 1 });
-    e.prefetch(long.slice(1));
+  it("splits a long page the same way every time", () => {
+    const page = Array.from({ length: 10 }, (_, i) => `${i}`.repeat(500));
+    const parts = splitPage(page, 2000);
+    expect(parts.map((p) => p.length)).toEqual([3, 4, 3]);
+    expect(parts.flat()).toEqual(page);
+    expect(splitPage(["短"], 2000)).toEqual([["短"]]);
+    expect(splitPage([], 2000)).toEqual([]);
+  });
+
+  it("generates text without page information on its own (voice sample)", async () => {
+    const { e, requests } = engine([audioResponse(pcm([1]))]);
+    const p = e.speak("试听。", { rate: 1 });
     await flush();
-    await flush();
-    await flush();
-    expect(requests).toHaveLength(3); // current + 2 ahead
+    expect(JSON.parse(requests[0].body as string).contents[0].parts[0].text).toBe("试听。");
     e.stop();
     await p;
   });
@@ -254,12 +269,10 @@ describe("Gemini settings", () => {
       ...DEFAULT_SETTINGS,
       ttsEngine: "gemini",
       geminiModel: "bad model!",
-      geminiSegment: 999,
-      geminiAhead: 2,
+      geminiAhead: 3,
     });
     expect(s.ttsEngine).toBe("gemini");
     expect(s.geminiModel).toBe(DEFAULT_SETTINGS.geminiModel);
-    expect(s.geminiSegment).toBe(1500);
-    expect(s.geminiAhead).toBe(2);
+    expect(s.geminiAhead).toBe(DEFAULT_SETTINGS.geminiAhead);
   });
 });
