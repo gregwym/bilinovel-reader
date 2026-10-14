@@ -88,8 +88,8 @@ export function bookPage({ id }: Record<string, string>): Page {
     const refreshBtn = h("button", { class: "btn" }, "刷新目录");
     refreshBtn.addEventListener("click", () =>
       void act(refreshBtn, async () => {
-        await api.post(`/api/books/${id}/refresh`);
-        toast("目录已更新");
+        const res = await api.post<BookDetail>(`/api/books/${id}/refresh`);
+        toast(res.loading ? "网站响应较慢，目录在后台继续获取" : "目录已更新");
         refresh();
       }),
     );
@@ -115,7 +115,22 @@ export function bookPage({ id }: Record<string, string>): Page {
     );
     const intro = book.intro ? h("p", { class: "intro" }, book.intro) : null;
     intro?.addEventListener("click", () => intro.classList.toggle("open"));
-    return [hero, intro, audioCard(book), ...book.volumes.map((v, vi) => volume(book, v, vi)), dangerZone(book)].filter(
+    const status = book.loading
+      ? h("div", { class: "banner" }, h("span", { class: "spin" }), "正在从网站获取目录…（网站限速，可能需要一两分钟）")
+      : book.loadError
+        ? h(
+            "div",
+            { class: "banner error", role: "alert" },
+            h(
+              "div",
+              { class: "grow" },
+              h("b", {}, "目录获取失败"),
+              h("div", { class: "mono" }, book.loadError),
+              h("div", { class: "hint" }, "可在", h("a", { href: "/settings", "data-link": true }, "设置 → 网站访问"), "中测试连接，然后点“刷新目录”"),
+            ),
+          )
+        : null;
+    return [hero, status, intro, audioCard(book), ...book.volumes.map((v, vi) => volume(book, v, vi)), dangerZone(book)].filter(
       Boolean,
     ) as Node[];
   }

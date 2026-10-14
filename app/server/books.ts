@@ -36,6 +36,22 @@ export function linkedChapters(catalog: Catalog | undefined): { chapterId: strin
   );
 }
 
+/** How long adding or refreshing a book waits for the site before answering. */
+export const ADD_WAIT_MS = 20_000;
+
+/** The promise's outcome if it settles within `ms`, else undefined. */
+async function settleWithin<T>(p: Promise<T>, ms: number): Promise<{ value: T } | { error: unknown } | undefined> {
+  let timer: number | NodeJS.Timeout | undefined;
+  const timeout = new Promise<undefined>((resolve) => {
+    timer = globalThis.setTimeout(resolve, ms);
+  });
+  try {
+    return await Promise.race([p.then((value) => ({ value }), (error: unknown) => ({ error })), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 interface JobRow {
   id: number;
   target: string;
@@ -69,29 +85,36 @@ export class Books {
     return this.db.getJson<Record<string, SavedProgress>>(PROGRESS_KEY) ?? {};
   }
 
-  /** Adds a book (or refreshes it if already there). */
-  async add(input: string): Promise<BookRow> {
+  /** Catalog loads in flight, and the last failure per book (shown until the next attempt). */
+  private readonly syncs = new Map<string, Promise<BookRow>>();
+  private readonly syncErrors = new Map<string, string>();
+
+  /**
+   * Adds a book (or refreshes it if already there). Waits at most `waitMs` for
+   * the site: a slow site (rate limit, retries, FlareSolverr) would otherwise
+   * outlast a reverse proxy's timeout. After that the book is returned as a
+   * placeholder and keeps loading in the background. A new book whose first
+   * load fails within the wait is not kept.
+   */
+  async add(input: string, waitMs = ADD_WAIT_MS): Promise<BookRow> {
     const id = parseBookId(input);
     if (!id) throw new Error("无法识别的书籍链接");
-    const existing = this.get(id);
-    if (existing) return this.refresh(id);
-    const [info, catalog] = await Promise.all([this.source.bookInfo(id).catch(() => undefined), this.source.catalog(id, true)]);
-    const title = info?.title || catalog.title || `书籍 ${id}`;
-    const now = Date.now();
-    this.db.run(
-      `insert into books (id, title, author, cover_url, intro, catalog, catalog_at, added_at, follow, ahead)
-       values (?, ?, ?, ?, ?, ?, ?, ?, 1, ?) on conflict (id) do nothing`,
-      id,
-      title,
-      info?.author ?? "",
-      info?.coverUrl ?? catalog.cover ?? null,
-      info?.intro ?? "",
-      JSON.stringify(catalog),
-      now,
-      now,
-      this.settings.get().defaultAhead,
-    );
-    await this.fetchCover(id).catch((err) => console.warn("[library] cover", id, String(err)));
+    const isNew = !this.get(id);
+    if (isNew) {
+      this.db.run(
+        "insert into books (id, title, added_at, ahead) values (?, ?, ?, ?) on conflict (id) do nothing",
+        id,
+        `书籍 ${id}`,
+        Date.now(),
+        this.settings.get().defaultAhead,
+      );
+    }
+    const sync = this.refresh(id);
+    const quick = await settleWithin(sync, waitMs);
+    if (quick && "error" in quick) {
+      if (isNew && !this.get(id)?.catalog_at) await this.remove(id);
+      throw quick.error;
+    }
     return this.get(id)!;
   }
 
@@ -105,14 +128,50 @@ export class Books {
       Date.now(),
       this.settings.get().defaultAhead,
     );
-    void this.refresh(id).catch((err) => console.warn("[library] adding book", id, String(err)));
+    void this.refresh(id).catch(() => undefined);
   }
 
-  /** Reloads the catalog and book page. */
-  async refresh(id: string): Promise<BookRow> {
+  /** Waits like `add` for a refresh to finish; returns the book either way. */
+  async refreshWithin(id: string, waitMs = ADD_WAIT_MS): Promise<BookRow> {
+    if (!this.get(id)) throw new Error("书籍不存在");
+    const quick = await settleWithin(this.refresh(id), waitMs);
+    if (quick && "error" in quick) throw quick.error;
+    return this.get(id)!;
+  }
+
+  /** The load in flight for a book, if any. */
+  pending(id: string): Promise<BookRow> | undefined {
+    return this.syncs.get(id);
+  }
+
+  /** Reloads the catalog and book page (joins a load already in flight). */
+  refresh(id: string): Promise<BookRow> {
+    const running = this.syncs.get(id);
+    if (running) return running;
+    const run = this.load(id).then(
+      (book) => {
+        this.syncErrors.delete(id);
+        return book;
+      },
+      (err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        if (this.get(id)) this.syncErrors.set(id, message);
+        console.warn("[library] loading book", id, message);
+        throw err;
+      },
+    );
+    const tracked = run.finally(() => this.syncs.delete(id));
+    tracked.catch(() => undefined);
+    this.syncs.set(id, tracked);
+    this.syncErrors.delete(id);
+    return tracked;
+  }
+
+  private async load(id: string): Promise<BookRow> {
     const book = this.get(id);
     if (!book) throw new Error("书籍不存在");
     const [info, catalog] = await Promise.all([this.source.bookInfo(id).catch(() => undefined), this.source.catalog(id, true)]);
+    if (!this.get(id)) throw new Error("书籍已删除");
     this.db.run(
       `update books set title = ?, author = ?, cover_url = coalesce(?, cover_url), intro = ?, catalog = ?, catalog_at = ? where id = ?`,
       info?.title || catalog.title || book.title,
@@ -215,6 +274,8 @@ export class Books {
       follow: !!book.follow,
       ahead: book.ahead,
       audioBytes,
+      loading: this.syncs.has(book.id) || undefined,
+      loadError: this.syncErrors.get(book.id),
     };
   }
 

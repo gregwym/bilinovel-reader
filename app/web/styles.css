@@ -442,6 +442,13 @@ textarea {
   flex: 1;
 }
 
+.banner .spin {
+  flex: none;
+  margin-top: 3px;
+  border-color: currentColor;
+  border-top-color: transparent;
+}
+
 .banner a {
   text-decoration: underline;
 }

@@ -199,6 +199,7 @@ export function createApp(d: AppDeps): Hono {
     try {
       const book = await d.books.add(url);
       d.planner.plan(book.id);
+      void d.books.pending(book.id)?.then(() => d.planner.plan(book.id), () => undefined);
       return c.json(d.books.summary(book));
     } catch (err) {
       if (err instanceof Error && err.message === "无法识别的书籍链接") return c.json({ error: err.message, code: "input" }, 400);
@@ -229,8 +230,9 @@ export function createApp(d: AppDeps): Hono {
 
   app.post("/api/books/:id/refresh", async (c) => {
     try {
-      const book = await d.books.refresh(c.req.param("id"));
+      const book = await d.books.refreshWithin(c.req.param("id"));
       d.planner.plan(book.id);
+      void d.books.pending(book.id)?.then(() => d.planner.plan(book.id), () => undefined);
       return c.json(d.books.detail(book));
     } catch (err) {
       return errorResponse(c, err);

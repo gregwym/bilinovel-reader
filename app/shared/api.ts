@@ -66,6 +66,10 @@ export interface BookSummary {
   follow: boolean;
   ahead: number;
   audioBytes: number;
+  /** The catalog is being fetched from the site. */
+  loading?: boolean;
+  /** Why the last catalog fetch failed. */
+  loadError?: string;
 }
 
 export type ChapterAudioState = "none" | "stale" | "queued" | "running" | "done" | "failed";

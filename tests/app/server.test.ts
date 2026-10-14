@@ -30,7 +30,12 @@ const PAGES: Record<string, string> = {
   "/novel/5369/180205.html": fixture("chapter-with-images.html"),
   "/novel/5369/180207.html": fixture("shuffled-2026-05.html"),
   "/scripts/chapterlog.js": fixture("chapterlog-2026-05.js"),
+  "/novel/7777.html": BOOK_PAGE,
+  "/novel/7777/catalog": fixture("catalog.html").replaceAll("5369", "7777"),
 };
+
+/** Holds requests for book 7777 until released (a slow site). */
+let siteGate: Promise<void> = Promise.resolve();
 
 const hasFfmpeg = (() => {
   try {
@@ -52,6 +57,7 @@ let app: ReturnType<typeof createApp>;
 async function siteFetch(url: string): Promise<Response> {
   const u = new URL(url);
   siteRequests.push(u.pathname);
+  if (u.pathname.startsWith("/novel/7777")) await siteGate;
   if (/readpai\.com/.test(u.hostname)) {
     return new Response(new Uint8Array(readFileSync(join(dir, "cover.png"))), { headers: { "content-type": "image/png" } });
   }
@@ -232,6 +238,29 @@ describe("site errors", () => {
     const body = await json<{ error: string; code: string }>(res);
     expect(body.code).toBe("fetch");
     expect(body.error).toBe(`无法访问站点（HTTP 404）：${ORIGIN}/novel/9999/catalog`);
+    expect(services.books.get("9999")).toBeUndefined();
+  });
+
+  it("answers before a slow site does, and keeps loading the book in the background", async () => {
+    let release!: () => void;
+    siteGate = new Promise((r) => (release = r));
+    const book = await services.books.add(`${ORIGIN}/novel/7777.html`, 50);
+    expect(services.books.summary(book)).toMatchObject({ id: "7777", loading: true, chapters: 0 });
+    release();
+    await services.books.pending("7777");
+    const loaded = services.books.summary(services.books.get("7777")!);
+    expect(loaded).toMatchObject({ title: "测试轻小说", loading: undefined, loadError: undefined });
+    expect(loaded.chapters).toBeGreaterThan(0);
+
+    // A later failure keeps the book and says why.
+    siteGate = new Promise((r) => (release = r));
+    PAGES["/novel/7777/catalog"] = "";
+    const again = await services.books.refreshWithin("7777", 50);
+    expect(services.books.summary(again).loading).toBe(true);
+    release();
+    await services.books.pending("7777")?.catch(() => undefined);
+    expect(services.books.summary(services.books.get("7777")!).loadError).toMatch(/HTTP 404/);
+    await services.books.remove("7777");
   });
 
   it("tests the connection to the site", async () => {
