@@ -3,17 +3,15 @@ import type { PlayerState } from "../speech/SpeechPlayer";
 import type { VoiceInfo } from "../speech/VoiceManager";
 import { AZURE_PRESET_VOICES, type AzureVoice } from "../speech/AzureSpeechEngine";
 import { GOOGLE_PRESET_VOICES } from "../speech/GoogleSpeechEngine";
-import {
-  GEMINI_AHEAD_OPTIONS,
-  GEMINI_DEFAULT_STYLE,
-  GEMINI_PRESET_MODELS,
-  GEMINI_VOICES,
-} from "../speech/GeminiSpeechEngine";
+import { GEMINI_DEFAULT_STYLE, GEMINI_PRESET_MODELS, GEMINI_VOICES } from "../speech/GeminiSpeechEngine";
+import { FISH_MODELS, parseFishVoice } from "../speech/FishSpeechEngine";
+import { PAGE_AHEAD_OPTIONS } from "../speech/PageSpeechEngine";
 import {
   FONT_SIZE_RANGE,
   LINE_HEIGHT_OPTIONS,
   RATE_OPTIONS,
   type CloudProvider,
+  type PageProvider,
   type Settings,
   type Theme,
 } from "../reader/ProgressStore";
@@ -47,8 +45,8 @@ export interface ViewCallbacks {
   onCloudTest(provider: CloudProvider): void;
   /** Try the cloud service again now after it fell back to the system voice. */
   onCloudRetry(provider: CloudProvider): void;
-  /** Delete the locally cached Gemini audio. */
-  onClearGeminiCache(): void;
+  /** Delete the locally cached audio of a page engine (Gemini, Fish Audio). */
+  onClearCache(provider: PageProvider): void;
   onCopyDiagnostics(): void;
   onOpenOriginal(): void;
   onRestartChapter(): void;
@@ -76,11 +74,13 @@ const PRESET_VOICES: Record<CloudProvider, AzureVoice[]> = {
   azure: AZURE_PRESET_VOICES,
   google: GOOGLE_PRESET_VOICES,
   gemini: GEMINI_VOICES,
+  fish: [{ shortName: "", label: "模型默认声音", locale: "" }],
 };
 const CLOUD_LABELS: Record<CloudProvider, { name: string; keyHint: string }> = {
   azure: { name: "Azure", keyHint: "粘贴 Speech 资源密钥" },
   google: { name: "Google", keyHint: "粘贴 Google Cloud API 密钥" },
   gemini: { name: "Gemini", keyHint: "粘贴 AI Studio 的 Gemini API 密钥" },
+  fish: { name: "Fish Audio", keyHint: "粘贴 Fish Audio 的 API 密钥" },
 };
 
 /** Row of toggle buttons, one pressed. */
@@ -161,6 +161,7 @@ export class ReaderView {
     azure: { voices: AZURE_PRESET_VOICES, keySet: false, status: "", usage: "", fallback: false },
     google: { voices: GOOGLE_PRESET_VOICES, keySet: false, status: "", usage: "", fallback: false },
     gemini: { voices: GEMINI_VOICES, keySet: false, status: "", usage: "", fallback: false, models: GEMINI_PRESET_MODELS },
+    fish: { voices: PRESET_VOICES.fish, keySet: false, status: "", usage: "", fallback: false },
   };
   private systemDark = globalThis.matchMedia?.("(prefers-color-scheme: dark)");
 
@@ -844,6 +845,7 @@ export class ReaderView {
             ["azure", "Azure"],
             ["google", "Google"],
             ["gemini", "Gemini"],
+            ["fish", "Fish"],
           ],
           s.ttsEngine,
           (v) => this.update({ ttsEngine: v }),
@@ -895,7 +897,7 @@ export class ReaderView {
       if (v && v !== s.azureRegion) this.update({ azureRegion: v });
     });
 
-    const current = { azure: s.azureVoice, google: s.googleVoice, gemini: s.geminiVoice }[provider];
+    const current = { azure: s.azureVoice, google: s.googleVoice, gemini: s.geminiVoice, fish: s.fishVoice }[provider];
     const voiceSelect = h("select", { "aria-label": `${name} 声音` });
     const voices = st.voices.some((v) => v.shortName === current)
       ? st.voices
@@ -912,9 +914,53 @@ export class ReaderView {
       h("button", { onclick: () => this.cb.onCloudTest(provider) }, "试听"),
       st.fallback ? h("button", { onclick: () => this.cb.onCloudRetry(provider) }, `立即重试 ${name}`) : null,
       st.keySet ? h("button", { onclick: () => this.cb.onCloudKey(provider, "") }, "清除密钥") : null,
-      provider === "gemini" ? h("button", { onclick: () => this.cb.onClearGeminiCache() }, "清除缓存") : null,
+      provider === "gemini" || provider === "fish"
+        ? h("button", { onclick: () => this.cb.onClearCache(provider) }, "清除缓存")
+        : null,
     );
     const note = h("div", { class: "br-note" }, st.status ? `${st.status}\n${st.usage}` : st.usage);
+
+    const aheadRow = (value: number, key: "geminiAhead" | "fishAhead") =>
+      row(
+        "提前生成",
+        seg(
+          PAGE_AHEAD_OPTIONS.map((n) => [n, `${n} 页`] as [number, string]),
+          value,
+          (v) => this.update({ [key]: v } as Partial<Settings>),
+        ),
+      );
+
+    if (provider === "fish") {
+      const models = FISH_MODELS.some(([id]) => id === s.fishModel) ? FISH_MODELS : [[s.fishModel, s.fishModel], ...FISH_MODELS];
+      const modelSelect = h("select", { "aria-label": "Fish Audio 模型" });
+      for (const [id, label] of models) modelSelect.append(h("option", { value: id }, label));
+      modelSelect.value = s.fishModel;
+      modelSelect.addEventListener("change", () => this.update({ fishModel: modelSelect.value }));
+      const idInput = h("input", {
+        type: "text",
+        autocomplete: "off",
+        autocapitalize: "off",
+        spellcheck: "false",
+        value: s.fishVoice,
+        placeholder: "粘贴 fish.audio 声音链接或 ID",
+        "aria-label": "Fish Audio 声音 ID",
+      });
+      idInput.addEventListener("change", () => {
+        const v = idInput.value.trim();
+        const id = v ? parseFishVoice(v) : "";
+        if (id === undefined) idInput.value = s.fishVoice;
+        else this.update({ fishVoice: id });
+      });
+      return [
+        row("密钥", keyInput),
+        row("模型", modelSelect),
+        row("声音", voiceSelect),
+        row("声音 ID", idInput),
+        aheadRow(s.fishAhead, "fishAhead"),
+        row("", actions),
+        note,
+      ];
+    }
 
     if (provider === "gemini") {
       const models = (st.models ?? GEMINI_PRESET_MODELS).includes(s.geminiModel)
@@ -937,14 +983,7 @@ export class ReaderView {
         row("模型", modelSelect),
         row("声音", voiceSelect),
         row("风格", styleInput),
-        row(
-          "提前生成",
-          seg(
-            GEMINI_AHEAD_OPTIONS.map((n) => [n, `${n} 页`] as [number, string]),
-            s.geminiAhead,
-            (v) => this.update({ geminiAhead: v }),
-          ),
-        ),
+        aheadRow(s.geminiAhead, "geminiAhead"),
         row("", actions),
         note,
       ];

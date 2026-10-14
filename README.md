@@ -10,7 +10,7 @@
 - 站点内部的分页（`180204.html → 180204_2.html → …`）对用户不可见，一章就是一章
 - 滚动到底部自动加载下一页 / 下一章，不刷新页面（`fetch` + `DOMParser`），地址栏用 `history.replaceState` 同步
 - 逐段朗读：当前段落高亮并跟随滚动，自动跨页、跨章继续
-- 四种朗读引擎：系统语音（Safari Web Speech）、**Azure 神经网络语音**、**Google Cloud 语音**（逐句合成），以及 **Gemini 语音**（大模型按页生成、本机缓存）；云端语音更自然，可在后台/锁屏继续播放，锁屏可控制
+- 五种朗读引擎：系统语音（Safari Web Speech）、**Azure 神经网络语音**、**Google Cloud 语音**（逐句合成），以及 **Gemini 语音**、**Fish Audio 语音**（按页生成、本机缓存）；云端语音更自然，可在后台/锁屏继续播放，锁屏可控制
 - 播放 / 暂停 / 上一段 / 下一段，点击段落「从这里开始朗读」，语速（0.75–1.5x）与中文声音可选
 - 目录与跳转：右上角 ☰ 打开目录（按卷分组、高亮当前章），可上一章 / 下一章、上一页 / 下一页、跳到本章任意分页；内容顶部有「↑ 本章上一页 / 上一章」按钮，无需退出阅读模式
 - 阅读与收听共用一个光标；按书保存进度（精确到段落，并记录段落开头文字以便定位）。重新打开同一章的任意一页会直接回到上次位置；打开其他章时提示「上次读到…，要继续吗？」
@@ -95,6 +95,16 @@ Gemini 用大模型生成语音，语气更像有声书，但工作方式与 Azu
 
 被限流时会按服务器建议的时间等待重试；当天次数用完会暂用系统语音，30 分钟后再试。请求通过 `GM.xmlHttpRequest` 发往 `generativelanguage.googleapis.com`。参考：[Gemini 语音生成文档](https://ai.google.dev/gemini-api/docs/speech-generation)、[速率限制](https://ai.google.dev/gemini-api/docs/rate-limits)。
 
+## Fish Audio 语音（可选）
+
+Fish Audio 的 `s2.1-pro-free` 模型通过 API **免费使用至 2026-11-30**（“合理使用”，不保证延迟和可用性），表现力接近有声书。工作方式与 Gemini 相同：按页生成（超过 1000 字的页均分成几份，首段等待更短）、提前生成后面几页、音频缓存在本机 IndexedDB（与 Gemini 分开，各约 400 MB）、段落起点对齐到音频里的停顿、语速通过播放速度调节。
+
+1. 在 [Fish Audio](https://fish.audio) 注册，到 API Keys 页面创建密钥。
+2. 阅读器 ⋯ →「朗读」选 **Fish**，粘贴密钥，点「试听」。
+3. 「声音」会列出你自己的声音和常用的中文声音；也可以在「声音 ID」里粘贴 fish.audio 上任意声音的链接（如 `https://fish.audio/zh-CN/m/<ID>/`）。不选则用模型默认声音。改动模型或声音后会重新生成。
+
+「模型」里的 S2.1 Pro、Drama 3 等是**付费**模型，按 UTF-8 字节计费（中文约 3 字节一个字），需要账户有余额；余额不足会暂用系统语音。被限流时按服务器给出的时间等待重试。请求通过 `GM.xmlHttpRequest` 发往 `api.fish.audio`。参考：[S2.1 Pro 免费 API](https://fish.audio/blog/s2-1-pro-free-api/)、[价格与限制](https://docs.fish.audio/developer-guide/models-pricing/pricing-and-rate-limits)。
+
 ## 开发
 
 ```bash
@@ -138,7 +148,9 @@ src/
 │   ├── CloudSpeechEngine.ts   云端语音公共部分（<audio> 播放、预取、缓存）
 │   ├── AzureSpeechEngine.ts   Azure 神经网络语音（REST、用量估算）
 │   ├── GoogleSpeechEngine.ts  Google Cloud 语音（REST、按类型统计并限制在免费额度内）
-│   ├── GeminiSpeechEngine.ts  Gemini 语音（按页生成、提前生成、IndexedDB 缓存、按停顿对齐段落）
+│   ├── PageSpeechEngine.ts    按页生成的语音公共部分（提前生成、IndexedDB 缓存、按停顿对齐段落）
+│   ├── GeminiSpeechEngine.ts  Gemini 语音
+│   ├── FishSpeechEngine.ts    Fish Audio 语音
 │   ├── FallbackSpeechEngine.ts 云端语音失败（额度/密钥/网络）时自动改用系统语音
 │   ├── SpeechPlayer.ts        逐段朗读状态机 idle/playing/paused/buffering/error
 │   └── VoiceManager.ts        中文声音列表
@@ -179,7 +191,7 @@ src/
 
 Bili Reader 没有后端，不会向开发者发送任何阅读数据。所有阅读进度和设置都只保存在你的设备上（Userscripts 的脚本存储和浏览器本地存储）。脚本只会向你正在浏览的 Bilinovel 站点请求你接下来要读的页面。
 
-例外：如果你启用了 Azure、Google 或 Gemini 语音，正在朗读（及提前生成）的文字会直接从你的设备发送到你自己的 Azure Speech 资源（微软）或 Google 项目以合成语音；默认的系统语音不会发送任何内容。
+例外：如果你启用了 Azure、Google、Gemini 或 Fish Audio 语音，正在朗读（及提前生成）的文字会直接从你的设备发送到你自己的 Azure Speech 资源（微软）、Google 项目或 Fish Audio 账户以合成语音；默认的系统语音不会发送任何内容。
 
 ## 许可
 

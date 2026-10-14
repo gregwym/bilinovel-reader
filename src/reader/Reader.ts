@@ -25,14 +25,23 @@ import {
   listGoogleChineseVoices,
 } from "../speech/GoogleSpeechEngine";
 import {
+  GEMINI_MAX_CHARS,
   GEMINI_PRESET_MODELS,
   GEMINI_VOICES,
   GeminiSpeechEngine,
   GeminiUsageMeter,
   describeGeminiError,
   listGeminiTtsModels,
-  type PageContext,
 } from "../speech/GeminiSpeechEngine";
+import {
+  FISH_MAX_CHARS,
+  FISH_MODELS,
+  FishSpeechEngine,
+  FishUsageMeter,
+  describeFishError,
+  listFishVoices,
+} from "../speech/FishSpeechEngine";
+import type { PageContext, PageEngineOptions, PageSpeechEngine } from "../speech/PageSpeechEngine";
 import { FallbackSpeechEngine } from "../speech/FallbackSpeechEngine";
 import { SpeechEngineError } from "../speech/SpeechEngine";
 import { VoiceManager } from "../speech/VoiceManager";
@@ -45,7 +54,10 @@ import {
   DEFAULT_SETTINGS,
   GOOGLE_KEY_SECRET,
   GEMINI_KEY_SECRET,
+  FISH_KEY_SECRET,
+  CLOUD_PROVIDERS,
   type CloudProvider,
+  type PageProvider,
   ProgressStore,
   SecretStore,
   SettingsStore,
@@ -75,7 +87,7 @@ interface JumpTarget {
   url?: string;
 }
 
-/** A network speech service (Azure, Google, Gemini) with its key and system-voice fallback. */
+/** A network speech service (Azure, Google, Gemini, Fish Audio) with its key and system-voice fallback. */
 interface CloudSlot {
   name: string;
   secret: string;
@@ -142,8 +154,12 @@ export class Reader implements PlaybackSource {
   private readonly azureUsage = new AzureUsageMeter();
   private readonly googleUsage = new GoogleUsageMeter();
   private readonly geminiUsage = new GeminiUsageMeter();
-  private readonly gemini: GeminiSpeechEngine;
-  private geminiCacheBytes = 0;
+  private readonly fishUsage = new FishUsageMeter();
+  /** Engines that generate whole pages ahead, with the size of their local audio cache. */
+  private readonly paged: Record<
+    PageProvider,
+    { engine: Pick<PageSpeechEngine<never>, "clearCache" | "cacheBytes">; cacheBytes: number }
+  >;
   private settings!: Settings;
   private cursorId?: string;
   private loading?: Promise<boolean>;
@@ -188,7 +204,7 @@ export class Reader implements PlaybackSource {
       },
       { meter: this.googleUsage, onUsage: () => this.renderUsage("google") },
     );
-    const gemini = (this.gemini = new GeminiSpeechEngine(
+    const gemini = new GeminiSpeechEngine(
       () => {
         const key = this.cloud.gemini.key;
         const s = this.settings;
@@ -202,19 +218,14 @@ export class Reader implements PlaybackSource {
             }
           : undefined;
       },
-      {
-        pages: (id, count) => this.pagesFrom(id, count),
-        usage: this.geminiUsage,
-        onStatus: (msg) => {
-          this.view.setCloudState("gemini", { status: msg });
-          if (msg) this.view.setPlayerMessage(msg);
-        },
-        onUsage: (bytes) => {
-          this.geminiCacheBytes = bytes;
-          this.renderUsage("gemini");
-        },
-      },
-    ));
+      this.pageEngineOptions("gemini", GEMINI_MAX_CHARS, this.geminiUsage),
+    );
+    const fish = new FishSpeechEngine(() => {
+      const key = this.cloud.fish.key;
+      const s = this.settings;
+      return key ? { key, model: s.fishModel, voice: s.fishVoice, ahead: s.fishAhead } : undefined;
+    }, this.pageEngineOptions("fish", FISH_MAX_CHARS, this.fishUsage));
+    this.paged = { gemini: { engine: gemini, cacheBytes: 0 }, fish: { engine: fish, cacheBytes: 0 } };
     this.cloud = {
       azure: {
         name: "Azure",
@@ -258,7 +269,7 @@ export class Reader implements PlaybackSource {
         describe: describeGeminiError,
         usageText: () => {
           const used = this.geminiUsage.get();
-          const mb = (this.geminiCacheBytes / 1024 / 1024).toFixed(0);
+          const mb = (this.paged.gemini.cacheBytes / 1024 / 1024).toFixed(0);
           return `今天约 ${used.requests} 次请求、${used.chars.toLocaleString()} 字；本机缓存 ${mb} MB（本机统计。免费层按每日请求数限制，未开结算的项目才免费；以 AI Studio 为准）`;
         },
         listVoices: async (key) => {
@@ -267,6 +278,22 @@ export class Reader implements PlaybackSource {
           return GEMINI_VOICES;
         },
         sample: "你好，这是 Gemini 语音的试听。轻小说朗读听起来会是这个样子。",
+      },
+      fish: {
+        name: "Fish Audio",
+        secret: FISH_KEY_SECRET,
+        key: "",
+        engine: fish,
+        withFallback: this.withFallback("fish", fish),
+        describe: describeFishError,
+        usageText: () => {
+          const used = this.fishUsage.get();
+          const mb = (this.paged.fish.cacheBytes / 1024 / 1024).toFixed(0);
+          const model = FISH_MODELS.find(([id]) => id === this.settings.fishModel)?.[1] ?? this.settings.fishModel;
+          return `今天约 ${used.requests} 次请求、${used.chars.toLocaleString()} 字；本机缓存 ${mb} MB（本机统计。当前模型：${model}；免费模型按“合理使用”不限量，付费模型按字节计费，中文约 3 字节/字；以 Fish Audio 后台为准）`;
+        },
+        listVoices: (key) => listFishVoices(key),
+        sample: "你好，这是 Fish Audio 语音的试听。轻小说朗读听起来会是这个样子。",
       },
     };
     this.player = new SpeechPlayer(this.webEngine, this, {
@@ -306,8 +333,10 @@ export class Reader implements PlaybackSource {
         onSettings: (s) => this.updateSettings(s),
         onCloudKey: (provider, key) => void this.setCloudKey(provider, key),
         onCloudTest: (provider) => this.testCloudVoice(provider),
-        onClearGeminiCache: () => {
-          void this.gemini.clearCache().then(() => this.view.setCloudState("gemini", { status: "已清除缓存" }));
+        onClearCache: (provider) => {
+          void this.paged[provider].engine
+            .clearCache()
+            .then(() => this.view.setCloudState(provider, { status: "已清除缓存" }));
         },
         onCloudRetry: (provider) => {
           this.cloud[provider].withFallback.reset();
@@ -361,15 +390,17 @@ export class Reader implements PlaybackSource {
     this.active = true;
     this.player.setRate(this.settings.rate);
     this.player.setVoice(this.settings.voiceURI);
-    for (const provider of ["azure", "google", "gemini"] as const) {
+    for (const provider of CLOUD_PROVIDERS) {
       const slot = this.cloud[provider];
       slot.key = (await this.secrets.get(slot.secret)) ?? "";
       this.view.setCloudState(provider, { keySet: !!slot.key, usage: slot.usageText() });
     }
-    void this.gemini.cacheBytes().then((bytes) => {
-      this.geminiCacheBytes = bytes;
-      this.renderUsage("gemini");
-    });
+    for (const provider of ["gemini", "fish"] as const) {
+      void this.paged[provider].engine.cacheBytes().then((bytes) => {
+        this.paged[provider].cacheBytes = bytes;
+        this.renderUsage(provider);
+      });
+    }
     this.applyEngine();
     if (this.settings.ttsEngine !== "system") void this.refreshCloudVoices(this.settings.ttsEngine);
     this.setupMediaSession();
@@ -527,7 +558,7 @@ export class Reader implements PlaybackSource {
       })
       .finally(() => {
         this.loading = undefined;
-        // Keep loading while the cursor (or Gemini's look-ahead) still needs pages.
+        // Keep loading while the cursor (or a page engine's look-ahead) still needs pages.
         if (this.cursorId) this.prefetchAround(this.cursorId);
       });
     return this.loading;
@@ -944,22 +975,41 @@ export class Reader implements PlaybackSource {
 
   private prefetchAround(id: string): void {
     if (this.loadFailed) return;
-    // Gemini generates whole pages ahead, so it needs those pages loaded.
-    const pagesAhead = this.settings.ttsEngine === "gemini" ? this.settings.geminiAhead : 0;
+    // Gemini and Fish Audio generate whole pages ahead, so they need those pages loaded.
+    const t = this.settings.ttsEngine;
+    const pagesAhead = t === "gemini" ? this.settings.geminiAhead : t === "fish" ? this.settings.fishAhead : 0;
     if (
       this.buffer.remainingAfter(id) < PREFETCH_REMAINING ||
-      this.pagesFrom(id, pagesAhead + 1).pages.length <= pagesAhead
+      this.pagesFrom(id, pagesAhead + 1, Infinity).pages.length <= pagesAhead
     ) {
       void this.loadMore();
     }
   }
 
-  /** Utterance texts of the page holding `id` and of up to `count - 1` loaded pages after it. */
-  private pagesFrom(id: string, count: number): PageContext {
+  /** Options shared by the page engines (Gemini, Fish Audio). */
+  private pageEngineOptions(provider: PageProvider, maxChunk: number, usage: PageEngineOptions["usage"]): PageEngineOptions {
+    return {
+      pages: (id, count) => this.pagesFrom(id, count, maxChunk),
+      usage,
+      onStatus: (msg) => {
+        this.view.setCloudState(provider, { status: msg });
+        if (msg) this.view.setPlayerMessage(msg);
+      },
+      onUsage: (bytes) => {
+        this.paged[provider].cacheBytes = bytes;
+        this.renderUsage(provider);
+      },
+    };
+  }
+
+  /**
+   * Utterance texts (paragraphs split at `maxChunk`, as the player splits
+   * them) of the page holding `id` and of up to `count - 1` loaded pages after it.
+   */
+  private pagesFrom(id: string, count: number, maxChunk: number): PageContext {
     const p = this.buffer.get(id);
     if (!p) return { pages: [], index: 0 };
-    const chunks = (ps: ReaderParagraph[]) =>
-      ps.flatMap((q) => (q.text ? splitIntoChunks(q.text, this.gemini.maxChunkLength) : []));
+    const chunks = (ps: ReaderParagraph[]) => ps.flatMap((q) => (q.text ? splitIntoChunks(q.text, maxChunk) : []));
     let page = this.buffer.pageParagraphs(p.chapterId, p.pageIndex);
     const ctx: PageContext = { pages: [chunks(page)], index: chunks(page.slice(0, page.indexOf(p))).length };
     while (ctx.pages.length < count && page.length) {
@@ -1040,10 +1090,14 @@ export class Reader implements PlaybackSource {
       prev.geminiModel !== s.geminiModel ||
       prev.geminiVoice !== s.geminiVoice ||
       prev.geminiStyle !== s.geminiStyle ||
-      prev.geminiAhead !== s.geminiAhead;
+      prev.geminiAhead !== s.geminiAhead ||
+      prev.fishModel !== s.fishModel ||
+      prev.fishVoice !== s.fishVoice ||
+      prev.fishAhead !== s.fishAhead;
     if (engineChanged) {
       this.applyEngine();
       if (prev.googleVoice !== s.googleVoice) this.renderUsage("google");
+      if (prev.fishModel !== s.fishModel) this.renderUsage("fish");
       const provider = s.ttsEngine;
       if (provider !== "system" && (prev.ttsEngine !== provider || prev.azureRegion !== s.azureRegion)) {
         void this.refreshCloudVoices(provider);
@@ -1055,7 +1109,7 @@ export class Reader implements PlaybackSource {
   // Speech engines
 
   private withFallback(provider: CloudProvider, engine: SpeechEngine): FallbackSpeechEngine {
-    const name = { azure: "Azure", google: "Google", gemini: "Gemini" }[provider];
+    const name = { azure: "Azure", google: "Google", gemini: "Gemini", fish: "Fish Audio" }[provider];
     return new FallbackSpeechEngine(engine, this.webEngine, {
       onFallback: (code, retryAt) => {
         const when = Number.isFinite(retryAt)
@@ -1084,7 +1138,7 @@ export class Reader implements PlaybackSource {
 
   /** Selects the engine for the current settings; a fresh choice retries the cloud service after a fallback. */
   private applyEngine(): void {
-    for (const provider of ["azure", "google", "gemini"] as const) {
+    for (const provider of CLOUD_PROVIDERS) {
       const slot = this.cloud[provider];
       slot.withFallback.reset();
       slot.engine.setPrefetchCount(this.settings.azureBuffer);

@@ -2,14 +2,11 @@ import { beforeAll, describe, expect, it } from "vitest";
 import {
   GeminiSpeechEngine,
   GeminiUsageMeter,
-  MemorySegmentStore,
   geminiErrorCode,
   geminiRetryDelayMs,
-  paragraphBounds,
-  pcmToWav,
-  splitPage,
   type GeminiConfig,
 } from "../src/speech/GeminiSpeechEngine";
+import { MemorySegmentStore, paragraphBounds, pcmToWav, splitPage } from "../src/speech/PageSpeechEngine";
 import { DEFAULT_SETTINGS, sanitizeSettings } from "../src/reader/ProgressStore";
 import type { HttpRequest, HttpResponse } from "../src/utils/http";
 
