@@ -357,6 +357,32 @@ export function createApp(d: AppDeps): Hono {
     return c.json({ provider: shown.provider, voice, voices, complete, segments } satisfies ChapterSegments);
   });
 
+  /**
+   * Generates one segment of a chapter again in the current voice (e.g. when
+   * the service garbled it). A chapter file made with it is made again too.
+   */
+  app.post("/api/books/:id/chapters/:chapter/segments/:index/regenerate", async (c) => {
+    const book = d.books.get(c.req.param("id"));
+    if (!book) return c.json({ error: "书籍不存在" }, 404);
+    const profile = d.tts.profile();
+    if (!profile) return c.json({ error: describeError("gemini", "config"), code: "config" }, 400);
+    const chapterId = c.req.param("chapter");
+    const { pages } = d.source.cachedChapterPages(book.id, chapterId);
+    const texts = d.tts.parts(profile.provider, pages)[Number(c.req.param("index"))];
+    if (!texts) return c.json({ error: "片段不存在" }, 404);
+    await d.tts.remove(profile.provider, [d.tts.keyIn(d.tts.profileId(profile), texts)]);
+    void d.tts.segment(profile.provider, texts, { priority: READER_PRIORITY }).catch(() => undefined);
+    if (d.library.chapterAudio(book.id).some((r) => r.chapter_id === chapterId)) {
+      await d.library.deleteChapter(book.id, chapterId);
+      const title =
+        bookCatalog(book)
+          ?.volumes.flatMap((v) => v.chapters)
+          .find((ch) => ch.chapterId === chapterId)?.title ?? "";
+      d.jobs.enqueueChapter(book.id, chapterId, title, "manual");
+    }
+    return c.json({ ok: true });
+  });
+
   app.post("/api/books/:id/volumes/:vi/export", (c) => {
     const book = d.books.get(c.req.param("id"));
     const vi = Number(c.req.param("vi"));

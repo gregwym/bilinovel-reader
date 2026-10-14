@@ -229,6 +229,40 @@ function alignParagraphs(texts: string[], samples: ArrayLike<number>, sampleRate
   return bounds;
 }
 
+/** Runs of enclosed numbers (①, ⑴, ⒈, ❶, ➀, ➊), each counting from 1. */
+const ENCLOSED: [number, number][] = [
+  [0x2460, 0x2473],
+  [0x2474, 0x2487],
+  [0x2488, 0x249b],
+  [0x2776, 0x277f],
+  [0x2780, 0x2789],
+  [0x278a, 0x2793],
+];
+
+/**
+ * Text as sent to the speech service. Arrows, box drawing, shapes and other
+ * symbols (diagrams in the text) can throw a model off for the rest of the
+ * request, so they are dropped; enclosed numbers become plain ones; lines
+ * left with nothing to read out are left out.
+ */
+export function speakableText(texts: string[]): string {
+  const clean = texts
+    .map((t) =>
+      t
+        .replace(/[\u2460-\u249b\u2776-\u2793]/g, (ch) => {
+          const c = ch.charCodeAt(0);
+          const run = ENCLOSED.find(([from, to]) => c >= from && c <= to);
+          return run ? String(c - run[0] + 1) : ch;
+        })
+        .replace(/[\u200b-\u200d\u2060\ufeff]/g, "")
+        .replace(/[\u2190-\u21ff\u2300-\u23ff\u2500-\u27bf\u2900-\u297f\u2b00-\u2bff\u203b\ue000-\uf8ff]+/g, " ")
+        .replace(/[ \t\u3000]{2,}/g, " ")
+        .trim(),
+    )
+    .filter((t) => /[\p{L}\p{N}]/u.test(t));
+  return clean.length ? clean.join("\n\n") : texts.join("\n\n");
+}
+
 /**
  * Splits one page's texts into requests of at most about `maxChars`
  * characters, in parts of similar size. Depends only on the page, so the same

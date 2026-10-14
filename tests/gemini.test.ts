@@ -6,7 +6,7 @@ import {
   geminiRetryDelayMs,
   type GeminiConfig,
 } from "../src/speech/GeminiSpeechEngine";
-import { MemorySegmentStore, paragraphBounds, pcmToWav, splitPage } from "../src/speech/PageSpeechEngine";
+import { MemorySegmentStore, paragraphBounds, pcmToWav, speakableText, splitPage } from "../src/speech/PageSpeechEngine";
 import { DEFAULT_SETTINGS, sanitizeSettings } from "../src/reader/ProgressStore";
 import type { HttpRequest, HttpResponse } from "../src/utils/http";
 
@@ -175,6 +175,12 @@ describe("Gemini helpers", () => {
     [5.6, 11.2, 14.8, 18.4, 22].forEach((start, i) => {
       expect(Math.abs(bounds[i + 1] * total - (start - 0.25))).toBeLessThan(0.1);
     });
+  });
+
+  it("sends diagrams and symbols as plain text, without the symbols", () => {
+    const texts = ["特别考试 配置", "④A班 → ①B班", "↑ ↓", "③D班 ← ②C班", "※注意事项★"];
+    expect(speakableText(texts)).toBe("特别考试 配置\n\n4A班 1B班\n\n3D班 2C班\n\n注意事项");
+    expect(speakableText(["……", "——"])).toBe("……\n\n——");
   });
 
   it("estimates by text length without audio", () => {

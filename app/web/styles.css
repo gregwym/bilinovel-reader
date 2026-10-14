@@ -1215,6 +1215,19 @@ textarea {
   color: var(--accent);
 }
 
+.segment .redo {
+  background: transparent;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  color: var(--faint);
+}
+
+.segment .redo svg {
+  width: 16px;
+  height: 16px;
+}
+
 .segment .state .hint {
   font-size: 11px;
   white-space: nowrap;
