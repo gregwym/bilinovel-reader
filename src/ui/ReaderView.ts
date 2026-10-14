@@ -14,6 +14,7 @@ import {
   type PageProvider,
   type Settings,
   type Theme,
+  type TtsEngine,
 } from "../reader/ProgressStore";
 import { h, svg } from "../utils/dom";
 import { ICONS } from "./icons";
@@ -94,6 +95,15 @@ function seg<T>(options: [T, string][], current: T, onPick: (v: T) => void): HTM
   );
 }
 
+export interface ViewOptions {
+  /** Speech engines offered (default: all). */
+  engines?: TtsEngine[];
+  /** Services whose keys an app hosting the reader keeps. */
+  managedKeys?: CloudProvider[];
+  /** Label of the leave button (default: "退出阅读模式"). */
+  exitLabel?: string;
+}
+
 export type TocStep = "prev-chapter" | "prev-page" | "next-page" | "next-chapter";
 
 export interface TocState {
@@ -169,6 +179,7 @@ export class ReaderView {
     private readonly cb: ViewCallbacks,
     private settings: Settings,
     private readonly version: string,
+    private readonly options: ViewOptions = {},
   ) {}
 
   mount(): void {
@@ -192,7 +203,7 @@ export class ReaderView {
     const top = h(
       "header",
       { class: "br-top" },
-      iconBtn(ICONS.back, "退出阅读模式", () => this.cb.onExit()),
+      iconBtn(ICONS.back, this.options.exitLabel ?? "退出阅读模式", () => this.cb.onExit()),
       h("div", { class: "br-title" }, this.titleEl, this.subtitleEl),
       iconBtn(ICONS.toc, "目录", () => this.cb.onOpenToc()),
       iconBtn(ICONS.more, "设置", () => this.openSheet()),
@@ -840,13 +851,15 @@ export class ReaderView {
       row(
         "朗读",
         seg<Settings["ttsEngine"]>(
-          [
-            ["system", "系统"],
-            ["azure", "Azure"],
-            ["google", "Google"],
-            ["gemini", "Gemini"],
-            ["fish", "Fish"],
-          ],
+          (
+            [
+              ["system", "系统"],
+              ["azure", "Azure"],
+              ["google", "Google"],
+              ["gemini", "Gemini"],
+              ["fish", "Fish"],
+            ] as [TtsEngine, string][]
+          ).filter(([e]) => !this.options.engines || this.options.engines.includes(e)),
           s.ttsEngine,
           (v) => this.update({ ttsEngine: v }),
         ),
@@ -858,7 +871,7 @@ export class ReaderView {
         h("button", { class: "br-btn", onclick: () => (close(), this.cb.onRestartChapter()) }, "从本章开头阅读"),
         h("button", { class: "br-btn", onclick: () => (close(), this.cb.onOpenOriginal()) }, "打开当前页原网页"),
         h("button", { class: "br-btn", onclick: () => this.cb.onCopyDiagnostics() }, "复制诊断信息"),
-        h("button", { class: "br-btn", onclick: () => (close(), this.cb.onExit()) }, "退出阅读模式"),
+        h("button", { class: "br-btn", onclick: () => (close(), this.cb.onExit()) }, this.options.exitLabel ?? "退出阅读模式"),
         h("button", { class: "br-btn primary", onclick: close }, "完成"),
       ),
       h("div", { class: "br-version" }, `Bili Reader v${this.version}`),
@@ -866,22 +879,30 @@ export class ReaderView {
     this.sheetEl.replaceChildren(h("div", { class: "br-sheet-backdrop", onclick: close }), sheet);
   }
 
-  private renderCloudRows(provider: CloudProvider, row: (label: string, control: Node) => HTMLElement): HTMLElement[] {
-    const s = this.settings;
-    const st = this.cloud[provider];
-    const { name, keyHint } = CLOUD_LABELS[provider];
-    const keyInput = h("input", {
+  private keyInput(provider: CloudProvider, name: string, keyHint: string, keySet: boolean): HTMLElement {
+    const input = h("input", {
       type: "password",
       autocomplete: "off",
       autocapitalize: "off",
       spellcheck: "false",
-      placeholder: st.keySet ? "已保存（输入新密钥以替换）" : keyHint,
+      placeholder: keySet ? "已保存（输入新密钥以替换）" : keyHint,
       "aria-label": `${name} 密钥`,
     });
-    keyInput.addEventListener("change", () => {
-      const v = keyInput.value.trim();
+    input.addEventListener("change", () => {
+      const v = input.value.trim();
       if (v) this.cb.onCloudKey(provider, v);
     });
+    return input;
+  }
+
+  private renderCloudRows(provider: CloudProvider, row: (label: string, control: Node) => HTMLElement): HTMLElement[] {
+    const s = this.settings;
+    const st = this.cloud[provider];
+    const { name, keyHint } = CLOUD_LABELS[provider];
+    const managed = !!this.options.managedKeys?.includes(provider);
+    const keyInput: HTMLElement = managed
+      ? h("span", { class: "br-managed" }, "在服务器设置中管理")
+      : this.keyInput(provider, name, keyHint, st.keySet);
 
     const regionInput = h("input", {
       type: "text",
@@ -913,8 +934,8 @@ export class ReaderView {
       { class: "br-seg" },
       h("button", { onclick: () => this.cb.onCloudTest(provider) }, "试听"),
       st.fallback ? h("button", { onclick: () => this.cb.onCloudRetry(provider) }, `立即重试 ${name}`) : null,
-      st.keySet ? h("button", { onclick: () => this.cb.onCloudKey(provider, "") }, "清除密钥") : null,
-      provider === "gemini" || provider === "fish"
+      st.keySet && !managed ? h("button", { onclick: () => this.cb.onCloudKey(provider, "") }, "清除密钥") : null,
+      (provider === "gemini" || provider === "fish") && !managed
         ? h("button", { onclick: () => this.cb.onClearCache(provider) }, "清除缓存")
         : null,
     );

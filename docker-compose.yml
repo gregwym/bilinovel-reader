@@ -1,0 +1,19 @@
+services:
+  bili-reader:
+    build: .
+    container_name: bili-reader
+    restart: unless-stopped
+    ports:
+      - "8790:8790"
+    environment:
+      # Optional: password for the whole app (recommended when exposed beyond the LAN).
+      APP_PASSWORD: ""
+      # Optional: keys can also be entered in the app's settings.
+      FISH_API_KEY: ""
+      GEMINI_API_KEY: ""
+      TZ: Asia/Shanghai
+    # Run as the NAS user that owns the library folder:
+    # user: "1000:1000"
+    volumes:
+      - ./data:/data # database, voice segment cache, exports
+      - ./library:/library # generated audiobooks (point audiobook apps here)

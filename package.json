@@ -1,6 +1,6 @@
 {
   "name": "bili-reader",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Continuous reader and TTS userscript for Bilinovel (iOS Safari + Userscripts)",
   "private": true,
   "type": "module",
@@ -13,16 +13,24 @@
     "lint": "eslint . && tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "build:site": "node scripts/build-site.mjs"
+    "build:site": "node scripts/build-site.mjs",
+    "build:app": "vite build -c vite.app.config.ts && vite build -c vite.app.config.ts --mode server",
+    "start:app": "node dist-app/server/main.js",
+    "dev:app": "vite -c vite.app.config.ts"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/jsdom": "^30.0.0",
     "@types/node": "^26.6.4",
     "eslint": "^10.12.0",
-    "jsdom": "^29.1.1",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.71.1",
     "vite": "^8.3.2",
     "vitest": "^5.0.3"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.5",
+    "hono": "^4.13.13",
+    "jsdom": "^29.1.1"
   }
 }

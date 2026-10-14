@@ -4,6 +4,8 @@
 
 它是一个用户脚本（userscript），通过 iOS 上的 [Userscripts](https://apps.apple.com/app/userscripts/id1463298887) App 运行。没有后端、不需要签名、不需要 Apple 开发者账号。
 
+想在 NAS 上自托管、带书架和有声书生成？见 [有声书库（NAS 自托管）](#有声书库nas-自托管)。
+
 ## 功能
 
 - 打开任意章节页自动进入阅读模式（Shadow DOM 覆盖层，不改动原页面；可随时退出）
@@ -104,6 +106,58 @@ Fish Audio 的 `s2.1-pro-free` 模型通过 API **免费使用至 2026-11-30**�
 3. 「声音」会列出你自己的声音和常用的中文声音；也可以在「声音 ID」里粘贴 fish.audio 上任意声音的链接（如 `https://fish.audio/zh-CN/m/<ID>/`）。不选则用模型默认声音。改动模型或声音后会重新生成。
 
 「模型」里的 S2.1 Pro、Drama 3 等是**付费**模型，按 UTF-8 字节计费（中文约 3 字节一个字），需要账户有余额；余额不足会暂用系统语音。被限流时按服务器给出的时间等待重试。请求通过 `GM.xmlHttpRequest` 发往 `api.fish.audio`。参考：[S2.1 Pro 免费 API](https://fish.audio/blog/s2-1-pro-free-api/)、[价格与限制](https://docs.fish.audio/developer-guide/models-pricing/pricing-and-rate-limits)。
+
+## 有声书库（NAS 自托管）
+
+`app/` 是同一套阅读器的自托管版本，适合跑在 NAS 上：
+
+- **阅读器体验一致**：章节页地址与网站相同（`/novel/<书>/<章>.html`），就是同一个阅读器。正文由服务器抓取并缓存，阅读设置和进度存在服务器上，多台设备之间同步。
+- **书架**：仿微信读书的封面书架，带“继续阅读”卡片、阅读百分比和 🎧 有声章节数。粘贴书籍或章节链接即可加入；在阅读器里打开过的书也会自动加入。
+- **有声书生成**：
+  - **跟随阅读进度**（默认开启）：后台生成正在读的章节，以及之后 N 章（可调）。
+  - **手动批量生成**：可以生成单章、整卷、从当前章起 10 章，或全书。
+  - 声音使用 Fish Audio 或 Gemini，密钥只保存在服务器上。
+  - 阅读器朗读和后台生成共用同一份语音片段缓存，已生成的部分不会再次请求。
+  - 更换声音后，旧章节会标记为“需重新生成”。
+  - 配额用尽时等到重置再继续；密钥无效时暂停，并在“任务”页提示。
+- **本地书库**：像 Immich 管理照片一样，按模板把音频整理成文件夹（默认 `{author}/{book}/{volumeNo} {volume}/{chapterNo} {chapter}.mp3`）。
+  - 每个文件写入 ID3 标签，每本书的文件夹里有 `cover.jpg`，可以直接给 Audiobookshelf、Plex 等使用。
+  - 修改模板后可一键整理已有文件；“检查文件”会找出被删除的文件，并重新生成。
+  - 一卷生成完后，可导出带章节标记的 **M4B**。
+
+### 部署（Docker）
+
+```bash
+git clone https://github.com/gregwym/bilinovel-reader.git && cd bilinovel-reader
+docker compose up -d --build     # 打开 http://<NAS-IP>:8790
+```
+
+`docker-compose.yml` 挂载两个目录：`./data`（数据库、语音片段缓存、导出文件）和 `./library`（整理好的有声书）。
+
+常用环境变量：
+
+| 变量 | 用途 |
+| --- | --- |
+| `APP_PASSWORD` | 访问密码；暴露到局域网以外时建议设置 |
+| `FISH_API_KEY` / `GEMINI_API_KEY` | 也可以在“设置”页填写 |
+| `SITE_ORIGIN` | 默认 `https://www.bilinovel.com` |
+| `SITE_COOKIE` / `FLARESOLVERR_URL` | 遇到人机验证时使用 |
+| `DEFAULT_AHEAD` | 跟随阅读时提前生成的章节数，默认 3 |
+| `STORAGE_TEMPLATE` | 文件路径模板 |
+| `PORT` | 端口，默认 8790 |
+
+在 iPhone 上用 Safari 打开书库后，选“添加到主屏幕”，即可像 App 一样全屏使用。
+
+### 不用 Docker
+
+需要 Node.js 22.13 以上和 ffmpeg：
+
+```bash
+npm ci && npm run build:app
+DATA_DIR=./data LIBRARY_DIR=./library npm run start:app
+```
+
+开发时用 `npm run dev:app`，它会启动前端开发服务器，并把 `/api` 代理到 `:8790`。
 
 ## 开发
 
