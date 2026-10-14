@@ -18,10 +18,15 @@ const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504, 520, 521, 5
 
 /** Heuristics for bot-challenge pages (Cloudflare and the site's own "load failed" page). */
 export function looksLikeChallenge(html: string): boolean {
+  // Cloudflare also injects invisible JavaScript Detections into successful
+  // content pages. Its jsd script is not an interstitial challenge. Remove
+  // only that path from the broad fallback check; real challenge markers
+  // elsewhere in the same document must still be recognised.
+  const withoutJsd = html.replace(/challenge-platform\/(?:h\/[a-z]\/)?scripts\/jsd\//gi, "");
   return (
     /<title>\s*(Just a moment|Attention Required|請稍候|请稍候)/i.test(html) ||
     html.includes("cf-chl-") ||
-    html.includes("challenge-platform") ||
+    withoutJsd.includes("challenge-platform") ||
     /Access denied \| [^<]* used Cloudflare/i.test(html)
   );
 }
