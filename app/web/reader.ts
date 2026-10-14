@@ -140,8 +140,12 @@ function serverBackend<P extends PageProvider>(provider: P): PageBackend<PageCon
 function serverStore(provider: PageProvider): SegmentStore {
   return {
     list: async () => [],
-    get: async (key): Promise<StoredSegment | undefined> => {
-      const res = await fetch(`/api/segments/${provider}/${encodeURIComponent(key)}`).catch(() => undefined);
+    get: async (key, texts): Promise<StoredSegment | undefined> => {
+      const url = `/api/segments/${provider}/${encodeURIComponent(key)}`;
+      const res = await (texts
+        ? fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ texts }) })
+        : fetch(url)
+      ).catch(() => undefined);
       if (!res?.ok) return undefined;
       return { key, texts: [], audio: await res.blob(), bounds: JSON.parse(res.headers.get("x-bounds") ?? "[]") as number[] };
     },

@@ -182,6 +182,26 @@ describe("library server", () => {
     expect(ttsRequests).toHaveLength(0);
   });
 
+  it.skipIf(!hasFfmpeg)("times stored segments again when the reader plays them", async () => {
+    const [texts] = services.tts.parts("fish", services.source.cachedChapterPages("5369", "180204").pages);
+    const key = services.tts.key("fish", services.tts.config("fish"), texts);
+    const stale = JSON.stringify(texts.map((_, i) => i / texts.length).concat(1));
+    services.db.run("update segments set bounds = ?, bounds_v = 0 where key = ?", stale, `fish/${key}`);
+    // Without the texts it can't be aligned: served as stored.
+    expect((await call(`/api/segments/fish/${encodeURIComponent(key)}`)).headers.get("x-bounds")).toBe(stale);
+
+    ttsRequests = [];
+    const res = await send("POST", `/api/segments/fish/${encodeURIComponent(key)}`, { texts });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-bounds")).not.toBe(stale);
+    expect(services.tts.stored("fish", key)?.boundsVersion).toBeGreaterThan(0);
+    expect(ttsRequests).toHaveLength(0);
+    // Someone else's texts don't change it.
+    services.db.run("update segments set bounds = ?, bounds_v = 0 where key = ?", stale, `fish/${key}`);
+    const wrong = await send("POST", `/api/segments/fish/${encodeURIComponent(key)}`, { texts: ["别的"] });
+    expect(wrong.headers.get("x-bounds")).toBe(stale);
+  });
+
   it.skipIf(!hasFfmpeg)("lists a chapter's segments, each playable once generated", async () => {
     const segs = await json<ChapterSegments>(call("/api/books/5369/chapters/180204/segments"));
     expect(segs).toMatchObject({ provider: "fish", complete: true });

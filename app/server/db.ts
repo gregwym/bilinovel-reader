@@ -69,6 +69,8 @@ const MIGRATIONS = [
   create index jobs_status on jobs (status, priority desc, id);
   create index jobs_book on jobs (book_id, target);
   `,
+  // Paragraph timing method of each segment (see BOUNDS_VERSION).
+  `alter table segments add column bounds_v integer not null default 0;`,
 ];
 
 export type Row = Record<string, SQLInputValue>;

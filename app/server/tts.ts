@@ -4,7 +4,15 @@ import { dirname, join } from "node:path";
 import type { PageContent } from "../../src/adapters/types";
 import { splitIntoChunks } from "../../src/speech/SpeechPlayer";
 import { SpeechEngineError } from "../../src/speech/SpeechEngine";
-import { hash, segmentKey, splitPage, type BackendIO, type PageBackend, type Rendered } from "../../src/speech/PageSpeechEngine";
+import {
+  hash,
+  paragraphBounds,
+  segmentKey,
+  splitPage,
+  type BackendIO,
+  type PageBackend,
+  type Rendered,
+} from "../../src/speech/PageSpeechEngine";
 import { geminiBackend, describeGeminiError, type GeminiConfig } from "../../src/speech/GeminiSpeechEngine";
 import { GEMINI_VOICES } from "../../src/speech/GeminiSpeechEngine";
 import {
@@ -28,6 +36,8 @@ export const READER_SETTINGS_KEY = "biliReader.settings";
 export const PROVIDERS: PageProvider[] = ["gemini", "fish"];
 /** Gemini reading directions by hash (cache keys only hold the hash). */
 const STYLES_KEY = "server.geminiStyles";
+/** Paragraph timing method; segments timed by an older one are aligned again when played. */
+const BOUNDS_VERSION = 1;
 const PROVIDER_LABEL: Record<PageProvider, string> = { gemini: "Gemini", fish: "Fish Audio" };
 
 export interface Configs {
@@ -41,6 +51,7 @@ export interface StoredAudio {
   mime: string;
   bounds: number[];
   bytes: number;
+  boundsVersion: number;
 }
 
 /** A segment's voice settings without the key (what the reader sends). */
@@ -211,11 +222,43 @@ export class Tts {
   private rowKey = (provider: PageProvider, key: string) => `${provider}/${key}`;
 
   stored(provider: PageProvider, key: string): StoredAudio | undefined {
-    const row = this.db.get<{ file: string; mime: string; bounds: string; bytes: number }>(
-      "select file, mime, bounds, bytes from segments where key = ?",
+    const row = this.db.get<{ file: string; mime: string; bounds: string; bytes: number; bounds_v: number }>(
+      "select file, mime, bounds, bytes, bounds_v from segments where key = ?",
       this.rowKey(provider, key),
     );
-    return row ? { file: join(this.dataDir, row.file), mime: row.mime, bounds: JSON.parse(row.bounds) as number[], bytes: row.bytes } : undefined;
+    return row
+      ? {
+          file: join(this.dataDir, row.file),
+          mime: row.mime,
+          bounds: JSON.parse(row.bounds) as number[],
+          bytes: row.bytes,
+          boundsVersion: row.bounds_v,
+        }
+      : undefined;
+  }
+
+  /**
+   * A stored segment with paragraph timing from the current method: older
+   * segments are aligned again from their audio (`texts` must be the
+   * segment's; checked against its key).
+   */
+  async aligned(provider: PageProvider, key: string, texts: string[], s: StoredAudio): Promise<StoredAudio> {
+    if (s.boundsVersion >= BOUNDS_VERSION || !key.endsWith(`:${hash(texts.join("\n"))}`)) return s;
+    if (!(await this.ffmpeg.check())) return s;
+    try {
+      const { samples, rate } = await this.ffmpeg.decode(await readFile(s.file));
+      const bounds = paragraphBounds(texts, samples, rate);
+      this.db.run(
+        "update segments set bounds = ?, bounds_v = ? where key = ?",
+        JSON.stringify(bounds),
+        BOUNDS_VERSION,
+        this.rowKey(provider, key),
+      );
+      return { ...s, bounds, boundsVersion: BOUNDS_VERSION };
+    } catch (err) {
+      console.warn("[tts] could not align a stored segment", err);
+      return s;
+    }
   }
 
   private rememberStyle(style: string): void {
@@ -253,24 +296,27 @@ export class Tts {
     await writeFile(`${file}.tmp`, data);
     await rename(`${file}.tmp`, file);
     this.db.run(
-      `insert into segments (key, file, mime, bytes, bounds, chars, created_at) values (?, ?, ?, ?, ?, ?, ?)
+      `insert into segments (key, file, mime, bytes, bounds, bounds_v, chars, created_at) values (?, ?, ?, ?, ?, ?, ?, ?)
        on conflict (key) do update set file = excluded.file, mime = excluded.mime, bytes = excluded.bytes,
-       bounds = excluded.bounds, chars = excluded.chars, created_at = excluded.created_at`,
+       bounds = excluded.bounds, bounds_v = excluded.bounds_v, chars = excluded.chars, created_at = excluded.created_at`,
       this.rowKey(provider, key),
       rel,
       mime,
       data.byteLength,
       JSON.stringify(rendered.bounds),
+      BOUNDS_VERSION,
       texts.join("").length,
       Date.now(),
     );
     this.countUsage(provider, texts.join("").length);
-    return { file, mime, bounds: rendered.bounds, bytes: data.byteLength };
+    return { file, mime, bounds: rendered.bounds, bytes: data.byteLength, boundsVersion: BOUNDS_VERSION };
   }
 
-  async read(provider: PageProvider, key: string): Promise<(StoredAudio & { data: Buffer }) | undefined> {
-    const s = this.stored(provider, key);
+  /** A stored segment's audio; with the segment's texts, its timing is brought up to date (see aligned). */
+  async read(provider: PageProvider, key: string, texts?: string[]): Promise<(StoredAudio & { data: Buffer }) | undefined> {
+    let s = this.stored(provider, key);
     if (!s) return undefined;
+    if (texts) s = await this.aligned(provider, key, texts, s);
     try {
       return { ...s, data: await readFile(s.file) };
     } catch {
@@ -313,19 +359,20 @@ export class Tts {
   /**
    * Audio for `texts` (one request), stored or generated. One request per
    * service runs at a time; `priority` orders waiting requests (the reader's
-   * go before background jobs). Throws SpeechEngineError.
+   * go before background jobs); `align` brings a stored segment's timing up
+   * to date (for playing). Throws SpeechEngineError.
    */
   segment<P extends PageProvider>(
     provider: P,
     texts: string[],
-    options: { voice?: VoiceRequest; priority?: number; onStatus?: (msg: string) => void } = {},
+    options: { voice?: VoiceRequest; priority?: number; onStatus?: (msg: string) => void; align?: boolean } = {},
   ): Promise<StoredAudio> {
     const cfg = this.config(provider, options.voice);
     if (provider === "gemini") this.rememberStyle((cfg as GeminiConfig).style);
     if (!cfg.key) return Promise.reject(new SpeechEngineError("config"));
     const key = this.key(provider, cfg, texts);
     const existing = this.stored(provider, key);
-    if (existing) return Promise.resolve(existing);
+    if (existing) return options.align ? this.aligned(provider, key, texts, existing) : Promise.resolve(existing);
     const id = this.rowKey(provider, key);
     let p = this.inflight.get(id);
     if (!p) {
