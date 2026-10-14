@@ -177,6 +177,11 @@ export function hash(s: string): string {
   return `${(h1 >>> 0).toString(36)}${(h2 >>> 0).toString(36)}${s.length.toString(36)}`;
 }
 
+/** Cache key of the audio for `texts` under a backend's `cacheKey(cfg)`. */
+export function segmentKey(prefix: string, texts: string[]): string {
+  return `${prefix}:${hash(texts.join("\n"))}`;
+}
+
 // ---------------------------------------------------------------------------
 // Persistent segment cache
 
@@ -518,7 +523,7 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
   // Planning
 
   private segmentFor(texts: string[], prefix: string): Segment {
-    const key = `${prefix}:${hash(texts.join("\n"))}`;
+    const key = segmentKey(prefix, texts);
     let seg = this.segments.get(key);
     if (!seg) this.segments.set(key, (seg = { key, texts }));
     return seg;

@@ -41,7 +41,15 @@ import {
   describeFishError,
   listFishVoices,
 } from "../speech/FishSpeechEngine";
-import type { PageContext, PageEngineOptions, PageSpeechEngine } from "../speech/PageSpeechEngine";
+import {
+  PageSpeechEngine,
+  type PageBackend,
+  type PageContext,
+  type PageEngineOptions,
+  type SegmentStore,
+} from "../speech/PageSpeechEngine";
+import type { GeminiConfig } from "../speech/GeminiSpeechEngine";
+import type { FishConfig } from "../speech/FishSpeechEngine";
 import { FallbackSpeechEngine } from "../speech/FallbackSpeechEngine";
 import { SpeechEngineError } from "../speech/SpeechEngine";
 import { VoiceManager } from "../speech/VoiceManager";
@@ -63,6 +71,7 @@ import {
   SettingsStore,
   type SavedProgress,
   type Settings,
+  type TtsEngine,
 } from "./ProgressStore";
 
 /** Prefetch the next site page when this few paragraphs remain loaded ahead of the cursor. */
@@ -99,6 +108,37 @@ interface CloudSlot {
   listVoices(key: string): Promise<AzureVoice[]>;
   sample: string;
 }
+
+/** Configuration of each page engine. */
+export interface PageConfigs {
+  gemini: GeminiConfig;
+  fish: FishConfig;
+}
+
+/**
+ * What an app hosting the reader (the NAS library) changes about it. The
+ * userscript passes none: it runs over the site's own page.
+ */
+export interface ReaderHost {
+  /** Leaves the reader (default: hide it over the site's page). */
+  exit?(): void;
+  /** Opens the site's page for the reader page `url`. */
+  openOriginal?(url: string): void;
+  /** Speech engines offered (default: all). */
+  engines?: TtsEngine[];
+  /** Services whose keys the host keeps: the reader neither asks for nor stores them. */
+  managedKeys?: CloudProvider[];
+  /** Generates and caches page-engine audio elsewhere (e.g. on a server). */
+  pageEngine?: {
+    backend<P extends PageProvider>(provider: P): PageBackend<PageConfigs[P]>;
+    store(provider: PageProvider): SegmentStore;
+  };
+  /** Voices of a service whose key the host keeps. */
+  listVoices?(provider: CloudProvider): Promise<AzureVoice[]>;
+}
+
+/** Placeholder key for services whose key the host keeps. */
+const MANAGED_KEY = "managed";
 
 const snippetOf = (p: ReaderParagraph): string | undefined => p.text?.slice(0, 24) || undefined;
 
@@ -188,6 +228,7 @@ export class Reader implements PlaybackSource {
     private readonly progress = new ProgressStore(),
     private readonly settingsStore = new SettingsStore(),
     private readonly version = "dev",
+    private readonly host: ReaderHost = {},
   ) {
     this.webEngine = new WebSpeechEngine(globalThis.speechSynthesis, (uri) => this.voices.resolve(uri));
     const azure = new AzureSpeechEngine(
@@ -204,11 +245,10 @@ export class Reader implements PlaybackSource {
       },
       { meter: this.googleUsage, onUsage: () => this.renderUsage("google") },
     );
-    const gemini = new GeminiSpeechEngine(
-      () => {
-        const key = this.cloud.gemini.key;
-        const s = this.settings;
-        return key
+    const geminiConfig = () => {
+      const key = this.cloud.gemini.key;
+      const s = this.settings;
+      return key
           ? {
               key,
               model: s.geminiModel,
@@ -217,14 +257,21 @@ export class Reader implements PlaybackSource {
               ahead: s.geminiAhead,
             }
           : undefined;
-      },
-      this.pageEngineOptions("gemini", GEMINI_MAX_CHARS, this.geminiUsage),
-    );
-    const fish = new FishSpeechEngine(() => {
+    };
+    const fishConfig = () => {
       const key = this.cloud.fish.key;
       const s = this.settings;
       return key ? { key, model: s.fishModel, voice: s.fishVoice, ahead: s.fishAhead } : undefined;
-    }, this.pageEngineOptions("fish", FISH_MAX_CHARS, this.fishUsage));
+    };
+    const geminiOptions = this.pageEngineOptions("gemini", GEMINI_MAX_CHARS, this.geminiUsage);
+    const fishOptions = this.pageEngineOptions("fish", FISH_MAX_CHARS, this.fishUsage);
+    const hosted = host.pageEngine;
+    const gemini = hosted
+      ? new PageSpeechEngine(hosted.backend("gemini"), geminiConfig, { ...geminiOptions, store: hosted.store("gemini") })
+      : new GeminiSpeechEngine(geminiConfig, geminiOptions);
+    const fish = hosted
+      ? new PageSpeechEngine(hosted.backend("fish"), fishConfig, { ...fishOptions, store: hosted.store("fish") })
+      : new FishSpeechEngine(fishConfig, fishOptions);
     this.paged = { gemini: { engine: gemini, cacheBytes: 0 }, fish: { engine: fish, cacheBytes: 0 } };
     this.cloud = {
       azure: {
@@ -374,6 +421,7 @@ export class Reader implements PlaybackSource {
       },
       DEFAULT_SETTINGS,
       version,
+      { engines: host.engines, managedKeys: host.managedKeys, exitLabel: host.exit ? "返回书架" : undefined },
     );
   }
 
@@ -392,7 +440,9 @@ export class Reader implements PlaybackSource {
     this.player.setVoice(this.settings.voiceURI);
     for (const provider of CLOUD_PROVIDERS) {
       const slot = this.cloud[provider];
-      slot.key = (await this.secrets.get(slot.secret)) ?? "";
+      slot.key = this.host.managedKeys?.includes(provider)
+        ? MANAGED_KEY
+        : ((await this.secrets.get(slot.secret)) ?? "");
       this.view.setCloudState(provider, { keySet: !!slot.key, usage: slot.usageText() });
     }
     for (const provider of ["gemini", "fish"] as const) {
@@ -452,6 +502,11 @@ export class Reader implements PlaybackSource {
 
   private exit(): void {
     this.player.stop();
+    if (this.host.exit) {
+      const leave = this.host.exit.bind(this.host);
+      void this.saveNow().finally(leave);
+      return;
+    }
     void this.saveNow();
     this.view.collapse();
     this.active = false;
@@ -491,6 +546,11 @@ export class Reader implements PlaybackSource {
   private openOriginal(): void {
     const p = this.cursorId ? this.buffer.get(this.cursorId) : undefined;
     const url = p?.pageUrl ?? this.originalUrl;
+    if (this.host.openOriginal) {
+      void this.saveNow();
+      this.host.openOriginal(url);
+      return;
+    }
     void this.saveNow();
     try {
       sessionStorage.setItem(EXITED_URL_KEY, url);
@@ -1154,6 +1214,7 @@ export class Reader implements PlaybackSource {
   }
 
   private async setCloudKey(provider: CloudProvider, key: string): Promise<void> {
+    if (this.host.managedKeys?.includes(provider)) return;
     const slot = this.cloud[provider];
     slot.key = key;
     await this.secrets.set(slot.secret, key);
@@ -1166,7 +1227,10 @@ export class Reader implements PlaybackSource {
     const slot = this.cloud[provider];
     if (!slot.key) return;
     try {
-      const voices = await slot.listVoices(slot.key);
+      const voices =
+        this.host.listVoices && this.host.managedKeys?.includes(provider)
+          ? await this.host.listVoices(provider)
+          : await slot.listVoices(slot.key);
       const where = provider === "azure" ? `（${this.settings.azureRegion}）` : "";
       this.view.setCloudState(provider, { voices, status: `已连接 ${slot.name}${where}` });
     } catch (err) {

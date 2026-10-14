@@ -1,0 +1,122 @@
+import { h } from "../../../src/utils/dom";
+import type { BookSummary } from "../../shared/api";
+import { api } from "../api";
+import { act, cover, formatTime, icon, openReader, poll, progressBar, toast, type Page } from "../ui";
+import { navigate } from "../router";
+
+/** The bookshelf: the book being read, then every book as a cover grid. */
+export function libraryPage(): Page {
+  const el = h("div");
+  const input = h("input", {
+    class: "input",
+    type: "url",
+    inputmode: "url",
+    placeholder: "粘贴哔哩轻小说书籍或章节链接",
+    enterkeyhint: "go",
+  });
+  const addBtn = h("button", { class: "icon-btn", type: "submit", "aria-label": "加入书架" }, icon("plus"));
+  const form = h("form", { class: "add-bar" }, input, addBtn);
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const url = input.value.trim();
+    if (!url) return input.focus();
+    void act(addBtn, async () => {
+      const book = await api.post<BookSummary>("/api/books", { url });
+      input.value = "";
+      toast(`已加入书架：${book.title}`);
+      navigate(`/book/${book.id}`);
+    });
+  });
+  const body = h("div");
+  el.append(h("header", { class: "topbar" }, h("h1", {}, "书架")), form, body);
+
+  let last = "";
+  const load = async () => {
+    const books = await api.get<BookSummary[]>("/api/books");
+    const sig = JSON.stringify(books);
+    if (sig === last) return;
+    last = sig;
+    body.replaceChildren(...render(books));
+  };
+  void load().catch((err: Error) => body.replaceChildren(h("div", { class: "banner error" }, err.message)));
+  return { el, dispose: poll(load, 5000) };
+}
+
+function render(books: BookSummary[]): Node[] {
+  if (!books.length) {
+    return [
+      h(
+        "div",
+        { class: "empty" },
+        h("div", { class: "big" }, "📚"),
+        h("div", {}, "书架还是空的"),
+        h("div", { class: "hint" }, "在上方粘贴书籍链接，或直接在阅读器里打开一本书"),
+      ),
+    ];
+  }
+  const nodes: Node[] = [];
+  const reading = books.find((b) => b.position);
+  if (reading) nodes.push(continueCard(reading));
+  nodes.push(
+    h(
+      "div",
+      { class: "shelf-tools" },
+      h("span", {}, `共 ${books.length} 本`),
+      h("span", {}, `${books.reduce((n, b) => n + b.audioChapters, 0)} 章有声`),
+    ),
+  );
+  nodes.push(h("div", { class: "shelf" }, ...books.map(bookTile)));
+  return nodes;
+}
+
+const readFraction = (b: BookSummary) => (b.readIndex !== undefined && b.chapters ? (b.readIndex + 1) / b.chapters : 0);
+
+function continueCard(book: BookSummary): HTMLElement {
+  const pos = book.position!;
+  const read = h(
+    "button",
+    {
+      class: "btn primary small",
+      onclick: (ev: Event) => {
+        ev.stopPropagation();
+        openReader(book.id, pos);
+      },
+    },
+    "继续阅读",
+  );
+  const card = h(
+    "div",
+    { class: "continue", role: "link", tabindex: 0 },
+    cover(book),
+    h(
+      "div",
+      { class: "info" },
+      h("div", { class: "kicker" }, "继续阅读"),
+      h("div", { class: "title" }, book.title),
+      h("div", { class: "chapter" }, pos.chapterTitle ?? `第 ${(book.readIndex ?? 0) + 1} 章`),
+      h("div", { class: "hint" }, `${formatTime(pos.updatedAt)} · 有声 ${book.audioChapters}/${book.chapters} 章`),
+      h("div", { class: "bottom" }, progressBar(readFraction(book)), read),
+    ),
+  );
+  card.addEventListener("click", () => navigate(`/book/${book.id}`));
+  return card;
+}
+
+function bookTile(book: BookSummary): HTMLElement {
+  const badge = book.audioChapters > 0 ? h("span", { class: "corner" }, `🎧 ${book.audioChapters}`) : null;
+  const tile = h(
+    "a",
+    { class: "book", href: `/book/${book.id}`, "data-link": true },
+    cover(book, badge),
+    h("div", { class: "title" }, book.title),
+    h(
+      "div",
+      { class: "meta" },
+      book.readIndex !== undefined ? `读到 ${Math.round(readFraction(book) * 100)}%` : book.author || "未读",
+    ),
+  );
+  if (book.activeJobs) {
+    tile.querySelector(".cover")!.append(h("span", { class: "working", title: "正在生成" }, h("span", { class: "spin" })));
+  }
+  return tile;
+}

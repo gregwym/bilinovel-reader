@@ -1,0 +1,10 @@
+node_modules
+dist
+dist-app
+_site
+site
+data
+library
+coverage
+.git
+*.log
