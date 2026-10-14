@@ -10,7 +10,7 @@ import { SpeechEngineError } from "../../src/speech/SpeechEngine";
 import { GEMINI_VOICES } from "../../src/speech/GeminiSpeechEngine";
 import { listFishVoices } from "../../src/speech/FishSpeechEngine";
 import { mergeProgress, type SavedProgress } from "../../src/reader/ProgressStore";
-import type { AppInfo, ChapterSegments, PageProvider, ServerSettingsUpdate } from "../shared/api";
+import type { AppInfo, BookVoices, ChapterSegments, PageProvider, ServerSettingsUpdate } from "../shared/api";
 import type { Db } from "./db";
 import type { Config, Settings } from "./config";
 import type { SiteClient } from "./site/client";
@@ -22,6 +22,7 @@ import { bookCatalog, safeName } from "./library";
 import { PROGRESS_KEY, type Books } from "./books";
 import { READER_PRIORITY, type Jobs } from "./jobs";
 import type { Planner } from "./planner";
+import { bookVoices } from "./voices";
 
 export interface AppDeps {
   config: Config;
@@ -211,7 +212,35 @@ export function createApp(d: AppDeps): Hono {
 
   app.get("/api/books/:id", (c) => {
     const book = d.books.get(c.req.param("id"));
-    return book ? c.json(d.books.detail(book)) : c.json({ error: "书籍不存在" }, 404);
+    if (!book) return c.json({ error: "书籍不存在" }, 404);
+    const detail = d.books.detail(book);
+    return c.json({ ...detail, profileLabel: detail.profile ? d.tts.voiceLabel(detail.profile) : undefined });
+  });
+
+  app.get("/api/books/:id/voices", async (c) => {
+    const book = d.books.get(c.req.param("id"));
+    if (!book) return c.json({ error: "书籍不存在" }, 404);
+    let result = bookVoices(book, d.tts, d.source, d.library);
+    const fish = result.voices.filter((v) => v.provider === "fish" && v.voice).map((v) => v.voice);
+    if (fish.length) {
+      // Names are looked up once (then cached); don't wait long for them.
+      await Promise.race([d.tts.loadFishNames(fish), new Promise((r) => setTimeout(r, 5000))]);
+      result = bookVoices(book, d.tts, d.source, d.library);
+    }
+    return c.json({ voices: result.voices, chapters: result.chapters } satisfies BookVoices);
+  });
+
+  /** Deletes a book's audio in one voice: its segments and chapter files. */
+  app.delete("/api/books/:id/voices/:voice", async (c) => {
+    const book = d.books.get(c.req.param("id"));
+    if (!book) return c.json({ error: "书籍不存在" }, 404);
+    const voice = c.req.param("voice");
+    const found = bookVoices(book, d.tts, d.source, d.library).keys.get(voice);
+    const bytes = found ? await d.tts.remove(found.provider, found.keys) : 0;
+    for (const row of d.library.chapterAudio(book.id)) {
+      if (row.profile === voice) await d.library.deleteChapter(book.id, row.chapter_id);
+    }
+    return c.json({ ok: true, segments: found?.keys.length ?? 0, bytes });
   });
 
   app.patch("/api/books/:id", async (c) => {
@@ -299,17 +328,33 @@ export function createApp(d: AppDeps): Hono {
     return sendFile(c, file, "audio/mpeg", { "Cache-Control": "private, max-age=3600" });
   });
 
+  /** Segments of a chapter in the current voice, or another voice (`voice`, a profile id). */
   app.get("/api/books/:id/chapters/:chapter/segments", (c) => {
     const profile = d.tts.profile();
-    if (!profile) return c.json({ error: describeError("gemini", "config"), code: "config" }, 400);
+    const current = profile ? d.tts.profileId(profile) : "";
+    const voice = c.req.query("voice") || current;
+    const shown = d.tts.parseProfileId(voice);
+    if (!shown) return c.json({ error: describeError("gemini", "config"), code: "config" }, 400);
     const { pages, complete } = d.source.cachedChapterPages(c.req.param("id"), c.req.param("chapter"));
-    const cfg = d.tts.config(profile.provider);
-    const segments = d.tts.parts(profile.provider, pages).map((texts) => {
-      const key = d.tts.key(profile.provider, cfg, texts);
+    const voices: ChapterSegments["voices"] = [];
+    for (const provider of PROVIDERS) {
+      const ids = d.tts.storedVoices(provider);
+      if (current.startsWith(`${provider}|`) && !ids.includes(current)) ids.push(current);
+      if (!ids.length) continue;
+      const parts = d.tts.parts(provider, pages);
+      for (const id of ids) {
+        const ready = parts.filter((texts) => d.tts.stored(provider, d.tts.keyIn(id, texts))).length;
+        const p = d.tts.parseProfileId(id);
+        if (p && (ready || id === current || id === voice)) voices.push({ id, label: d.tts.voiceLabel(p), current: id === current, ready });
+      }
+    }
+    voices.sort((a, b) => Number(b.current) - Number(a.current) || b.ready - a.ready);
+    const segments = d.tts.parts(shown.provider, pages).map((texts) => {
+      const key = d.tts.keyIn(voice, texts);
       const text = texts.join("");
-      return { key, text: text.slice(0, 80), chars: text.length, ready: !!d.tts.stored(profile.provider, key) };
+      return { key, text: text.slice(0, 80), chars: text.length, ready: !!d.tts.stored(shown.provider, key) };
     });
-    return c.json({ provider: profile.provider, complete, segments } satisfies ChapterSegments);
+    return c.json({ provider: shown.provider, voice, voices, complete, segments } satisfies ChapterSegments);
   });
 
   app.post("/api/books/:id/volumes/:vi/export", (c) => {

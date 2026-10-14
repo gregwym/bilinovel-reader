@@ -1,5 +1,6 @@
 import { h } from "../../../src/utils/dom";
-import type { BookDetail, ChapterInfo, VolumeInfo } from "../../shared/api";
+import type { BookDetail, BookVoice, BookVoices, ChapterInfo, VolumeInfo } from "../../shared/api";
+import type { Settings } from "../../../src/reader/ProgressStore";
 import { api } from "../api";
 import { segmentSheet } from "../segments";
 import { navigate } from "../router";
@@ -19,6 +20,7 @@ import {
   type Page,
 } from "../ui";
 
+const READER_SETTINGS_KEY = "biliReader.settings";
 const PROVIDER_LABEL: Record<string, string> = { gemini: "Gemini", fish: "Fish Audio" };
 
 /** A book: reading, its chapters' audio, generation and export. */
@@ -32,21 +34,37 @@ export function bookPage({ id }: Record<string, string>): Page {
   let player: HTMLElement | undefined;
   let sheet: { close: () => void } | undefined;
   let last = "";
+  let shown: BookDetail | undefined;
+  /** Audio per voice (slower to compute: fetched on changes, at most every 15 s). */
+  let voices: BookVoices | undefined;
+  let voicesAt = 0;
+
+  const loadVoices = async () => {
+    voicesAt = Date.now();
+    voices = await api.get<BookVoices>(`/api/books/${id}/voices`);
+    if (shown) draw(shown);
+  };
+
+  const draw = (book: BookDetail) => {
+    const y = window.scrollY;
+    body.replaceChildren(...render(book));
+    window.scrollTo(0, y);
+  };
 
   const load = async (force = false) => {
     const book = await api.get<BookDetail>(`/api/books/${id}`);
     const sig = JSON.stringify(book);
     if (sig === last && !force) return;
     last = sig;
+    shown = book;
+    if (force || Date.now() - voicesAt > 15_000) void loadVoices().catch(() => undefined);
     if (!opened) {
       opened = true;
       const cur = currentVolume(book);
       open.add(cur >= 0 ? cur : 0);
     }
     document.title = `${book.title} · Bili Reader`;
-    const y = window.scrollY;
-    body.replaceChildren(...render(book));
-    window.scrollTo(0, y);
+    draw(book);
   };
 
   const refresh = () => void load(true).catch((err: Error) => toast(err.message));
@@ -141,8 +159,9 @@ export function bookPage({ id }: Record<string, string>): Page {
 
   function audioCard(book: BookDetail): HTMLElement {
     const duration = book.volumes.flatMap((v) => v.chapters).reduce((s, c) => s + (c.audio === "done" ? (c.duration ?? 0) : 0), 0);
-    const profile = book.profile
-      ? h("span", { class: "badge" }, `${PROVIDER_LABEL[book.profile.provider]} · ${book.profile.voice || "默认声音"}`)
+    const voiceName = book.profile && (book.profileLabel ?? `${PROVIDER_LABEL[book.profile.provider]} · ${book.profile.voice || "默认声音"}`);
+    const profile = voiceName
+      ? h("a", { class: "badge voice", href: "/settings", "data-link": true, title: voiceName }, voiceName)
       : h("a", { class: "badge muted", href: "/settings", "data-link": true }, "未配置语音");
     const allBtn = h("button", { class: "btn small" }, "生成全书");
     allBtn.addEventListener("click", () => {
@@ -168,17 +187,18 @@ export function bookPage({ id }: Record<string, string>): Page {
       h(
         "div",
         { class: "row" },
-        h("div", { class: "grow" }, h("div", { class: "label" }, "声音"), h("div", { class: "hint" }, "在设置中更改；换声音后旧音频会标记为过期")),
+        h("div", { class: "grow" }, h("div", { class: "label" }, "声音"), h("div", { class: "hint" }, "在设置中更改；换声音后旧音频保留，见下方")),
         profile,
       ),
+      voiceRows(),
       h(
         "div",
         { class: "row" },
         h(
           "div",
           { class: "grow" },
-          h("div", { class: "label" }, "跟随阅读进度"),
-          h("div", { class: "hint" }, "后台自动生成正在读的章节和之后几章（生成较慢，默认关闭）"),
+          h("div", { class: "label" }, "自动生成"),
+          h("div", { class: "hint" }, "跟随阅读进度，在后台生成正在读的章节和之后几章。生成较慢，新加的书默认关闭"),
         ),
         switchInput(book.follow, (follow) => void api.patch(`/api/books/${id}`, { follow }).then(refresh, (e: Error) => toast(e.message))),
       ),
@@ -192,6 +212,63 @@ export function bookPage({ id }: Record<string, string>): Page {
         : null,
       h("div", { class: "actions" }, nextBtn, allBtn),
     );
+  }
+
+  /** Voices this book has audio in: listen (per chapter), switch to, or delete. */
+  function voiceRows(): HTMLElement | null {
+    const list = voices?.voices.filter((v) => v.segments || v.chapterFiles) ?? [];
+    if (!list.length) return null;
+    return h(
+      "div",
+      { class: "voices" },
+      h("div", { class: "hint" }, "已有音频的声音（在章节的", icon("list"), "里按声音试听）"),
+      ...list.map((v) => {
+        const facts = [
+          v.model,
+          v.segments ? `${v.segments} 段` : "",
+          v.chapters ? `${v.chapters} 章完整` : "",
+          v.partial ? `${v.partial} 章部分` : "",
+          v.chapterFiles ? `${v.chapterFiles} 章已合成` : "",
+          v.bytes ? formatBytes(v.bytes) : "",
+        ].filter(Boolean);
+        const del = h("button", { class: "btn small danger", type: "button" }, "删除");
+        del.addEventListener("click", () => {
+          const warn = v.current ? "这是当前声音，删除后需要重新生成（会再次请求）。" : "";
+          if (!confirm(`删除本书「${v.label}」的全部音频（${facts.slice(1).join("，")}）？${warn}`)) return;
+          void act(del, async () => {
+            const r = await api.del<{ bytes: number }>(`/api/books/${id}/voices/${encodeURIComponent(v.id)}`);
+            toast(`已删除 ${formatBytes(r.bytes)}`);
+            refresh();
+          });
+        });
+        const use = !v.current && v.switchable ? h("button", { class: "btn small", type: "button" }, "设为当前") : null;
+        use?.addEventListener("click", () => void act(use, () => switchTo(v)));
+        return h(
+          "div",
+          { class: v.current ? "voice-item current" : "voice-item" },
+          h(
+            "div",
+            { class: "grow" },
+            h("div", { class: "name" }, v.label, v.current ? h("span", { class: "badge ok" }, "当前") : null),
+            h("div", { class: "hint" }, facts.join(" · ")),
+          ),
+          use,
+          del,
+        );
+      }),
+    );
+  }
+
+  async function switchTo(v: BookVoice) {
+    const kv = await api.get<{ value: string | null }>(`/api/kv/${READER_SETTINGS_KEY}`);
+    const s = (kv.value ? JSON.parse(kv.value) : {}) as Partial<Settings>;
+    const next: Partial<Settings> =
+      v.provider === "fish"
+        ? { ...s, ttsEngine: "fish", fishModel: v.model, fishVoice: v.voice }
+        : { ...s, ttsEngine: "gemini", geminiModel: v.model, geminiVoice: v.voice, geminiStyle: v.style ?? "" };
+    await api.put(`/api/kv/${READER_SETTINGS_KEY}`, { value: JSON.stringify(next) });
+    toast(`已切换到「${v.label}」；阅读器和后台生成都会使用这个声音`);
+    refresh();
   }
 
   function volume(book: BookDetail, v: VolumeInfo, vi: number): HTMLElement {
@@ -258,7 +335,7 @@ export function bookPage({ id }: Record<string, string>): Page {
       sub.length ? h("div", { class: "sub" }, sub.join(" · ")) : null,
     );
     const segBtn =
-      c.audio !== "none" && !c.silent
+      (c.audio !== "none" || voices?.chapters.includes(c.chapterId)) && !c.silent
         ? h("button", { class: "state", type: "button", title: "按段试听（生成一段即可播放）", "aria-label": "语音片段" }, icon("list"))
         : null;
     segBtn?.addEventListener("click", () => {

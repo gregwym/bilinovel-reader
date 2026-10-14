@@ -8,7 +8,7 @@ import { loadConfig } from "../../app/server/config";
 import { createServices } from "../../app/server/services";
 import { createApp } from "../../app/server/http";
 import { Ffmpeg } from "../../app/server/audio/ffmpeg";
-import type { BookDetail, BookSummary, ChapterSegments, JobsOverview } from "../../app/shared/api";
+import type { BookDetail, BookSummary, BookVoices, ChapterSegments, JobsOverview } from "../../app/shared/api";
 import type { HttpRequest, HttpResponse } from "../../src/utils/http";
 import { fixture } from "../helpers";
 
@@ -199,6 +199,48 @@ describe("library server", () => {
     expect((await call(url)).status).toBe(200);
     expect((await call(url)).headers.get("content-type")).toBe("audio/mpeg");
     expect(ttsRequests).toHaveLength(1);
+  });
+
+  it.skipIf(!hasFfmpeg)("lists a book's audio per voice, to listen to and delete", async () => {
+    const before = await json<BookVoices>(call("/api/books/5369/voices"));
+    expect(before.chapters).toEqual(["180204"]);
+    expect(before.voices).toHaveLength(1);
+    expect(before.voices[0]).toMatchObject({ provider: "fish", current: true, segments: 3, chapters: 1, partial: 0, chapterFiles: 1 });
+    expect(before.voices[0].label).toBe("Fish Audio · 模型默认声音");
+
+    // One segment in another voice (as the reader would make while listening).
+    const other = "0123456789abcdef0123456789abcdef";
+    const [texts] = services.tts.parts("fish", services.source.cachedChapterPages("5369", "180204").pages);
+    await send("POST", "/api/segments/fish", { texts, voice: { model: "s2.1-pro-free", voice: other } });
+    const after = await json<BookVoices>(call("/api/books/5369/voices"));
+    const old = after.voices.find((v) => !v.current)!;
+    expect(old).toMatchObject({ voice: other, model: "s2.1-pro-free", segments: 1, chapters: 0, partial: 1, switchable: true });
+
+    const segs = await json<ChapterSegments>(call(`/api/books/5369/chapters/180204/segments?voice=${encodeURIComponent(old.id)}`));
+    expect(segs.voice).toBe(old.id);
+    expect(segs.segments.map((s) => s.ready)).toEqual([true, false, false]);
+    expect(segs.voices.map((v) => [v.current, v.ready])).toEqual([
+      [true, 3],
+      [false, 1],
+    ]);
+
+    const del = await json<{ segments: number }>(send("DELETE", `/api/books/5369/voices/${encodeURIComponent(old.id)}`));
+    expect(del.segments).toBe(1);
+    expect((await json<BookVoices>(call("/api/books/5369/voices"))).voices).toHaveLength(1);
+    // The current voice's audio is untouched.
+    expect((await json<ChapterSegments>(call("/api/books/5369/chapters/180204/segments"))).segments.every((s) => s.ready)).toBe(true);
+  });
+
+  it("reads a voice back from its profile id", () => {
+    const tts = services.tts;
+    expect(tts.parseProfileId("fish|s1|abc")).toMatchObject({ provider: "fish", model: "s1", voice: "abc" });
+    const gemini = { provider: "gemini" as const, model: "gemini-2.5-flash-preview-tts", voice: "Kore", style: "温柔地读" };
+    const id = tts.profileId(gemini);
+    // Styles are only in the id as a hash: unknown until one is used.
+    expect(tts.parseProfileId(id)?.style).toBeUndefined();
+    void tts.segment("gemini", ["x"], { voice: gemini }).catch(() => undefined);
+    expect(tts.parseProfileId(id)).toMatchObject(gemini);
+    expect(tts.parseProfileId("nope|a")).toBeUndefined();
   });
 
   it.skipIf(!hasFfmpeg)("moves files when the storage template changes", async () => {

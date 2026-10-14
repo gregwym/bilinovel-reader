@@ -88,9 +88,13 @@ export interface ChapterInfo {
   silent?: boolean;
 }
 
-/** A chapter's speech segments with the current voice (each is one request). */
+/** A chapter's speech segments in one voice (each is one request). */
 export interface ChapterSegments {
   provider: PageProvider;
+  /** Profile id of the voice shown. */
+  voice: string;
+  /** Voices with segments of this chapter, and the current one. */
+  voices: { id: string; label: string; current: boolean; ready: number }[];
   /** False while pages are still being fetched: more segments will follow. */
   complete: boolean;
   segments: { key: string; text: string; chars: number; ready: boolean }[];
@@ -110,6 +114,32 @@ export interface BookDetail extends BookSummary {
   catalogAt?: number;
   volumes: VolumeInfo[];
   profile?: VoiceProfile;
+  /** Readable name of the profile's voice. */
+  profileLabel?: string;
+}
+
+/** Audio of a book in one voice (segments and assembled chapters). */
+export interface BookVoice extends VoiceProfile {
+  /** Profile id: chapters' audio and segments are kept per id. */
+  id: string;
+  label: string;
+  current: boolean;
+  /** False when its settings are no longer known (a Gemini style changed since). */
+  switchable: boolean;
+  segments: number;
+  bytes: number;
+  /** Chapters with every segment generated. */
+  chapters: number;
+  /** Chapters with some segments generated. */
+  partial: number;
+  /** Assembled chapter files in this voice. */
+  chapterFiles: number;
+}
+
+export interface BookVoices {
+  voices: BookVoice[];
+  /** Chapters with segments in any voice. */
+  chapters: string[];
 }
 
 export interface ServerSettings {

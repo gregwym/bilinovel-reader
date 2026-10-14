@@ -4,11 +4,19 @@ import { dirname, join } from "node:path";
 import type { PageContent } from "../../src/adapters/types";
 import { splitIntoChunks } from "../../src/speech/SpeechPlayer";
 import { SpeechEngineError } from "../../src/speech/SpeechEngine";
-import { segmentKey, splitPage, type BackendIO, type PageBackend, type Rendered } from "../../src/speech/PageSpeechEngine";
+import { hash, segmentKey, splitPage, type BackendIO, type PageBackend, type Rendered } from "../../src/speech/PageSpeechEngine";
 import { geminiBackend, describeGeminiError, type GeminiConfig } from "../../src/speech/GeminiSpeechEngine";
-import { describeFishError, fishBackend, type FishConfig } from "../../src/speech/FishSpeechEngine";
+import { GEMINI_VOICES } from "../../src/speech/GeminiSpeechEngine";
+import {
+  FISH_API_BASE,
+  FISH_VOICE_ID,
+  describeFishError,
+  fishBackend,
+  listFishVoices,
+  type FishConfig,
+} from "../../src/speech/FishSpeechEngine";
 import { DEFAULT_SETTINGS, sanitizeSettings, type Settings as ReaderSettings } from "../../src/reader/ProgressStore";
-import { httpRequest, type HttpRequest, type HttpResponse } from "../../src/utils/http";
+import { bodyText, httpRequest, type HttpRequest, type HttpResponse } from "../../src/utils/http";
 import { sleep } from "../../src/utils/async";
 import type { PageProvider, VoiceProfile } from "../shared/api";
 import type { Db } from "./db";
@@ -18,6 +26,9 @@ import type { Ffmpeg } from "./audio/ffmpeg";
 /** Where the reader keeps its settings (synced to the server's key-value store). */
 export const READER_SETTINGS_KEY = "biliReader.settings";
 export const PROVIDERS: PageProvider[] = ["gemini", "fish"];
+/** Gemini reading directions by hash (cache keys only hold the hash). */
+const STYLES_KEY = "server.geminiStyles";
+const PROVIDER_LABEL: Record<PageProvider, string> = { gemini: "Gemini", fish: "Fish Audio" };
 
 export interface Configs {
   gemini: GeminiConfig;
@@ -55,6 +66,10 @@ export class Tts {
     fish: { queue: [], busy: false, seq: 0 },
   };
   private readonly inflight = new Map<string, Promise<StoredAudio>>();
+  /** Fish Audio voice names by id ("" while unknown), and when they were last looked up. */
+  private readonly fishNames = new Map<string, string>();
+  private fishNamesAt = 0;
+  private fishNamesLoading?: Promise<void>;
 
   constructor(
     private readonly db: Db,
@@ -91,6 +106,74 @@ export class Tts {
   /** Identifies audio made with a profile; chapters with another id are out of date. */
   profileId(p: VoiceProfile): string {
     return `${p.provider}|${(this.backends[p.provider] as PageBackend<Configs[PageProvider]>).cacheKey(this.config(p.provider, p))}`;
+  }
+
+  /** The voice of a profile id (see profileId); the style is undefined when no longer known. */
+  parseProfileId(id: string): (VoiceProfile & { id: string }) | undefined {
+    const [provider, model, voice, styleHash, ...rest] = id.split("|");
+    if (rest.length || !model) return undefined;
+    if (provider === "fish" && styleHash === undefined) return { id, provider, model, voice: voice ?? "" };
+    if (provider !== "gemini" || !voice || styleHash === undefined) return undefined;
+    const known = { ...this.db.getJson<Record<string, string>>(STYLES_KEY), [hash("")]: "" };
+    const current = this.readerSettings().geminiStyle.trim();
+    known[hash(current)] = current;
+    return { id, provider, model, voice, style: known[styleHash] };
+  }
+
+  /** Voices with stored segments of a service, as profile ids. */
+  storedVoices(provider: PageProvider): string[] {
+    return this.db
+      .all<{ prefix: string }>(
+        "select distinct substr(key, 1, instr(key, ':') - 1) as prefix from segments where key like ?",
+        `${provider}/%`,
+      )
+      .map((r) => `${provider}|${r.prefix.slice(provider.length + 1)}`);
+  }
+
+  /** Segment key of `texts` in a voice given by its profile id. */
+  keyIn(profileId: string, texts: string[]): string {
+    return segmentKey(profileId.slice(profileId.indexOf("|") + 1), texts);
+  }
+
+  /** A readable name for a voice: Fish Audio names are looked up (and cached) in the background. */
+  voiceLabel(p: VoiceProfile): string {
+    let name: string;
+    if (p.provider === "gemini") name = GEMINI_VOICES.find((v) => v.shortName === p.voice)?.label ?? p.voice;
+    else if (!p.voice) name = "模型默认声音";
+    else {
+      name = this.fishNames.get(p.voice) || `${p.voice.slice(0, 8)}…`;
+      if (!this.fishNames.has(p.voice) || Date.now() - this.fishNamesAt > 3600_000) void this.loadFishNames([p.voice]);
+    }
+    return `${PROVIDER_LABEL[p.provider]} · ${name}`;
+  }
+
+  /** Looks up Fish Audio voice names (the account's and popular ones, then `ids` one by one). */
+  loadFishNames(ids: string[]): Promise<void> {
+    const key = this.settings.key("fish");
+    if (!key) return Promise.resolve();
+    const missing = () => ids.filter((id) => FISH_VOICE_ID.test(id) && !this.fishNames.get(id));
+    this.fishNamesLoading ??= (async () => {
+      this.fishNamesAt = Date.now();
+      for (const v of await listFishVoices(key, this.request).catch(() => [])) {
+        if (v.shortName) this.fishNames.set(v.shortName, v.label.replace(/^我的：/, ""));
+      }
+      for (const id of missing()) {
+        this.fishNames.set(id, "");
+        try {
+          const res = await this.request({
+            method: "GET",
+            url: `${FISH_API_BASE}/model/${id}`,
+            headers: { Authorization: `Bearer ${key}` },
+            timeoutMs: 20_000,
+          });
+          const body = res.status === 200 ? (JSON.parse(bodyText(res)) as { title?: unknown }) : {};
+          if (typeof body.title === "string" && body.title) this.fishNames.set(id, body.title);
+        } catch {
+          // Shown by id until the next lookup.
+        }
+      }
+    })().finally(() => (this.fishNamesLoading = undefined));
+    return this.fishNamesLoading;
   }
 
   config<P extends PageProvider>(provider: P, voice: VoiceRequest = {}): Configs[P] {
@@ -133,6 +216,25 @@ export class Tts {
       this.rowKey(provider, key),
     );
     return row ? { file: join(this.dataDir, row.file), mime: row.mime, bounds: JSON.parse(row.bounds) as number[], bytes: row.bytes } : undefined;
+  }
+
+  private rememberStyle(style: string): void {
+    const known = this.db.getJson<Record<string, string>>(STYLES_KEY) ?? {};
+    const h = hash(style);
+    if (known[h] !== style) this.db.setJson(STYLES_KEY, { ...known, [h]: style });
+  }
+
+  /** Deletes stored segments (files and rows). */
+  async remove(provider: PageProvider, keys: string[]): Promise<number> {
+    let bytes = 0;
+    for (const key of keys) {
+      const s = this.stored(provider, key);
+      if (!s) continue;
+      await rm(s.file, { force: true });
+      this.db.run("delete from segments where key = ?", this.rowKey(provider, key));
+      bytes += s.bytes;
+    }
+    return bytes;
   }
 
   private async save(provider: PageProvider, key: string, texts: string[], rendered: Rendered): Promise<StoredAudio> {
@@ -219,6 +321,7 @@ export class Tts {
     options: { voice?: VoiceRequest; priority?: number; onStatus?: (msg: string) => void } = {},
   ): Promise<StoredAudio> {
     const cfg = this.config(provider, options.voice);
+    if (provider === "gemini") this.rememberStyle((cfg as GeminiConfig).style);
     if (!cfg.key) return Promise.reject(new SpeechEngineError("config"));
     const key = this.key(provider, cfg, texts);
     const existing = this.stored(provider, key);

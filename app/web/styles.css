@@ -1235,3 +1235,104 @@ textarea {
   flex: 1;
   min-width: 0;
 }
+
+/* ------------------------------------------------------------------ voices */
+
+/* A long voice name shrinks (with an ellipsis) instead of squeezing the label. */
+.row > .badge.voice {
+  display: block;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-decoration: none;
+}
+
+.voices {
+  padding: 8px 0 6px;
+  border-top: 1px solid var(--border);
+}
+
+.voices + .row {
+  border-top: 1px solid var(--border);
+}
+
+.voices > .hint svg {
+  width: 13px;
+  height: 13px;
+  vertical-align: -2px;
+}
+
+.voice-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.voice-item .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.voice-item .name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voice-item .hint {
+  overflow-wrap: anywhere;
+}
+
+.chips {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.chips:empty {
+  display: none;
+}
+
+.chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 15px;
+  background: none;
+  color: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.chip.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.chip .tag {
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+.chip .count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--border);
+  font-size: 11px;
+  text-align: center;
+}
