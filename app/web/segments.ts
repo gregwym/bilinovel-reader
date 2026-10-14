@@ -135,6 +135,22 @@ export function segmentSheet(book: BookDetail, chapter: ChapterInfo): { close: (
             { class: "state" },
             playing && waiting ? h("span", { class: "spin dark" }) : s.ready ? icon(playing ? "wave" : "play") : h("span", { class: "hint" }, "未生成"),
           ),
+          s.ready && !old()
+            ? h(
+                "button",
+                {
+                  type: "button",
+                  class: "icon-btn redo",
+                  title: "重新生成",
+                  "aria-label": `重新生成第 ${i + 1} 段`,
+                  onclick: (ev: Event) => {
+                    ev.stopPropagation();
+                    void regenerate(i);
+                  },
+                },
+                icon("stale"),
+              )
+            : null,
         );
         li.addEventListener("click", () => play(i));
         return li;
@@ -142,6 +158,22 @@ export function segmentSheet(book: BookDetail, chapter: ChapterInfo): { close: (
     );
     if (waiting && current >= total) list.append(h("li", { class: "segment" }, h("span", { class: "hint" }, "等待下一段生成…")));
   }
+
+  /** Drops a segment (e.g. garbled by the service) and has it generated again. */
+  const regenerate = async (i: number) => {
+    if (!confirm(`重新生成第 ${i + 1} 段？当前的音频会被删除，并重新请求一次语音服务。`)) return;
+    if (i === current) {
+      audio.pause();
+      audio.removeAttribute("src");
+      waiting = true;
+    }
+    try {
+      await api.post(`/api/books/${book.id}/chapters/${chapter.chapterId}/segments/${i}/regenerate`);
+      await load();
+    } catch (err) {
+      status.textContent = (err as Error).message;
+    }
+  };
 
   const load = async () => {
     const query = voice ? `?voice=${encodeURIComponent(voice)}` : "";

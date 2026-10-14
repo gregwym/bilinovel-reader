@@ -7,6 +7,7 @@ import {
   PageSpeechEngine,
   defaultSegmentStore,
   paragraphBounds,
+  speakableText,
   type BackendIO,
   type PageBackend,
   type PageEngineOptions,
@@ -181,7 +182,7 @@ export function fishBackend(decode: AudioDecoder = webAudioDecoder): PageBackend
     maxChars: FISH_MAX_CHARS,
     cacheKey: (cfg) => `${cfg.model}|${cfg.voice}`,
     generate: async (cfg: FishConfig, texts: string[], io: BackendIO): Promise<Rendered> => {
-      const res = await requestFish(cfg, texts.join("\n\n"), io);
+      const res = await requestFish(cfg, speakableText(texts), io);
       if (!res.body.byteLength) throw new SpeechEngineError("empty");
       const type = res.headers["content-type"]?.split(";")[0] || "audio/mpeg";
       const decoded = await decode(res.body).catch(() => undefined);

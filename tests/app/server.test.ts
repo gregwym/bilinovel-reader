@@ -322,6 +322,20 @@ describe("library server", () => {
     expect(ttsRequests).toHaveLength(3);
   });
 
+  it.skipIf(!hasFfmpeg)("generates one segment again, and its chapter file with it", async () => {
+    await waitFor(() => !services.jobs.overview().counts.running);
+    expect(services.library.chapterAudio("5369").some((r) => r.chapter_id === "180204")).toBe(true);
+    ttsRequests = [];
+    const res = await send("POST", "/api/books/5369/chapters/180204/segments/1/regenerate");
+    expect(res.status).toBe(200);
+    await waitFor(async () => (await json<JobsOverview>(call("/api/jobs"))).jobs.find((j) => j.target === "180204" && j.status === "done" && j.reason === "manual"));
+    await waitFor(() => services.library.chapterAudio("5369").some((r) => r.chapter_id === "180204"));
+    expect(ttsRequests).toHaveLength(1);
+    const segs = await json<ChapterSegments>(call("/api/books/5369/chapters/180204/segments"));
+    expect(segs.segments.every((s) => s.ready)).toBe(true);
+    expect((await send("POST", "/api/books/5369/chapters/180204/segments/9/regenerate")).status).toBe(404);
+  });
+
   it("keeps the reader's settings and merges progress", async () => {
     await send("PUT", "/api/kv/biliReader.settings", { value: JSON.stringify({ fontSize: 20 }) });
     expect(await json(call("/api/kv/biliReader.settings"))).toEqual({ value: JSON.stringify({ fontSize: 20 }) });

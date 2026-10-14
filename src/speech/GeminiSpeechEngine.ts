@@ -8,6 +8,7 @@ import {
   defaultSegmentStore,
   hash,
   paragraphBounds,
+  speakableText,
   pcmToWav,
   type BackendIO,
   type PageBackend,
@@ -205,7 +206,7 @@ export const geminiBackend: PageBackend<GeminiConfig> = {
 };
 
 async function generateGemini(cfg: GeminiConfig, texts: string[], io: BackendIO): Promise<Rendered> {
-  const text = texts.join("\n\n");
+  const text = speakableText(texts);
   const body = JSON.stringify({
     contents: [{ parts: [{ text: cfg.style ? `${cfg.style}\n\n${text}` : text }] }],
     generationConfig: {
