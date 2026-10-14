@@ -218,3 +218,25 @@ describe("library server", () => {
     expect((await call("/api/img?url=http://localhost:8080/x.jpg")).status).toBe(403);
   });
 });
+
+describe("site errors", () => {
+  it("names the network failure hidden in fetch's cause", async () => {
+    const { networkError } = await import("../../app/server/site/client");
+    const err = new TypeError("fetch failed", { cause: Object.assign(new Error("getaddrinfo ENOTFOUND www.bilinovel.com"), { code: "ENOTFOUND" }) });
+    expect(networkError(err)).toBe("域名解析失败（检查 NAS/容器的 DNS） [ENOTFOUND]: getaddrinfo ENOTFOUND www.bilinovel.com");
+  });
+
+  it("reports why adding a book failed, with the site's status", async () => {
+    const res = await send("POST", "/api/books", { url: `${ORIGIN}/novel/9999.html` });
+    expect(res.status).toBe(502);
+    const body = await json<{ error: string; code: string }>(res);
+    expect(body.code).toBe("fetch");
+    expect(body.error).toBe(`无法访问站点（HTTP 404）：${ORIGIN}/novel/9999/catalog`);
+  });
+
+  it("tests the connection to the site", async () => {
+    const r = await json<{ ok: boolean; status?: number }>(send("POST", "/api/site/test"));
+    // The mocked site has no home page.
+    expect(r).toMatchObject({ ok: false, status: 404 });
+  });
+});

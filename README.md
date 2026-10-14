@@ -148,6 +148,13 @@ docker compose up -d --build     # 打开 http://<NAS-IP>:8790
 
 在 iPhone 上用 Safari 打开书库后，选“添加到主屏幕”，即可像 App 一样全屏使用。
 
+### 无法添加书籍 / 访问网站
+
+- 书架上的错误提示会写明原因（HTTP 状态码、DNS 解析失败、连接被重置、人机验证等）。「设置 → 网站访问 → 测试连接」可单独检查服务器能否访问网站。`docker logs bili-reader` 里也有同样的记录。
+- **人机验证 / HTTP 403**：在浏览器中打开网站并通过验证，把 `cf_clearance` Cookie 和该浏览器的 User-Agent 填进设置；或部署 [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) 并填写地址。
+- **DNS 解析失败 / 连接超时**：检查 NAS 或容器的网络与 DNS；也可以在设置里把网站地址换成 `https://www.bilinovel.net`。
+- **只显示“HTTP 502：反向代理未收到书库服务的响应”**：这个错误来自 NAS 的反向代理，不是书库本身。检查容器是否在运行，或调高反向代理的超时时间。
+
 ### 不用 Docker
 
 需要 Node.js 22.13 以上和 ffmpeg：

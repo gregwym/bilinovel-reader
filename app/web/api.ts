@@ -28,7 +28,11 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
     if (!location.pathname.startsWith("/login")) location.href = `/login?next=${encodeURIComponent(back)}`;
   }
   const data = (await res.json().catch(() => ({}))) as T & { error?: string; code?: string };
-  if (!res.ok) throw new ApiError(data.error ?? `HTTP ${res.status}`, res.status, data.code);
+  if (!res.ok) {
+    // Not from the app (no JSON): a reverse proxy in front of it timed out or can't reach it.
+    const gateway = res.status === 502 || res.status === 504 ? "：反向代理未收到书库服务的响应（服务未运行，或请求超时）" : "";
+    throw new ApiError(data.error ?? `HTTP ${res.status}${gateway}`, res.status, data.code);
+  }
   return data;
 }
 
