@@ -106,6 +106,18 @@ describe("RequestQueue", () => {
     expect(looksLikeChallenge("<p>normal</p>")).toBe(false);
   });
 
+  it("accepts real content with Cloudflare's passive JavaScript Detections", async () => {
+    for (const path of ["scripts/jsd/main.js", "h/g/scripts/jsd/main.js", "scripts/jsd/api.js"]) {
+      const html = `<title>小说目录</title><main>第一章</main><script>var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/${path}';</script>`;
+      expect(looksLikeChallenge(html)).toBe(false);
+      const q = new RequestQueue({ fetchImpl: (async () => response(200, html)) as typeof fetch });
+      await expect(q.fetchText("catalog")).resolves.toBe(html);
+      expect(looksLikeChallenge(`<title>Just a moment...</title>${html}`)).toBe(true);
+      expect(looksLikeChallenge(`${html}<div id="cf-chl-widget"></div>`)).toBe(true);
+      expect(looksLikeChallenge(`${html}<script src="/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1"></script>`)).toBe(true);
+    }
+  });
+
   it("continues with later requests after one fails", async () => {
     const clock = fakeClock();
     const q = new RequestQueue({
