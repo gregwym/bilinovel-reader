@@ -451,6 +451,17 @@ export function createApp(d: AppDeps): Hono {
     });
   });
 
+  // A stored segment for playing: with its texts, so its paragraph timing can be brought up to date.
+  app.post("/api/segments/:provider/:key", async (c) => {
+    const provider = c.req.param("provider");
+    if (!isProvider(provider)) return c.body(null, 404);
+    const body = await c.req.json<{ texts?: unknown }>().catch(() => ({}) as { texts?: unknown });
+    const texts = Array.isArray(body.texts) && body.texts.every((t) => typeof t === "string") ? (body.texts as string[]) : undefined;
+    const seg = await d.tts.read(provider, c.req.param("key"), texts);
+    if (!seg) return c.body(null, 404);
+    return c.body(new Uint8Array(seg.data), 200, { "Content-Type": seg.mime, "X-Bounds": JSON.stringify(seg.bounds) });
+  });
+
   app.post("/api/segments/:provider", async (c) => {
     const provider = c.req.param("provider");
     if (!isProvider(provider)) return c.body(null, 404);
@@ -470,6 +481,7 @@ export function createApp(d: AppDeps): Hono {
           style: typeof voice.style === "string" ? voice.style : undefined,
         },
         priority: READER_PRIORITY,
+        align: true,
       });
       const data = await readFile(seg.file);
       return c.body(new Uint8Array(data), 200, { "Content-Type": seg.mime, "X-Bounds": JSON.stringify(seg.bounds) });

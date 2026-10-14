@@ -156,6 +156,27 @@ describe("Gemini helpers", () => {
     expect(bounds[2] * total).toBeCloseTo(4.75, 1);
   });
 
+  it("times paragraphs by speaking time, so long pauses inside one don't shift the rest", () => {
+    // Six equal paragraphs of 3 s speech; the first two also pause 2 s halfway.
+    const parts: number[] = [];
+    const add = (sec: number, loud: boolean) => {
+      for (let k = 0; k < sec * RATE; k++) parts.push(loud ? Math.round(8000 * Math.sin(k / 6)) : 0);
+    };
+    for (let i = 0; i < 6; i++) {
+      if (i) add(0.6, false);
+      add(1.5, true);
+      if (i < 2) add(2, false);
+      add(1.5, true);
+    }
+    const samples = Int16Array.from(parts);
+    const total = samples.length / RATE; // 25 s
+    const bounds = paragraphBounds(Array(6).fill("一二三四五六"), samples, RATE);
+    // Each start is just before its paragraph's speech (which starts at the end of the gap).
+    [5.6, 11.2, 14.8, 18.4, 22].forEach((start, i) => {
+      expect(Math.abs(bounds[i + 1] * total - (start - 0.25))).toBeLessThan(0.1);
+    });
+  });
+
   it("estimates by text length without audio", () => {
     const b = paragraphBounds(["一二三", "一二三"]);
     expect(b[1]).toBeCloseTo(0.5);

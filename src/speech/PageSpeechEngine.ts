@@ -12,8 +12,8 @@ import { silentWavUrl } from "./CloudSpeechEngine";
  * than one request allows is split the same way every time, so a page always
  * maps to the same audio wherever reading starts, and the audio is kept in
  * IndexedDB: listening again (or after a reload) costs nothing. The player
- * still moves paragraph by paragraph, using paragraph start times estimated
- * from text length and snapped to pauses in the audio.
+ * still moves paragraph by paragraph, using paragraph start times aligned
+ * to the audio (see paragraphBounds).
  *
  * What differs per service (the request, the response, the cache key) is a
  * `PageBackend`.
@@ -86,11 +86,17 @@ export function speechWeight(text: string): number {
   return w + 1.5;
 }
 
+/** Spoken length of a text: characters read out (Latin letters and digits count half). */
+function spokenWeight(text: string): number {
+  let w = 0;
+  for (const ch of text) if (/[\p{L}\p{N}]/u.test(ch)) w += ch.charCodeAt(0) < 0x2e80 ? 0.5 : 1;
+  return Math.max(w, 0.5);
+}
+
 /**
  * Start of each paragraph as a fraction of the audio (n + 1 entries, first 0,
- * last 1). Estimated from text length, then moved to the nearest pause in
- * the audio when samples (any scale, e.g. 16-bit PCM or decoded floats) are
- * available.
+ * last 1). Estimated from text length; with the audio's samples (any scale,
+ * e.g. 16-bit PCM or decoded floats) aligned to its pauses (see alignParagraphs).
  */
 export function paragraphBounds(texts: string[], samples?: ArrayLike<number>, sampleRate = 24000): number[] {
   const weights = texts.map(speechWeight);
@@ -103,9 +109,23 @@ export function paragraphBounds(texts: string[], samples?: ArrayLike<number>, sa
   }
   bounds.push(1);
   if (!samples || samples.length < sampleRate || texts.length < 2) return bounds;
+  return alignParagraphs(texts, samples, sampleRate) ?? bounds;
+}
 
-  // Energy per 20 ms frame; pauses are runs of quiet frames.
-  const frame = Math.max(1, Math.round(sampleRate * 0.02));
+/** Analysis frame (seconds). */
+const FRAME_S = 0.02;
+/** Shortest silence that can separate paragraphs (seconds). */
+const MIN_GAP_S = 0.16;
+
+/**
+ * Paragraph starts from the audio: each paragraph should take speaking time
+ * (time outside pauses, so the pauses' varying length doesn't add up) in
+ * proportion to its spoken characters, and starts after a pause. Picks the
+ * pauses that fit best overall (dynamic programming), preferring longer
+ * ones; where no pause fits, uses the speaking-time estimate itself.
+ */
+function alignParagraphs(texts: string[], samples: ArrayLike<number>, sampleRate: number): number[] | undefined {
+  const frame = Math.max(1, Math.round(sampleRate * FRAME_S));
   const frames = Math.floor(samples.length / frame);
   const energy = new Float64Array(frames);
   for (let f = 0; f < frames; f++) {
@@ -116,31 +136,96 @@ export function paragraphBounds(texts: string[], samples?: ArrayLike<number>, sa
   const sorted = [...energy].sort((a, b) => a - b);
   const loud = sorted[Math.floor(sorted.length * 0.9)] || 1;
   const quiet = loud * 0.08;
-  const gaps: { center: number; length: number }[] = [];
+  // voiced[f]: speaking frames before frame f.
+  const voiced = new Float64Array(frames + 1);
+  for (let f = 0; f < frames; f++) voiced[f + 1] = voiced[f] + (energy[f] < quiet ? 0 : 1);
+  const totalVoiced = voiced[frames];
+  if (totalVoiced * FRAME_S < 1) return undefined;
+
+  interface Cand {
+    /** Boundary frame. */
+    at: number;
+    /** Speaking frames before it. */
+    v: number;
+    /** Score for starting a paragraph here. */
+    bonus: number;
+    gap?: number;
+  }
+  const gaps: Cand[] = [];
+  const minGap = Math.round(MIN_GAP_S / FRAME_S);
   let start = -1;
   for (let f = 0; f <= frames; f++) {
     const silent = f < frames && energy[f] < quiet;
     if (silent && start < 0) start = f;
     if (!silent && start >= 0) {
       const len = f - start;
-      if (len >= 10 && start > 0 && f < frames) gaps.push({ center: (start + len / 2) / frames, length: len });
+      if (len >= minGap && start > 0 && f < frames) {
+        // Just before the next paragraph's speech (a short lead-in), not in the middle of a long pause.
+        const at = Math.max(start + len / 2, f - 0.25 / FRAME_S);
+        gaps.push({ at, v: voiced[start], bonus: 0.8 * Math.min(len * FRAME_S, 1), gap: gaps.length });
+      }
       start = -1;
     }
   }
-  // Snap each estimate to the nearest unused pause after the previous boundary.
-  const duration = samples.length / sampleRate;
-  const window = Math.max(3, duration * 0.06) / duration;
-  let prev = 0;
-  for (let i = 1; i < bounds.length - 1; i++) {
-    const est = bounds[i];
-    let best: number | undefined;
-    for (const g of gaps) {
-      if (g.center <= prev + 0.2 / duration || Math.abs(g.center - est) > window) continue;
-      if (best === undefined || Math.abs(g.center - est) < Math.abs(best - est)) best = g.center;
+
+  const weights = texts.map(spokenWeight);
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+  const expected = weights.map((w) => (w / totalWeight) * totalVoiced);
+  const window = Math.max(4 / FRAME_S, totalVoiced * 0.15);
+  const frameAt = (v: number) => {
+    let lo = 0;
+    let hi = frames;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (voiced[mid] < v) lo = mid + 1;
+      else hi = mid;
     }
-    bounds[i] = Math.max(best ?? est, prev);
-    prev = bounds[i];
+    return lo;
+  };
+  // Cost of a paragraph spoken for `d` frames where `e` were expected: relative error (speaking speed varies per paragraph).
+  const cost = (d: number, e: number) => 4 * (((d - e) * FRAME_S) / (e * FRAME_S + 2)) ** 2;
+
+  const n = texts.length;
+  let layer: { c: Cand; total: number; from: number }[] = [{ c: { at: 0, v: 0, bonus: 0 }, total: 0, from: -1 }];
+  const back: { c: Cand; from: number }[][] = [];
+  let target = 0;
+  for (let k = 1; k <= n; k++) {
+    target += expected[k - 1];
+    const cands: Cand[] =
+      k === n
+        ? [{ at: frames, v: totalVoiced, bonus: 0 }]
+        : [
+            ...gaps.filter((g) => Math.abs(g.v - target) <= window),
+            { at: frameAt(target), v: target, bonus: -1 },
+          ];
+    const next: typeof layer = [];
+    for (const c of cands) {
+      let best = Infinity;
+      let from = -1;
+      layer.forEach((p, i) => {
+        if (c.v < p.c.v || c.at < p.c.at || (c.gap !== undefined && c.gap === p.c.gap)) return;
+        const t = p.total + cost(c.v - p.c.v, expected[k - 1]) - c.bonus;
+        if (t < best) {
+          best = t;
+          from = i;
+        }
+      });
+      if (from >= 0) next.push({ c, total: best, from });
+    }
+    if (!next.length) return undefined;
+    back.push(layer.map((l) => ({ c: l.c, from: l.from })));
+    layer = next;
   }
+  // Walk back from the end through the best predecessors.
+  const bounds = new Array<number>(n + 1);
+  let idx = layer[0].from;
+  bounds[n] = 1;
+  for (let k = n - 1; k >= 1; k--) {
+    const prev = back[k][idx];
+    bounds[k] = Math.min(1, (prev.c.at * frame) / samples.length);
+    idx = prev.from;
+  }
+  bounds[0] = 0;
   return bounds;
 }
 
@@ -201,7 +286,8 @@ export interface SegmentMeta {
 
 export interface SegmentStore {
   list(): Promise<SegmentMeta[]>;
-  get(key: string): Promise<StoredSegment | undefined>;
+  /** `texts` are the segment's (for stores that check or update the audio's timing). */
+  get(key: string, texts?: string[]): Promise<StoredSegment | undefined>;
   put(seg: StoredSegment): Promise<void>;
   delete(key: string): Promise<void>;
   clear(): Promise<void>;
@@ -588,7 +674,7 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
   private render(seg: Segment, cfg: C): Promise<Rendered> {
     if (seg.done) return Promise.resolve(seg.done);
     seg.rendered ??= (async () => {
-      const stored = await this.store.get(seg.key).catch(() => undefined);
+      const stored = await this.store.get(seg.key, seg.texts).catch(() => undefined);
       if (stored) return { audio: stored.audio, bounds: stored.bounds };
       const rendered = await this.backend.generate(cfg, seg.texts, this.io);
       this.options.usage?.add(seg.texts.join("").length);
