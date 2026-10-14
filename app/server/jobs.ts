@@ -39,6 +39,8 @@ const PAUSED_KEY = "server.jobsPaused";
 export type BlockKey = PageProvider | "site";
 
 class Cancelled extends Error {}
+/** The queue was paused mid-chapter: the job waits, keeping the segments made so far. */
+class Paused extends Error {}
 
 /**
  * Background generation: a queue of chapter (and export) jobs in the
@@ -299,7 +301,8 @@ export class Jobs {
         this.update(job.id, { status: "done", progress: 1 });
       }
     } catch (err) {
-      if (!(err instanceof Cancelled)) this.failed(job, err);
+      if (err instanceof Paused) this.update(job.id, { status: "queued", message: "已暂停（已生成的段落会保留）" });
+      else if (!(err instanceof Cancelled)) this.failed(job, err);
     } finally {
       this.running.delete(job.id);
       this.kick();
@@ -378,6 +381,9 @@ export class Jobs {
     let done = 0;
     for (const [i, texts] of parts.entries()) {
       this.checkCancelled(job.id);
+      if (this.paused && !this.tts.stored(profile.provider, this.tts.key(profile.provider, this.tts.config(profile.provider), texts))) {
+        throw new Paused();
+      }
       this.update(job.id, { message: `生成语音 ${i + 1}/${parts.length}` });
       const seg = await this.tts.segment(profile.provider, texts, {
         priority: job.priority,

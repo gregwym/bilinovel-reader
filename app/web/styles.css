@@ -1291,8 +1291,11 @@ textarea {
 }
 
 .chips {
+  /* The sheet is a flex column: without this the row is squeezed and its chips clipped. */
+  flex: none;
   display: flex;
   gap: 6px;
+  padding: 2px 0;
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -1321,6 +1324,11 @@ textarea {
   background: var(--accent-soft);
   color: var(--accent);
   font-weight: 600;
+}
+
+.chip.on .count {
+  background: var(--accent);
+  color: var(--card);
 }
 
 .chip .tag {
