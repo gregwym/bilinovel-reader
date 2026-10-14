@@ -101,7 +101,7 @@ export async function listFishVoices(
   key: string,
   request: (req: HttpRequest) => Promise<HttpResponse> = httpRequest,
 ): Promise<AzureVoice[]> {
-  type Item = { _id: string; title: string; type?: string };
+  type Item = { _id: string; title: string; type?: string; samples?: { audio?: string }[] };
   const get = async (query: string): Promise<Item[]> => {
     let res: HttpResponse;
     try {
@@ -128,7 +128,8 @@ export async function listFishVoices(
       // Skip singing-voice models and anything that isn't a plain id.
       if (i.type === "svc" || !FISH_VOICE_ID.test(i._id) || seen.has(i._id)) continue;
       seen.add(i._id);
-      out.push({ shortName: i._id, label: `${prefix}${i.title}`, locale: "" });
+      const sample = i.samples?.find((s) => typeof s.audio === "string" && /^https:\/\//.test(s.audio))?.audio;
+      out.push({ shortName: i._id, label: `${prefix}${i.title}`, locale: "", ...(sample ? { sample } : {}) });
     }
   };
   add(mine, "我的：");

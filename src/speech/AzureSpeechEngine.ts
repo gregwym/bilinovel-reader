@@ -22,6 +22,8 @@ export interface AzureVoice {
   shortName: string;
   label: string;
   locale: string;
+  /** URL of an official sample recording, when the service has one. */
+  sample?: string;
 }
 
 export const AZURE_DEFAULT_REGION = "eastasia";

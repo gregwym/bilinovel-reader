@@ -1,6 +1,7 @@
 import { h } from "../../../src/utils/dom";
 import type { BookDetail, ChapterInfo, VolumeInfo } from "../../shared/api";
 import { api } from "../api";
+import { segmentSheet } from "../segments";
 import { navigate } from "../router";
 import {
   act,
@@ -29,6 +30,7 @@ export function bookPage({ id }: Record<string, string>): Page {
   const open = new Set<number>();
   let opened = false;
   let player: HTMLElement | undefined;
+  let sheet: { close: () => void } | undefined;
   let last = "";
 
   const load = async (force = false) => {
@@ -58,6 +60,8 @@ export function bookPage({ id }: Record<string, string>): Page {
 
   const play = (book: BookDetail, ch: ChapterInfo) => {
     player?.remove();
+    sheet?.close();
+    sheet = undefined;
     const audio = h("audio", { controls: true, autoplay: true, preload: "auto", src: `/api/books/${id}/chapters/${ch.chapterId}/audio` });
     const close = h("button", { class: "icon-btn", "aria-label": "关闭", onclick: () => (player?.remove(), (player = undefined)) }, icon("close"));
     player = h(
@@ -174,7 +178,7 @@ export function bookPage({ id }: Record<string, string>): Page {
           "div",
           { class: "grow" },
           h("div", { class: "label" }, "跟随阅读进度"),
-          h("div", { class: "hint" }, "后台自动生成正在读的章节和之后几章"),
+          h("div", { class: "hint" }, "后台自动生成正在读的章节和之后几章（生成较慢，默认关闭）"),
         ),
         switchInput(book.follow, (follow) => void api.patch(`/api/books/${id}`, { follow }).then(refresh, (e: Error) => toast(e.message))),
       ),
@@ -253,7 +257,17 @@ export function bookPage({ id }: Record<string, string>): Page {
       h("a", { href: `/novel/${book.id}/${c.chapterId}.html` }, c.title),
       sub.length ? h("div", { class: "sub" }, sub.join(" · ")) : null,
     );
-    return h("li", { class: cls }, name, stateButton(book, c));
+    const segBtn =
+      c.audio !== "none" && !c.silent
+        ? h("button", { class: "state", type: "button", title: "按段试听（生成一段即可播放）", "aria-label": "语音片段" }, icon("list"))
+        : null;
+    segBtn?.addEventListener("click", () => {
+      sheet?.close();
+      player?.remove();
+      player = undefined;
+      sheet = segmentSheet(book, c);
+    });
+    return h("li", { class: cls }, name, segBtn, stateButton(book, c));
   }
 
   function stateButton(book: BookDetail, c: ChapterInfo): HTMLElement {
@@ -349,6 +363,7 @@ export function bookPage({ id }: Record<string, string>): Page {
     dispose: () => {
       stop();
       player?.remove();
+      sheet?.close();
     },
   };
 }

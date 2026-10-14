@@ -108,20 +108,44 @@ export function settingsPage(): Page {
     return el;
   }
 
-  function voiceSelect(name: string, value: string, provider: PageProvider, preset: AzureVoice[], empty?: string): HTMLSelectElement {
-    const opts = (voices: AzureVoice[]): [string, string][] => [
-      ...(empty !== undefined ? [["", empty] as [string, string]] : []),
-      ...voices.map((v) => [v.shortName, v.label] as [string, string]),
-    ];
-    const el = select(name, value, opts(preset));
+  /** A voice list with a preview button (the service's own sample when it has one). */
+  function voiceSelect(name: string, value: string, provider: PageProvider, preset: AzureVoice[], empty?: string): HTMLElement {
+    const build = (voices: AzureVoice[], current: string) => {
+      const opts: [string, string][] = [
+        ...(empty !== undefined && !voices.some((v) => v.shortName === "") ? [["", empty] as [string, string]] : []),
+        ...voices.map((v) => [v.shortName, v.label] as [string, string]),
+      ];
+      const el = select(name, current, opts);
+      for (const v of voices) {
+        const opt = [...el.options].find((o) => o.value === v.shortName);
+        if (opt && v.sample) opt.dataset.sample = v.sample;
+      }
+      return el;
+    };
+    let el = build(preset, value);
+    const listen = h("button", { class: "btn small", type: "button", title: "试听这个声音" }, "试听");
+    const wrap = h("div", { class: "voice-field" }, el, listen);
+    listen.addEventListener("click", () => {
+      const opt = el.selectedOptions[0];
+      const form = wrap.closest("section") ?? document;
+      const field = (n: string) => form.querySelector<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(`[name=${n}]`)?.value ?? "";
+      const params = new URLSearchParams({ voice: el.value, model: field(`${provider}Model`) });
+      if (provider === "gemini") params.set("style", field("geminiStyle"));
+      // An official sample when the service has one; otherwise a short line,
+      // generated once and then kept in the segment cache.
+      const src = opt?.dataset.sample ?? `/api/voices/${provider}/preview?${params}`;
+      previewVoice(src, listen);
+    });
     void api
       .get<AzureVoice[]>(`/api/voices/${provider}`)
       .then((voices) => {
         if (!voices.length) return;
-        el.replaceWith(select(name, el.value, opts(voices)));
+        const next = build(voices, el.value);
+        el.replaceWith(next);
+        el = next;
       })
       .catch(() => undefined);
-    return el;
+    return wrap;
   }
 
   function geminiFields(s: Settings): HTMLElement[] {
@@ -338,4 +362,25 @@ export function settingsPage(): Page {
   }
 
   return { el };
+}
+
+let previewAudio: HTMLAudioElement | undefined;
+
+/** Plays a voice sample; the button shows while it loads and stops it when pressed again. */
+function previewVoice(src: string, button: HTMLButtonElement): void {
+  const playing = previewAudio && !previewAudio.paused && previewAudio.dataset.src === src;
+  previewAudio?.pause();
+  document.querySelectorAll<HTMLButtonElement>(".voice-field .btn").forEach((b) => (b.textContent = "试听"));
+  if (playing) return;
+  const audio = (previewAudio ??= new Audio());
+  audio.dataset.src = src;
+  audio.src = src;
+  button.textContent = "加载中…";
+  audio.onplaying = () => (button.textContent = "停止");
+  audio.onended = audio.onpause = () => (button.textContent = "试听");
+  audio.onerror = () => {
+    button.textContent = "试听";
+    toast(src.startsWith("/") ? "试听失败：请检查该服务的密钥" : "无法播放官方样例");
+  };
+  void audio.play().catch(() => undefined);
 }

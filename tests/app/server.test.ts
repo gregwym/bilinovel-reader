@@ -8,7 +8,7 @@ import { loadConfig } from "../../app/server/config";
 import { createServices } from "../../app/server/services";
 import { createApp } from "../../app/server/http";
 import { Ffmpeg } from "../../app/server/audio/ffmpeg";
-import type { BookDetail, BookSummary, JobsOverview } from "../../app/shared/api";
+import type { BookDetail, BookSummary, ChapterSegments, JobsOverview } from "../../app/shared/api";
 import type { HttpRequest, HttpResponse } from "../../src/utils/http";
 import { fixture } from "../helpers";
 
@@ -138,6 +138,8 @@ describe("library server", () => {
     const book = await json<BookSummary>(res);
     expect(book).toMatchObject({ id: "5369", title: "测试轻小说", author: "测试作者", hasCover: true });
     expect(book.chapters).toBeGreaterThan(3);
+    // Generation is slow: following the reading position is opt-in.
+    expect(book.follow).toBe(false);
     const list = await json<BookSummary[]>(call("/api/books"));
     expect(list.map((b) => b.id)).toEqual(["5369"]);
     expect((await call("/api/books/5369/cover")).headers.get("content-type")).toBe("image/jpeg");
@@ -175,6 +177,28 @@ describe("library server", () => {
     expect(res.status).toBe(200);
     expect(JSON.parse(res.headers.get("x-bounds")!)).toHaveLength(texts.length + 1);
     expect(ttsRequests).toHaveLength(0);
+  });
+
+  it.skipIf(!hasFfmpeg)("lists a chapter's segments, each playable once generated", async () => {
+    const segs = await json<ChapterSegments>(call("/api/books/5369/chapters/180204/segments"));
+    expect(segs).toMatchObject({ provider: "fish", complete: true });
+    expect(segs.segments).toHaveLength(3);
+    expect(segs.segments.every((s) => s.ready && s.text.length > 0)).toBe(true);
+    const audio = await call(`/api/segments/fish/${encodeURIComponent(segs.segments[0].key)}`);
+    expect(audio.status).toBe(200);
+    expect(audio.headers.get("content-type")).toBe("audio/mpeg");
+
+    // A chapter whose pages were never fetched: nothing yet, more to come.
+    const none = await json<ChapterSegments>(call("/api/books/5369/chapters/180206/segments"));
+    expect(none).toMatchObject({ complete: false, segments: [] });
+  });
+
+  it.skipIf(!hasFfmpeg)("previews a voice once, then from the cache", async () => {
+    ttsRequests = [];
+    const url = "/api/voices/fish/preview?voice=0123456789abcdef0123456789abcdef&model=s2.1-pro-free";
+    expect((await call(url)).status).toBe(200);
+    expect((await call(url)).headers.get("content-type")).toBe("audio/mpeg");
+    expect(ttsRequests).toHaveLength(1);
   });
 
   it.skipIf(!hasFfmpeg)("moves files when the storage template changes", async () => {

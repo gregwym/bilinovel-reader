@@ -102,7 +102,7 @@ export class Books {
     const isNew = !this.get(id);
     if (isNew) {
       this.db.run(
-        "insert into books (id, title, added_at, ahead) values (?, ?, ?, ?) on conflict (id) do nothing",
+        "insert into books (id, title, added_at, ahead, follow) values (?, ?, ?, ?, 0) on conflict (id) do nothing",
         id,
         `书籍 ${id}`,
         Date.now(),
@@ -122,7 +122,7 @@ export class Books {
   ensure(id: string, title?: string): void {
     if (this.get(id)) return;
     this.db.run(
-      "insert into books (id, title, added_at, ahead) values (?, ?, ?, ?) on conflict (id) do nothing",
+      "insert into books (id, title, added_at, ahead, follow) values (?, ?, ?, ?, 0) on conflict (id) do nothing",
       id,
       title ?? `书籍 ${id}`,
       Date.now(),

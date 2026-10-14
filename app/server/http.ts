@@ -10,7 +10,7 @@ import { SpeechEngineError } from "../../src/speech/SpeechEngine";
 import { GEMINI_VOICES } from "../../src/speech/GeminiSpeechEngine";
 import { listFishVoices } from "../../src/speech/FishSpeechEngine";
 import { mergeProgress, type SavedProgress } from "../../src/reader/ProgressStore";
-import type { AppInfo, PageProvider, ServerSettingsUpdate } from "../shared/api";
+import type { AppInfo, ChapterSegments, PageProvider, ServerSettingsUpdate } from "../shared/api";
 import type { Db } from "./db";
 import type { Config, Settings } from "./config";
 import type { SiteClient } from "./site/client";
@@ -56,6 +56,8 @@ const MIME: Record<string, string> = {
   ".mp3": "audio/mpeg",
   ".m4b": "audio/mp4",
 };
+
+const VOICE_PREVIEW_TEXT = "她轻轻推开窗，晚风带着桂花的香气吹了进来。“今天也辛苦了。”她笑着说。";
 
 const isProvider = (p: string): p is PageProvider => (PROVIDERS as string[]).includes(p);
 
@@ -297,6 +299,19 @@ export function createApp(d: AppDeps): Hono {
     return sendFile(c, file, "audio/mpeg", { "Cache-Control": "private, max-age=3600" });
   });
 
+  app.get("/api/books/:id/chapters/:chapter/segments", (c) => {
+    const profile = d.tts.profile();
+    if (!profile) return c.json({ error: describeError("gemini", "config"), code: "config" }, 400);
+    const { pages, complete } = d.source.cachedChapterPages(c.req.param("id"), c.req.param("chapter"));
+    const cfg = d.tts.config(profile.provider);
+    const segments = d.tts.parts(profile.provider, pages).map((texts) => {
+      const key = d.tts.key(profile.provider, cfg, texts);
+      const text = texts.join("");
+      return { key, text: text.slice(0, 80), chars: text.length, ready: !!d.tts.stored(profile.provider, key) };
+    });
+    return c.json({ provider: profile.provider, complete, segments } satisfies ChapterSegments);
+  });
+
   app.post("/api/books/:id/volumes/:vi/export", (c) => {
     const book = d.books.get(c.req.param("id"));
     const vi = Number(c.req.param("vi"));
@@ -413,6 +428,30 @@ export function createApp(d: AppDeps): Hono {
       });
       const data = await readFile(seg.file);
       return c.body(new Uint8Array(data), 200, { "Content-Type": seg.mime, "X-Bounds": JSON.stringify(seg.bounds) });
+    } catch (err) {
+      if (err instanceof SpeechEngineError) {
+        return c.json({ error: describeError(provider, err.code), code: err.code }, err.code === "config" ? 400 : 502);
+      }
+      return errorResponse(c, err);
+    }
+  });
+
+  // A short sample of a voice, for voices without an official one. Generated
+  // once (one short request) and then served from the segment cache.
+  app.get("/api/voices/:provider/preview", async (c) => {
+    const provider = c.req.param("provider");
+    if (!isProvider(provider)) return c.body(null, 404);
+    const voice = c.req.query("voice") ?? "";
+    const model = c.req.query("model") || undefined;
+    try {
+      const seg = await d.tts.segment(provider, [VOICE_PREVIEW_TEXT], {
+        voice: { model, voice, style: provider === "gemini" ? (c.req.query("style") ?? undefined) : undefined },
+        priority: READER_PRIORITY,
+      });
+      return c.body(new Uint8Array(await readFile(seg.file)), 200, {
+        "Content-Type": seg.mime,
+        "Cache-Control": "private, max-age=86400",
+      });
     } catch (err) {
       if (err instanceof SpeechEngineError) {
         return c.json({ error: describeError(provider, err.code), code: err.code }, err.code === "config" ? 400 : 502);

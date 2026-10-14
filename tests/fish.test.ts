@@ -125,7 +125,7 @@ describe("Fish Audio helpers", () => {
         ? json(200, { items: [{ _id: mine, title: "我的声音", type: "tts" }] })
         : json(200, {
             items: [
-              { _id: VOICE, title: "旁白", type: "tts" },
+              { _id: VOICE, title: "旁白", type: "tts", samples: [{ title: "s", text: "t", audio: "https://cdn.fish.audio/s.mp3" }] },
               { _id: mine, title: "重复", type: "tts" },
               { _id: "22222222222222222222222222222222", title: "唱歌", type: "svc" },
             ],
@@ -138,6 +138,9 @@ describe("Fish Audio helpers", () => {
       [mine, "我的：我的声音"],
       [VOICE, "旁白"],
     ]);
+    // The service's own sample recording, for previews without a request.
+    expect(voices.find((v) => v.shortName === VOICE)?.sample).toBe("https://cdn.fish.audio/s.mp3");
+    expect(voices.find((v) => v.shortName === mine)?.sample).toBeUndefined();
   });
 
   it("sanitizes Fish Audio settings", () => {

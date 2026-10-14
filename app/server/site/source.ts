@@ -164,6 +164,20 @@ export class SiteSource {
     return p;
   }
 
+  /** The pages of a chapter already in the database (from the first, until one is missing). */
+  cachedChapterPages(bookId: string, chapterId: string): { pages: PageContent[]; complete: boolean } {
+    const pages: PageContent[] = [];
+    for (let i = 0; i < 100; i++) {
+      const page = this.cachedPage(bookId, chapterId, i);
+      if (!page) return { pages, complete: false };
+      pages.push(page);
+      if (page.nextType !== "same-chapter-page" || !page.nextUrl) break;
+      const next = parseChapterUrl(page.nextUrl);
+      if (!next || next.chapterId !== chapterId || next.pageIndex !== i + 1) break;
+    }
+    return { pages, complete: true };
+  }
+
   /** All pages of a chapter, in order. */
   async chapterPages(bookId: string, chapterId: string, onPage?: (n: number) => void): Promise<PageContent[]> {
     const pages: PageContent[] = [];
