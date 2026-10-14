@@ -11,7 +11,10 @@ import { icon, poll } from "./ui";
 export function segmentSheet(book: BookDetail, chapter: ChapterInfo): { close: () => void } {
   const audio = h("audio", { controls: true, preload: "auto" });
   const status = h("div", { class: "hint" }, "加载中…");
+  const chips = h("div", { class: "chips" });
   const list = h("ol", { class: "segments" });
+  /** Profile id of the voice shown ("" for the current one). */
+  let voice = "";
   let data: ChapterSegments | undefined;
   /** Index playing, or waiting to play once generated. */
   let current = -1;
@@ -31,6 +34,7 @@ export function segmentSheet(book: BookDetail, chapter: ChapterInfo): { close: (
     "div",
     { class: "sheet", role: "dialog", "aria-label": `${chapter.title} 的语音片段` },
     h("header", {}, h("div", { class: "grow" }, h("b", {}, chapter.title), status), closeBtn),
+    chips,
     audio,
     list,
   );
@@ -39,7 +43,20 @@ export function segmentSheet(book: BookDetail, chapter: ChapterInfo): { close: (
   document.addEventListener("keydown", onKey);
   document.body.append(backdrop);
 
+  /** Another voice than the current one: nothing more will be generated in it. */
+  const old = () => !!data && !data.voices.find((v) => v.id === data!.voice)?.current;
+
   const play = (i: number) => {
+    if (old() && !data?.segments[i]?.ready) {
+      // Skip to the next segment there is audio for.
+      const next = data!.segments.findIndex((s, j) => j > i && s.ready);
+      if (next < 0) {
+        current = -1;
+        render();
+        return;
+      }
+      i = next;
+    }
     current = i;
     const seg = data?.segments[i];
     if (!seg?.ready || !data) {
@@ -66,20 +83,45 @@ export function segmentSheet(book: BookDetail, chapter: ChapterInfo): { close: (
 
   audio.addEventListener("ended", () => {
     if (!data) return;
-    if (current + 1 < data.segments.length || !data.complete) play(current + 1);
+    if (current + 1 < data.segments.length || (!data.complete && !old())) play(current + 1);
     else current = -1;
     render();
   });
 
+  const pick = (id: string) => {
+    if (id === data?.voice) return;
+    voice = id;
+    current = -1;
+    waiting = false;
+    audio.pause();
+    audio.removeAttribute("src");
+    void load().catch((err: Error) => (status.textContent = err.message));
+  };
+
   function render() {
     if (!data) return;
+    const d = data;
+    // Other voices with audio of this chapter can be listened to as well.
+    chips.replaceChildren(
+      ...(d.voices.length > 1
+        ? d.voices.map((v) =>
+            h(
+              "button",
+              { type: "button", class: v.id === d.voice ? "chip on" : "chip", onclick: () => pick(v.id) },
+              v.label.replace(/^(Fish Audio|Gemini) · /, ""),
+              v.current ? h("span", { class: "tag" }, "当前") : null,
+              h("span", { class: "count" }, String(v.ready)),
+            ),
+          )
+        : []),
+    );
     const ready = data.segments.filter((s) => s.ready).length;
     const total = data.segments.length;
     status.textContent = !total
       ? data.complete
         ? "本章没有可朗读的文字"
         : "正文尚未获取，开始生成后这里会列出片段"
-      : `${ready}/${total}${data.complete ? "" : "+"} 段已生成 · 点击任一段试听`;
+      : `${ready}/${total}${data.complete ? "" : "+"} 段已生成 · ${old() ? "旧声音，只能播放已有的段" : "点击任一段试听"}`;
     list.replaceChildren(
       ...data.segments.map((s, i) => {
         const playing = i === current;
@@ -102,7 +144,8 @@ export function segmentSheet(book: BookDetail, chapter: ChapterInfo): { close: (
   }
 
   const load = async () => {
-    const next = await api.get<ChapterSegments>(`/api/books/${book.id}/chapters/${chapter.chapterId}/segments`);
+    const query = voice ? `?voice=${encodeURIComponent(voice)}` : "";
+    const next = await api.get<ChapterSegments>(`/api/books/${book.id}/chapters/${chapter.chapterId}/segments${query}`);
     const sig = JSON.stringify(next);
     if (sig === last) return;
     last = sig;
