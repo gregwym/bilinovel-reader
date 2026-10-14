@@ -88,6 +88,14 @@ export interface ChapterInfo {
   silent?: boolean;
 }
 
+/** A chapter's speech segments with the current voice (each is one request). */
+export interface ChapterSegments {
+  provider: PageProvider;
+  /** False while pages are still being fetched: more segments will follow. */
+  complete: boolean;
+  segments: { key: string; text: string; chars: number; ready: boolean }[];
+}
+
 export interface VolumeInfo {
   title: string;
   chapters: ChapterInfo[];
