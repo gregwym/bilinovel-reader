@@ -27,7 +27,7 @@ export function libraryPage(): Page {
       .post<BookSummary>("/api/books", { url })
       .then((book) => {
         input.value = "";
-        toast(`已加入书架：${book.title}`);
+        toast(book.loading ? "已加入书架，目录在后台获取" : `已加入书架：${book.title}`);
         navigate(`/book/${book.id}`);
       })
       .catch((err: Error) => {
@@ -136,11 +136,17 @@ function bookTile(book: BookSummary): HTMLElement {
     h(
       "div",
       { class: "meta" },
-      book.readIndex !== undefined ? `读到 ${Math.round(readFraction(book) * 100)}%` : book.author || "未读",
+      book.loading
+        ? "获取目录中…"
+        : book.loadError
+          ? h("span", { style: "color:var(--danger)" }, "目录获取失败")
+          : book.readIndex !== undefined
+            ? `读到 ${Math.round(readFraction(book) * 100)}%`
+            : book.author || "未读",
     ),
   );
-  if (book.activeJobs) {
-    tile.querySelector(".cover")!.append(h("span", { class: "working", title: "正在生成" }, h("span", { class: "spin" })));
+  if (book.loading || book.activeJobs) {
+    tile.querySelector(".cover")!.append(h("span", { class: "working", title: book.loading ? "正在获取目录" : "正在生成" }, h("span", { class: "spin" })));
   }
   return tile;
 }
