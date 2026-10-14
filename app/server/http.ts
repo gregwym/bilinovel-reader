@@ -59,13 +59,17 @@ const MIME: Record<string, string> = {
 
 const isProvider = (p: string): p is PageProvider => (PROVIDERS as string[]).includes(p);
 
-/** Status and message for an error from the site, a service or the library. */
+/** Status and message for an error from the site, a service or the library (also logged). */
 function errorResponse(c: Context, err: unknown) {
+  console.warn(`[library] ${c.req.method} ${c.req.path}:`, err instanceof Error ? `${err.name}: ${err.message}` : String(err));
   if (err instanceof SpeechEngineError) return c.json({ error: err.message, code: err.code }, 502);
   if (err instanceof FetchError) {
+    const where = err.status ? `HTTP ${err.status}` : err.message;
     return c.json(
       {
-        error: err.challenge ? "站点要求人机验证：请在设置中填写 Cookie 或配置 FlareSolverr" : `无法访问站点：${err.message}`,
+        error: err.challenge
+          ? `站点要求人机验证（${err.message}）：请在设置中填写 Cookie 或配置 FlareSolverr`
+          : `无法访问站点（${where}）：${err.url}`,
         code: err.challenge ? "challenge" : "fetch",
         status: err.status,
       },
@@ -490,6 +494,9 @@ export function createApp(d: AppDeps): Hono {
     const view = d.settings.update(patch);
     return c.json(view);
   });
+
+  /** Connection test: one request to the site's home page. */
+  app.post("/api/site/test", async (c) => c.json(await d.client.probe(`${d.settings.get().siteOrigin}/`)));
 
   app.get("/api/library/stats", async (c) => c.json(await d.library.stats()));
   app.post("/api/library/rescan", async (c) => {

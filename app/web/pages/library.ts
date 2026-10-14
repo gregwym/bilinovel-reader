@@ -1,7 +1,7 @@
 import { h } from "../../../src/utils/dom";
 import type { BookSummary } from "../../shared/api";
-import { api } from "../api";
-import { act, cover, formatTime, icon, openReader, poll, progressBar, toast, type Page } from "../ui";
+import { api, ApiError } from "../api";
+import { cover, formatTime, icon, openReader, poll, progressBar, toast, type Page } from "../ui";
 import { navigate } from "../router";
 
 /** The bookshelf: the book being read, then every book as a cover grid. */
@@ -20,15 +20,39 @@ export function libraryPage(): Page {
     ev.preventDefault();
     const url = input.value.trim();
     if (!url) return input.focus();
-    void act(addBtn, async () => {
-      const book = await api.post<BookSummary>("/api/books", { url });
-      input.value = "";
-      toast(`已加入书架：${book.title}`);
-      navigate(`/book/${book.id}`);
-    });
+    error.hidden = true;
+    addBtn.disabled = true;
+    input.disabled = true;
+    api
+      .post<BookSummary>("/api/books", { url })
+      .then((book) => {
+        input.value = "";
+        toast(`已加入书架：${book.title}`);
+        navigate(`/book/${book.id}`);
+      })
+      .catch((err: Error) => {
+        // Kept on screen (not a toast): the reason is needed to fix site access.
+        error.replaceChildren(
+          h(
+            "div",
+            { class: "grow" },
+            h("b", {}, "添加失败"),
+            h("div", { class: "mono" }, err.message),
+            err instanceof ApiError && (err.code === "fetch" || err.code === "challenge")
+              ? h("div", { class: "hint" }, "可在", h("a", { href: "/settings", "data-link": true }, "设置 → 网站访问"), "中测试连接")
+              : null,
+          ),
+        );
+        error.hidden = false;
+      })
+      .finally(() => {
+        addBtn.disabled = false;
+        input.disabled = false;
+      });
   });
+  const error = h("div", { class: "banner error", role: "alert", hidden: true });
   const body = h("div");
-  el.append(h("header", { class: "topbar" }, h("h1", {}, "书架")), form, body);
+  el.append(h("header", { class: "topbar" }, h("h1", {}, "书架")), form, error, body);
 
   let last = "";
   const load = async () => {

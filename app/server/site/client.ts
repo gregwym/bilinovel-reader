@@ -17,6 +17,26 @@ export interface Binary {
 
 type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
+/** A network failure in words: Node's fetch hides the reason (DNS, refused, timeout…) in `cause`. */
+export function networkError(err: unknown): string {
+  const e = err as { name?: string; message?: string; cause?: { code?: string; message?: string } };
+  if (e?.name === "TimeoutError" || e?.name === "AbortError") return "请求超时";
+  const code = e?.cause?.code ?? "";
+  const known: Record<string, string> = {
+    ENOTFOUND: "域名解析失败（检查 NAS/容器的 DNS）",
+    EAI_AGAIN: "域名解析失败（检查 NAS/容器的 DNS）",
+    ECONNREFUSED: "连接被拒绝",
+    ECONNRESET: "连接被重置（可能被网络拦截）",
+    ETIMEDOUT: "连接超时",
+    UND_ERR_CONNECT_TIMEOUT: "连接超时",
+    UND_ERR_SOCKET: "连接中断",
+    CERT_HAS_EXPIRED: "证书错误",
+    UNABLE_TO_VERIFY_LEAF_SIGNATURE: "证书错误",
+  };
+  const detail = e?.cause?.message ?? e?.message ?? String(err);
+  return `${known[code] ?? "网络错误"}${code ? ` [${code}]` : ""}: ${detail}`;
+}
+
 const RETRYABLE = new Set([408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524]);
 
 /**
@@ -96,7 +116,7 @@ export class SiteClient {
         signal: AbortSignal.timeout(30_000),
       });
     } catch (err) {
-      throw new FetchError(`Network error: ${String(err)}`, url);
+      throw new FetchError(networkError(err), url);
     }
     const text = await res.text();
     if (looksLikeChallenge(text) || (res.status === 403 && /cloudflare/i.test(res.headers.get("server") ?? ""))) {
@@ -124,7 +144,7 @@ export class SiteClient {
       });
       data = (await res.json()) as typeof data;
     } catch (err) {
-      throw new FetchError(`FlareSolverr unavailable: ${String(err)}`, url, undefined, true);
+      throw new FetchError(`FlareSolverr 无法连接：${networkError(err)}`, url, undefined, true);
     }
     const sol = data.solution;
     if (data.status !== "ok" || !sol) throw new FetchError(`FlareSolverr: ${data.message ?? "failed"}`, url, undefined, true);
@@ -137,6 +157,18 @@ export class SiteClient {
     return sol.response;
   }
 
+  /** One request to `url` without retries, for the settings page's connection test. */
+  async probe(url: string): Promise<{ ok: boolean; ms: number; status?: number; challenge?: boolean; error?: string }> {
+    const start = this.now();
+    try {
+      await this.html(url, 0);
+      return { ok: true, ms: this.now() - start };
+    } catch (err) {
+      const e = err instanceof FetchError ? err : new FetchError(String(err), url);
+      return { ok: false, ms: this.now() - start, status: e.status, challenge: e.challenge, error: e.message };
+    }
+  }
+
   /** Fetches an image or script (not rate limited like pages, but one at a time). */
   binary(url: string, referer?: string): Promise<Binary> {
     const run = this.imageTail.then(async () => {
@@ -147,7 +179,7 @@ export class SiteClient {
           signal: AbortSignal.timeout(30_000),
         });
       } catch (err) {
-        throw new FetchError(`Network error: ${String(err)}`, url);
+        throw new FetchError(networkError(err), url);
       }
       if (!res.ok) throw new FetchError(`HTTP ${res.status}`, url, res.status);
       return {

@@ -211,6 +211,18 @@ export function settingsPage(): Page {
         reload();
       }),
     );
+    const result = h("div", { class: "hint mono", style: "margin-top:10px" });
+    const test = h("button", { class: "btn" }, "测试连接");
+    test.addEventListener("click", () =>
+      void act(test, async () => {
+        result.textContent = "连接中…";
+        const r = await api.post<{ ok: boolean; ms: number; status?: number; challenge?: boolean; error?: string }>("/api/site/test");
+        result.style.color = r.ok ? "var(--ok)" : "var(--danger)";
+        result.textContent = r.ok
+          ? `✓ 连接正常（${r.ms} ms）`
+          : `✗ ${r.challenge ? "遇到人机验证" : "连接失败"}（${r.ms} ms）：${r.error ?? ""}`;
+      }),
+    );
     return h(
       "section",
       { class: "card" },
@@ -225,7 +237,8 @@ export function settingsPage(): Page {
       ),
       h("label", { class: "field" }, h("span", {}, "User-Agent"), ua),
       h("label", { class: "field" }, h("span", {}, "FlareSolverr 地址（可选，自动通过人机验证）"), fs),
-      h("div", { class: "actions" }, save),
+      h("div", { class: "actions" }, save, test),
+      result,
     );
   }
 
