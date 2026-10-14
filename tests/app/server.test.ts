@@ -51,6 +51,8 @@ let mp3: Buffer;
 const siteRequests: string[] = [];
 let ttsRequests: { url: string; text: string }[] = [];
 let ttsStatus = 200;
+/** Called on each speech request (before it answers). */
+let onTts: (() => void) | undefined;
 let services: ReturnType<typeof createServices>;
 let app: ReturnType<typeof createApp>;
 
@@ -67,6 +69,7 @@ async function siteFetch(url: string): Promise<Response> {
 
 async function ttsRequest(req: HttpRequest): Promise<HttpResponse> {
   ttsRequests.push({ url: req.url, text: req.body ? (JSON.parse(req.body) as { text: string }).text : "" });
+  onTts?.();
   if (ttsStatus !== 200) return { status: ttsStatus, headers: {}, body: new ArrayBuffer(0) };
   const body = mp3.buffer.slice(mp3.byteOffset, mp3.byteOffset + mp3.byteLength) as ArrayBuffer;
   return { status: 200, headers: { "content-type": "audio/mpeg" }, body };
@@ -274,6 +277,29 @@ describe("library server", () => {
     ttsStatus = 200;
     await send("PUT", "/api/settings", { keys: { fish: "new-key" } });
     expect((await json<JobsOverview>(call("/api/jobs"))).blocked.fish).toBeUndefined();
+  });
+
+  it.skipIf(!hasFfmpeg)("stops generating a chapter's segments when the queue is paused", async () => {
+    await waitFor(() => !services.jobs.overview().counts.running);
+    services.jobs.setPaused(true);
+    await send("POST", "/api/jobs/clear");
+    await send("DELETE", "/api/books/5369/audio?chapter=180204");
+    await send("POST", "/api/library/clear-segments");
+    ttsRequests = [];
+    // Paused while the first of the chapter's 3 segments is being made.
+    onTts = () => services.jobs.setPaused(true);
+    services.jobs.setPaused(false);
+    await send("POST", "/api/books/5369/generate", { chapters: ["180204"] });
+    const job = await waitFor(async () =>
+      (await json<JobsOverview>(call("/api/jobs"))).jobs.find((j) => j.target === "180204" && j.status === "queued" && j.message?.includes("暂停")),
+    );
+    expect(job).toBeTruthy();
+    expect(ttsRequests).toHaveLength(1);
+    // Resumed: carries on from the segment it stopped at.
+    onTts = undefined;
+    await send("POST", "/api/jobs/resume");
+    await waitFor(async () => (await json<JobsOverview>(call("/api/jobs"))).jobs.find((j) => j.target === "180204" && j.status === "done"));
+    expect(ttsRequests).toHaveLength(3);
   });
 
   it("keeps the reader's settings and merges progress", async () => {
