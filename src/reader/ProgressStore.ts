@@ -6,12 +6,9 @@
  * callers.
  */
 
-import {
-  GEMINI_AHEAD_OPTIONS,
-  GEMINI_DEFAULT_MODEL,
-  GEMINI_DEFAULT_STYLE,
-  GEMINI_DEFAULT_VOICE,
-} from "../speech/GeminiSpeechEngine";
+import { GEMINI_DEFAULT_MODEL, GEMINI_DEFAULT_STYLE, GEMINI_DEFAULT_VOICE } from "../speech/GeminiSpeechEngine";
+import { FISH_DEFAULT_MODEL, FISH_VOICE_ID } from "../speech/FishSpeechEngine";
+import { PAGE_AHEAD_OPTIONS } from "../speech/PageSpeechEngine";
 
 export interface KeyValueStore {
   get(key: string): Promise<string | null>;
@@ -131,8 +128,11 @@ export class ProgressStore {
 
 export type Theme = "system" | "light" | "dark" | "sepia";
 export type FontFamily = "sans" | "serif";
-export type TtsEngine = "system" | "azure" | "google" | "gemini";
+export type TtsEngine = "system" | "azure" | "google" | "gemini" | "fish";
 export type CloudProvider = Exclude<TtsEngine, "system">;
+export const CLOUD_PROVIDERS: CloudProvider[] = ["azure", "google", "gemini", "fish"];
+/** Services that generate whole pages ahead (PageSpeechEngine). */
+export type PageProvider = "gemini" | "fish";
 
 export interface Settings {
   fontSize: number;
@@ -153,6 +153,11 @@ export interface Settings {
   geminiStyle: string;
   /** Site pages of Gemini audio generated ahead of playback. */
   geminiAhead: number;
+  fishModel: string;
+  /** Fish Audio voice model id; empty for the model's default voice. */
+  fishVoice: string;
+  /** Site pages of Fish Audio audio generated ahead of playback. */
+  fishAhead: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -170,6 +175,9 @@ export const DEFAULT_SETTINGS: Settings = {
   geminiVoice: GEMINI_DEFAULT_VOICE,
   geminiStyle: GEMINI_DEFAULT_STYLE,
   geminiAhead: 4,
+  fishModel: FISH_DEFAULT_MODEL,
+  fishVoice: "",
+  fishAhead: 4,
 };
 
 export const RATE_OPTIONS = [0.75, 0.85, 0.9, 1.0, 1.1, 1.2, 1.35, 1.5];
@@ -204,7 +212,7 @@ export function sanitizeSettings(s: Settings): Settings {
     fontFamily: s.fontFamily === "serif" ? "serif" : "sans",
     voiceURI: typeof s.voiceURI === "string" ? s.voiceURI : undefined,
     rate: clamp(s.rate, 0.5, 2, DEFAULT_SETTINGS.rate),
-    ttsEngine: (["azure", "google", "gemini"] as const).includes(s.ttsEngine as "azure") ? s.ttsEngine : "system",
+    ttsEngine: CLOUD_PROVIDERS.includes(s.ttsEngine as CloudProvider) ? s.ttsEngine : "system",
     azureRegion:
       typeof s.azureRegion === "string" && /^[a-z0-9]+$/.test(s.azureRegion.trim().toLowerCase())
         ? s.azureRegion.trim().toLowerCase()
@@ -221,7 +229,11 @@ export function sanitizeSettings(s: Settings): Settings {
     geminiVoice:
       typeof s.geminiVoice === "string" && /^[A-Za-z]+$/.test(s.geminiVoice) ? s.geminiVoice : DEFAULT_SETTINGS.geminiVoice,
     geminiStyle: typeof s.geminiStyle === "string" ? s.geminiStyle.slice(0, 300) : DEFAULT_SETTINGS.geminiStyle,
-    geminiAhead: GEMINI_AHEAD_OPTIONS.includes(s.geminiAhead) ? s.geminiAhead : DEFAULT_SETTINGS.geminiAhead,
+    geminiAhead: PAGE_AHEAD_OPTIONS.includes(s.geminiAhead) ? s.geminiAhead : DEFAULT_SETTINGS.geminiAhead,
+    fishModel:
+      typeof s.fishModel === "string" && /^[a-z0-9.-]+$/.test(s.fishModel) ? s.fishModel : DEFAULT_SETTINGS.fishModel,
+    fishVoice: typeof s.fishVoice === "string" && FISH_VOICE_ID.test(s.fishVoice) ? s.fishVoice : "",
+    fishAhead: PAGE_AHEAD_OPTIONS.includes(s.fishAhead) ? s.fishAhead : DEFAULT_SETTINGS.fishAhead,
   };
 }
 
@@ -277,6 +289,7 @@ export class SecretStore implements KeyValueStore {
 export const AZURE_KEY_SECRET = "biliReader.azureKey";
 export const GOOGLE_KEY_SECRET = "biliReader.googleKey";
 export const GEMINI_KEY_SECRET = "biliReader.geminiKey";
+export const FISH_KEY_SECRET = "biliReader.fishKey";
 
 /** GM storage calls go through the userscript manager and can stall (e.g. while Safari is in the background). */
 const GM_TIMEOUT_MS = 3000;

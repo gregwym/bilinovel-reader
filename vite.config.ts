@@ -31,6 +31,7 @@ const metadata = `// ==UserScript==
 // @connect      speech.microsoft.com
 // @connect      texttospeech.googleapis.com
 // @connect      generativelanguage.googleapis.com
+// @connect      api.fish.audio
 // @homepageURL  ${PAGES_URL}/
 // @updateURL    ${SCRIPT_URL}
 // @downloadURL  ${SCRIPT_URL}
