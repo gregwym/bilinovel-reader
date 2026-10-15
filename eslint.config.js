@@ -19,6 +19,12 @@ export default tseslint.config(
     },
   },
   {
+    files: ["app/web/public/sw.js"],
+    languageOptions: {
+      globals: { self: "readonly", caches: "readonly", location: "readonly", fetch: "readonly", URL: "readonly", Response: "readonly" },
+    },
+  },
+  {
     files: ["scripts/**", "vite.config.ts"],
     languageOptions: { globals: { process: "readonly" } },
   },

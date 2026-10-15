@@ -1,1 +1,55 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#c2410c"/><path d="M136 132c0-11 9-20 20-20h86c31 0 56 25 56 56v232c0-22-18-40-40-40h-102c-11 0-20-9-20-20Z" fill="#fff"/><path d="M376 132c0-11-9-20-20-20h-42c-9 0-16 7-16 16v272c0-22 18-40 40-40h18c11 0 20-9 20-20Z" fill="#fde6d6"/><path d="M332 206v100M352 226v60M312 226v60" stroke="#c2410c" stroke-width="12" stroke-linecap="round"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#fb923c"/>
+      <stop offset="0.55" stop-color="#ea580c"/>
+      <stop offset="1" stop-color="#b8370a"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.25" cy="0.12" r="0.75">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="pageL" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fffaf3"/>
+      <stop offset="1" stop-color="#fde3c8"/>
+    </linearGradient>
+    <linearGradient id="pageR" x1="1" y1="0" x2="0" y2="0">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#fde3c8"/>
+    </linearGradient>
+    <linearGradient id="cup" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#fde9d6"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#431407" flood-opacity="0.33"/>
+    </filter>
+    <clipPath id="r"><rect width="1024" height="1024" rx="232"/></clipPath>
+  </defs>
+  <g clip-path="url(#r)">
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <rect width="1024" height="1024" fill="url(#glow)"/>
+  <g filter="url(#shadow)">
+    <!-- headphone band -->
+    <path d="M236 600 V520 A276 276 0 0 1 788 520 V600" stroke="#fff" stroke-width="52" stroke-linecap="round" fill="none"/>
+    <!-- book -->
+    <path d="M512 486 C444 438 360 432 290 452 V720 C360 702 444 708 512 752 C580 708 664 702 734 720 V452 C664 432 580 438 512 486 Z" fill="#7c2d12"/>
+    <path d="M512 470 C450 424 372 416 306 432 V692 C372 678 450 686 512 728 Z" fill="url(#pageL)"/>
+    <path d="M512 470 C574 424 652 416 718 432 V692 C652 678 574 686 512 728 Z" fill="url(#pageR)"/>
+    <path d="M512 470 V728" stroke="#fdba74" stroke-width="6"/>
+    <g stroke="#fdba74" stroke-width="15" stroke-linecap="round" fill="none">
+      <path d="M352 504 C396 494 436 498 470 516"/>
+      <path d="M352 562 C396 552 436 556 470 574"/>
+      <path d="M352 620 C390 612 424 614 452 626"/>
+      <path d="M554 516 C588 498 628 494 672 504"/>
+      <path d="M554 574 C588 556 628 552 672 562"/>
+      <path d="M572 626 C600 614 634 612 672 620"/>
+    </g>
+    <!-- ear cups -->
+    <rect x="186" y="548" width="104" height="196" rx="48" fill="url(#cup)"/>
+    <rect x="734" y="548" width="104" height="196" rx="48" fill="url(#cup)"/>
+    <rect x="214" y="584" width="48" height="124" rx="24" fill="#fb923c"/>
+    <rect x="762" y="584" width="48" height="124" rx="24" fill="#fb923c"/>
+  </g>
+</g>
+</svg>

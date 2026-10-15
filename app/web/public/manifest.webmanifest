@@ -1,9 +1,22 @@
 {
+  "id": "/",
   "name": "Bili Reader 有声书库",
   "short_name": "Bili Reader",
+  "description": "哔哩轻小说阅读器与有声书库",
+  "lang": "zh-CN",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#f7f5f0",
-  "theme_color": "#c2410c",
-  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+  "theme_color": "#f7f5f0",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ],
+  "shortcuts": [
+    { "name": "任务", "url": "/jobs", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] },
+    { "name": "设置", "url": "/settings", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] }
+  ]
 }

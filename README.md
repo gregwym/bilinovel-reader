@@ -146,7 +146,10 @@ docker compose up -d --build     # 打开 http://<NAS-IP>:8790
 | `STORAGE_TEMPLATE` | 文件路径模板 |
 | `PORT` | 端口，默认 8790 |
 
-在 iPhone 上用 Safari 打开书库后，选“添加到主屏幕”，即可像 App 一样全屏使用。
+书库可以像 App 一样安装（PWA），全屏打开、有自己的图标：
+
+- **iPhone / iPad**：用 Safari 打开书库，分享 →「添加到主屏幕」。
+- **Android / 电脑上的 Chrome、Edge**：地址栏右侧的「安装」按钮，或菜单 →「安装应用 / 添加到主屏幕」。浏览器只对 HTTPS（或 `localhost`）地址提供安装，用 `http://<NAS IP>` 访问时请先在反向代理上配置 HTTPS。
 
 ### 无法添加书籍 / 访问网站
 

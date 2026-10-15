@@ -22,3 +22,8 @@ async function main(): Promise<void> {
 }
 
 void main();
+
+// Installable as an app (home screen / desktop); see public/sw.js.
+if ("serviceWorker" in navigator && import.meta.env.PROD) {
+  window.addEventListener("load", () => void navigator.serviceWorker.register("/sw.js").catch(() => undefined));
+}
