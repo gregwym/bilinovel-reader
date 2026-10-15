@@ -7,10 +7,12 @@ import { navigate } from "../router";
 import {
   act,
   cover,
+  download,
   formatBytes,
   formatDuration,
   formatTime,
   icon,
+  menu,
   openReader,
   poll,
   stepper,
@@ -309,11 +311,14 @@ export function bookPage({ id }: Record<string, string>): Page {
       tools.append(exportBtn);
       if (exp?.status === "failed") tools.append(h("span", { class: "hint", style: "color:var(--danger)" }, exp.message ?? "导出失败"));
     }
-    if (v.export) {
-      tools.append(
-        h("a", { class: "btn small primary", href: `/api/books/${id}/volumes/${vi}/export`, download: "" }, `下载 M4B · ${formatBytes(v.export.bytes)}`),
-      );
-    }
+    const dl = h("button", { class: v.export ? "btn small primary" : "btn small", type: "button" }, icon("download"), "下载");
+    menu(dl, () => [
+      v.export
+        ? { label: "语音（M4B）", hint: formatBytes(v.export.bytes), href: `/api/books/${id}/volumes/${vi}/export` }
+        : { label: "语音（M4B）", hint: "先导出 M4B", disabled: true },
+      { label: "原文（TXT）", hint: "整卷", run: () => saveText(dl, `/api/books/${id}/volumes/${vi}/text`) },
+    ]);
+    tools.append(dl);
     section.append(tools, h("ol", {}, ...v.chapters.map((c) => chapterRow(book, c))));
     return section;
   }
@@ -344,7 +349,15 @@ export function bookPage({ id }: Record<string, string>): Page {
       player = undefined;
       sheet = segmentSheet(book, c);
     });
-    return h("li", { class: cls }, name, segBtn, stateButton(book, c));
+    const dl = h("button", { class: "state", type: "button", title: "下载", "aria-label": "下载" }, icon("download"));
+    const audio = c.audio === "done" && !c.silent;
+    menu(dl, () => [
+      audio
+        ? { label: "语音（MP3）", hint: c.duration ? formatDuration(c.duration) : "", href: `/api/books/${id}/chapters/${c.chapterId}/audio?download` }
+        : { label: "语音（MP3）", hint: c.silent ? "仅插图" : "尚未生成", disabled: true },
+      { label: "原文（TXT）", run: () => saveText(dl, `/api/books/${id}/chapters/${c.chapterId}/text`) },
+    ]);
+    return h("li", { class: cls }, name, segBtn, dl, stateButton(book, c));
   }
 
   function stateButton(book: BookDetail, c: ChapterInfo): HTMLElement {
@@ -391,6 +404,12 @@ export function bookPage({ id }: Record<string, string>): Page {
         btn.addEventListener("click", () => void generate(btn, { chapters: [c.chapterId] }, "本章"));
     }
     return btn;
+  }
+
+  /** Text downloads may fetch chapters from the (rate-limited) site first. */
+  function saveText(btn: HTMLButtonElement, url: string) {
+    const slow = setTimeout(() => toast("正在从网站获取原文…"), 800);
+    return act(btn, () => download(url)).finally(() => clearTimeout(slow));
   }
 
   function cancel(btn: HTMLButtonElement, c: ChapterInfo) {

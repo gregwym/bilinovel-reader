@@ -172,6 +172,30 @@ describe("library server", () => {
     expect((await audio.arrayBuffer()).byteLength).toBe(100);
   });
 
+  it.skipIf(!hasFfmpeg)("downloads a chapter's audio and text, and a volume's text", async () => {
+    const audio = await call("/api/books/5369/chapters/180204/audio?download");
+    expect(audio.status).toBe(200);
+    expect(decodeURIComponent(audio.headers.get("content-disposition")!)).toContain("测试轻小说 - 第四章 分页的章节.mp3");
+    expect((await call("/api/books/5369/chapters/180204/audio")).headers.get("content-disposition")).toBeNull();
+
+    const res = await call("/api/books/5369/chapters/180204/text");
+    expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(decodeURIComponent(res.headers.get("content-disposition")!)).toContain("测试轻小说 - 第四章 分页的章节.txt");
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    expect([...bytes.slice(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
+    const text = new TextDecoder().decode(bytes);
+    const page = await json<{ paragraphs: { text?: string }[] }>(call("/api/page?book=5369&chapter=180204&page=1"));
+    expect(text.startsWith("第四章 分页的章节\r\n\r\n")).toBe(true);
+    expect(text).toContain(page.paragraphs.find((p) => p.text)!.text!.trim());
+    expect(text).not.toContain("\n\n");
+
+    // Chapters the site won't give are marked; the rest is there.
+    const vol = await (await call("/api/books/5369/volumes/0/text")).text();
+    expect(vol).toContain("第四章 分页的章节");
+    expect(vol).toContain("本章获取失败");
+    expect((await call("/api/books/5369/chapters/999/text")).status).toBe(404);
+  });
+
   it.skipIf(!hasFfmpeg)("serves the generated segments to the reader without new requests", async () => {
     const page = await json<{ paragraphs: { text?: string }[] }>(call("/api/page?book=5369&chapter=180204&page=1"));
     const texts = page.paragraphs.flatMap((p) => (p.text ? [p.text] : []));
