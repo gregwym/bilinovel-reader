@@ -30,6 +30,8 @@ export function bookPage({ id }: Record<string, string>): Page {
   const el = h("div", {}, topbar("", "/"));
   const body = h("div");
   el.append(body);
+  /** Volumes whose M4B was asked for while being packed (downloaded when ready). */
+  const wanted = new Set<number>();
   /** Volumes the user opened (kept across refreshes). */
   const open = new Set<number>();
   let opened = false;
@@ -59,6 +61,12 @@ export function bookPage({ id }: Record<string, string>): Page {
     if (sig === last && !force) return;
     last = sig;
     shown = book;
+    // M4B asked for while being packed: saved once it is ready.
+    for (const vi of wanted) {
+      const v = book.volumes[vi];
+      if (v?.export && !v.export.stale) location.href = `/api/books/${id}/volumes/${vi}/export`;
+      if (!v || (v.export && !v.export.stale) || v.exportJob?.status === "failed") wanted.delete(vi);
+    }
     if (force || Date.now() - voicesAt > 15_000) void loadVoices().catch(() => undefined);
     if (!opened) {
       opened = true;
@@ -296,29 +304,33 @@ export function bookPage({ id }: Record<string, string>): Page {
     genBtn.addEventListener("click", () => void generate(genBtn, { volume: vi }, "本卷"));
     const tools = h("div", { class: "tools" }, genBtn);
     const exp = v.exportJob;
-    if (exp && (exp.status === "queued" || exp.status === "running")) {
-      tools.append(h("span", { class: "btn small ghost" }, exp.status === "queued" ? "导出排队中…" : `导出中 ${exp.progress}%`));
-    } else {
-      const exportBtn = h("button", { class: "btn small", disabled: done < linked.length || !linked.length }, v.export ? "重新导出 M4B" : "导出 M4B");
-      exportBtn.title = done < linked.length ? "本卷所有章节生成后才能导出" : "合并为带章节的有声书文件";
-      exportBtn.addEventListener("click", () =>
-        void act(exportBtn, async () => {
-          await api.post(`/api/books/${id}/volumes/${vi}/export`);
-          toast("已开始导出");
-          refresh();
-        }),
-      );
-      tools.append(exportBtn);
-      if (exp?.status === "failed") tools.append(h("span", { class: "hint", style: "color:var(--danger)" }, exp.message ?? "导出失败"));
-    }
-    const dl = h("button", { class: v.export ? "btn small primary" : "btn small", type: "button" }, icon("download"), "下载");
+    const packing = exp && (exp.status === "queued" || exp.status === "running");
+    const fresh = v.export && !v.export.stale;
+    const exportUrl = `/api/books/${id}/volumes/${vi}/export`;
+    const dl = h("button", { class: fresh ? "btn small primary" : "btn small", type: "button" }, icon("download"), "下载");
     menu(dl, () => [
-      v.export
-        ? { label: "语音（M4B）", hint: formatBytes(v.export.bytes), href: `/api/books/${id}/volumes/${vi}/export` }
-        : { label: "语音（M4B）", hint: "先导出 M4B", disabled: true },
+      fresh
+        ? { label: "语音（M4B）", hint: formatBytes(v.export!.bytes), href: exportUrl }
+        : packing
+          ? { label: "语音（M4B）", hint: exp.status === "queued" ? "排队打包中…" : `打包中 ${exp.progress}%`, disabled: true }
+          : done < linked.length || !linked.length
+            ? { label: "语音（M4B）", hint: `还有 ${linked.length - done} 章未生成`, disabled: true }
+            : {
+                label: "语音（M4B）",
+                hint: "打包后下载",
+                run: () =>
+                  act(dl, async () => {
+                    await api.post(exportUrl);
+                    wanted.add(vi);
+                    toast("正在打包整卷语音，完成后自动下载");
+                    refresh();
+                  }),
+              },
       { label: "原文（TXT）", hint: "整卷", run: () => saveText(dl, `/api/books/${id}/volumes/${vi}/text`) },
     ]);
     tools.append(dl);
+    if (packing) tools.append(h("span", { class: "hint" }, exp.status === "queued" ? "M4B 排队打包中…" : `M4B 打包中 ${exp.progress}%`));
+    if (exp?.status === "failed") tools.append(h("span", { class: "hint", style: "color:var(--danger)" }, exp.message ?? "打包失败"));
     section.append(tools, h("ol", {}, ...v.chapters.map((c) => chapterRow(book, c))));
     return section;
   }

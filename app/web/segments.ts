@@ -1,7 +1,7 @@
 import { h } from "../../src/utils/dom";
 import type { BookDetail, ChapterInfo, ChapterSegments } from "../shared/api";
 import { api } from "./api";
-import { icon, poll } from "./ui";
+import { act, download, icon, menu, poll } from "./ui";
 
 /**
  * A chapter's speech segments in a bottom sheet: each one can be played as
@@ -135,6 +135,7 @@ export function segmentSheet(book: BookDetail, chapter: ChapterInfo): { close: (
             { class: "state" },
             playing && waiting ? h("span", { class: "spin dark" }) : s.ready ? icon(playing ? "wave" : "play") : h("span", { class: "hint" }, "未生成"),
           ),
+          downloadButton(i, s.ready),
           s.ready && !old()
             ? h(
                 "button",
@@ -157,6 +158,23 @@ export function segmentSheet(book: BookDetail, chapter: ChapterInfo): { close: (
       }),
     );
     if (waiting && current >= total) list.append(h("li", { class: "segment" }, h("span", { class: "hint" }, "等待下一段生成…")));
+  }
+
+  /** Download menu of one segment: its audio (once generated) or its text. */
+  function downloadButton(i: number, ready: boolean): HTMLButtonElement {
+    const btn = h(
+      "button",
+      { type: "button", class: "icon-btn redo", title: "下载", "aria-label": `下载第 ${i + 1} 段` },
+      icon("download"),
+    );
+    btn.addEventListener("click", (ev) => ev.stopPropagation());
+    const base = `/api/books/${book.id}/chapters/${chapter.chapterId}/segments/${i}`;
+    const query = data ? `?voice=${encodeURIComponent(data.voice)}` : "";
+    menu(btn, () => [
+      ready ? { label: "语音（MP3）", href: `${base}/audio${query}` } : { label: "语音（MP3）", hint: "尚未生成", disabled: true },
+      { label: "原文（TXT）", run: () => act(btn, () => download(`${base}/text${query}`)) },
+    ]);
+    return btn;
   }
 
   /** Drops a segment (e.g. garbled by the service) and has it generated again. */

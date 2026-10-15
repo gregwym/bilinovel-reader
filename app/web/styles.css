@@ -1402,3 +1402,7 @@ textarea {
   width: 16px;
   height: 16px;
 }
+
+.volume .tools .hint {
+  align-self: center;
+}

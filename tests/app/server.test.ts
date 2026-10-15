@@ -1,8 +1,8 @@
 // @vitest-environment node
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadConfig } from "../../app/server/config";
 import { createServices } from "../../app/server/services";
@@ -194,6 +194,38 @@ describe("library server", () => {
     expect(vol).toContain("第四章 分页的章节");
     expect(vol).toContain("本章获取失败");
     expect((await call("/api/books/5369/chapters/999/text")).status).toBe(404);
+  });
+
+  it.skipIf(!hasFfmpeg)("downloads one segment's audio or text", async () => {
+    const audio = await call("/api/books/5369/chapters/180204/segments/1/audio");
+    expect(audio.status).toBe(200);
+    expect(audio.headers.get("content-type")).toBe("audio/mpeg");
+    expect(decodeURIComponent(audio.headers.get("content-disposition")!)).toContain("测试轻小说 - 第四章 分页的章节 - 02.mp3");
+    const [, texts] = services.tts.parts("fish", services.source.cachedChapterPages("5369", "180204").pages);
+    const text = await (await call("/api/books/5369/chapters/180204/segments/1/text")).text();
+    expect(text).toBe(texts.join("\r\n\r\n"));
+    expect((await call("/api/books/5369/chapters/180204/segments/9/audio")).status).toBe(404);
+    expect((await call("/api/books/5369/chapters/180204/segments/1/other")).status).toBe(404);
+  });
+
+  it.skipIf(!hasFfmpeg)("marks a volume's M4B stale once a chapter changed after it", async () => {
+    const file = services.library.exportFile("5369", 0);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, "m4b");
+    const profile = services.tts.profileId(services.tts.profile()!);
+    const t = Date.now() - 60_000;
+    for (const ch of ["180201", "180202"]) {
+      services.db.run("insert into chapter_audio values ('5369', ?, ?, '', 0, null, ?)", ch, profile, t);
+    }
+    services.db.run("update chapter_audio set updated_at = ? where chapter_id = '180204'", t);
+    const exported = async () => (await json<BookDetail>(call("/api/books/5369"))).volumes[0].export;
+    expect(await exported()).toMatchObject({ bytes: 3, stale: false });
+    services.db.run("update chapter_audio set updated_at = ? where chapter_id = '180204'", Date.now() + 60_000);
+    expect((await exported())?.stale).toBe(true);
+    services.db.run("update chapter_audio set updated_at = ? where chapter_id = '180204'", t);
+    services.db.run("delete from chapter_audio where chapter_id in ('180201', '180202')");
+    expect((await exported())?.stale).toBe(true);
+    rmSync(file);
   });
 
   it.skipIf(!hasFfmpeg)("serves the generated segments to the reader without new requests", async () => {

@@ -408,6 +408,27 @@ export function createApp(d: AppDeps): Hono {
     return c.json({ provider: shown.provider, voice, voices, complete, segments } satisfies ChapterSegments);
   });
 
+  /** One segment of a chapter to download: its audio (`voice`, default the current one) or its text. */
+  app.get("/api/books/:id/chapters/:chapter/segments/:index/:kind{audio|text}", async (c) => {
+    const book = d.books.get(c.req.param("id"));
+    const chapterId = c.req.param("chapter");
+    if (!book) return c.json({ error: "书籍不存在" }, 404);
+    const profile = d.tts.profile();
+    const voice = c.req.query("voice") || (profile ? d.tts.profileId(profile) : "");
+    const shown = d.tts.parseProfileId(voice);
+    if (!shown) return c.json({ error: describeError("gemini", "config"), code: "config" }, 400);
+    const index = Number(c.req.param("index"));
+    const texts = d.tts.parts(shown.provider, d.source.cachedChapterPages(book.id, chapterId).pages)[index];
+    if (!texts) return c.json({ error: "片段不存在" }, 404);
+    const title = findChapter(bookCatalog(book), chapterId)?.chapterTitle ?? chapterId;
+    const name = `${safeName(book.title)} - ${safeName(title)} - ${String(index + 1).padStart(2, "0")}`;
+    if (c.req.param("kind") === "text") return textResponse(c, texts.join("\n\n"), `${name}.txt`);
+    const seg = await d.tts.read(shown.provider, d.tts.keyIn(voice, texts));
+    if (!seg) return c.json({ error: "这一段尚未生成" }, 404);
+    const ext = seg.mime === "audio/mpeg" ? "mp3" : seg.mime === "audio/wav" ? "wav" : "bin";
+    return c.body(new Uint8Array(seg.data), 200, { "Content-Type": seg.mime, "Content-Disposition": disposition(`${name}.${ext}`) });
+  });
+
   /**
    * Generates one segment of a chapter again in the current voice (e.g. when
    * the service garbled it). A chapter file made with it is made again too.
