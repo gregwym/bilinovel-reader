@@ -103,8 +103,8 @@ export interface ChapterSegments {
 export interface VolumeInfo {
   title: string;
   chapters: ChapterInfo[];
-  /** Ready export (m4b) of the volume, if any. */
-  export?: { bytes: number; createdAt: number };
+  /** Ready export (m4b) of the volume, if any; `stale` once a chapter changed after it was made. */
+  export?: { bytes: number; createdAt: number; stale: boolean };
   exportJob?: { status: JobStatus; progress: number; message?: string };
 }
 

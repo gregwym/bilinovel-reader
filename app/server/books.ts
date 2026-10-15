@@ -315,7 +315,15 @@ export class Books {
       return {
         title: v.title,
         chapters,
-        export: exp ? { bytes: exp.size, createdAt: exp.mtimeMs } : undefined,
+        export: exp
+          ? {
+              bytes: exp.size,
+              createdAt: exp.mtimeMs,
+              stale: chapters.some(
+                (c) => c.chapterId && (c.audio !== "done" || (rows.get(c.chapterId)?.updated_at ?? 0) > exp.mtimeMs),
+              ),
+            }
+          : undefined,
         exportJob: job ? { status: job.status, progress: Math.round(job.progress * 100), message: job.message ?? undefined } : undefined,
       };
     });
