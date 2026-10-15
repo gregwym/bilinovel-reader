@@ -19,6 +19,7 @@ export const ICONS = {
   gen: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>`,
   image: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/></svg>`,
   list: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1" fill="currentColor"/><circle cx="4.5" cy="12" r="1" fill="currentColor"/><circle cx="4.5" cy="18" r="1" fill="currentColor"/></svg>`,
+  download: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>`,
   close: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>`,
 } as const;
 
@@ -75,6 +76,76 @@ export async function act<T>(button: HTMLButtonElement | null, fn: () => Promise
   } finally {
     if (button) button.disabled = false;
   }
+}
+
+export interface MenuItem {
+  label: string;
+  hint?: string;
+  /** A link (a download the browser handles itself). */
+  href?: string;
+  run?: () => unknown;
+  disabled?: boolean;
+}
+
+/** Opens a small menu under `button` on click. */
+export function menu(button: HTMLButtonElement, items: () => MenuItem[]): void {
+  button.setAttribute("aria-haspopup", "menu");
+  button.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    document.querySelector(".menu")?.remove();
+    const close = () => {
+      pop.remove();
+      document.removeEventListener("click", close);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", close, true);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
+    const pop = h(
+      "div",
+      { class: "menu", role: "menu" },
+      ...items().map((it) => {
+        const content = [h("span", {}, it.label), it.hint ? h("span", { class: "hint" }, it.hint) : null];
+        const el = it.href && !it.disabled
+          ? h("a", { role: "menuitem", href: it.href, download: "" }, ...content)
+          : h("button", { role: "menuitem", type: "button", disabled: !!it.disabled }, ...content);
+        el.addEventListener("click", () => {
+          close();
+          void it.run?.();
+        });
+        return el;
+      }),
+    );
+    document.body.append(pop);
+    const r = button.getBoundingClientRect();
+    const w = pop.offsetWidth;
+    pop.style.left = `${Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8))}px`;
+    const below = r.bottom + 4;
+    pop.style.top = `${below + pop.offsetHeight > window.innerHeight - 8 ? Math.max(8, r.top - pop.offsetHeight - 4) : below}px`;
+    document.addEventListener("click", close);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", close, true);
+  });
+}
+
+/** Downloads a file made on request (slow to make: fetched first, then saved under the server's name). */
+export async function download(url: string): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(url, { credentials: "same-origin" });
+  } catch {
+    throw new Error("无法连接服务器");
+  }
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `HTTP ${res.status}`);
+  }
+  const name = /filename\*=UTF-8''([^;]+)/.exec(res.headers.get("content-disposition") ?? "")?.[1];
+  const href = URL.createObjectURL(await res.blob());
+  const a = h("a", { href, download: name ? decodeURIComponent(name) : "" });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 60_000);
 }
 
 export function switchInput(checked: boolean, onChange: (on: boolean) => void): HTMLElement {

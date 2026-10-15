@@ -5,7 +5,7 @@ import { extname, join, normalize, sep } from "node:path";
 import { Readable } from "node:stream";
 import { Hono, type Context } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
-import { FetchError, ParseError } from "../../src/adapters/types";
+import { FetchError, ParseError, type PageContent } from "../../src/adapters/types";
 import { SpeechEngineError } from "../../src/speech/SpeechEngine";
 import { GEMINI_VOICES } from "../../src/speech/GeminiSpeechEngine";
 import { listFishVoices } from "../../src/speech/FishSpeechEngine";
@@ -18,7 +18,7 @@ import type { SiteSource } from "./site/source";
 import type { Ffmpeg } from "./audio/ffmpeg";
 import { PROVIDERS, READER_SETTINGS_KEY, describeError, type Tts } from "./tts";
 import type { Library } from "./library";
-import { bookCatalog, safeName } from "./library";
+import { bookCatalog, findChapter, safeName } from "./library";
 import { PROGRESS_KEY, type Books } from "./books";
 import { READER_PRIORITY, type Jobs } from "./jobs";
 import type { Planner } from "./planner";
@@ -107,8 +107,19 @@ function sendFile(c: Context, file: string, type: string, extra: Record<string, 
   return new Response(body, { headers: { ...headers, "Content-Length": String(size) } });
 }
 
-/** `filename*` for non-ASCII download names. */
-const disposition = (name: string) => `attachment; filename="audiobook.m4b"; filename*=UTF-8''${encodeURIComponent(name)}`;
+/** `filename*` for non-ASCII download names (`filename` is an ASCII fallback). */
+const disposition = (name: string) =>
+  `attachment; filename="download${extname(name)}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+
+/** A chapter as plain text: its title, then one paragraph per line (images as a mark). */
+function chapterText(title: string, pages: PageContent[]): string {
+  const lines = pages.flatMap((p) => p.paragraphs).flatMap((p) => (p.text?.trim() ? [p.text.trim()] : p.imageUrl ? ["［插图］"] : []));
+  return [title, ...lines].join("\n\n");
+}
+
+const textResponse = (c: Context, text: string, name: string) =>
+  // A BOM and CRLF so older readers and Notepad show it right.
+  c.body(`\ufeff${text.replace(/\n/g, "\r\n")}`, 200, { "Content-Type": "text/plain; charset=utf-8", "Content-Disposition": disposition(name) });
 
 /** Image hosts the proxy refuses (the server's own network). */
 function privateHost(host: string): boolean {
@@ -325,7 +336,47 @@ export function createApp(d: AppDeps): Hono {
     if (!row?.file) return c.body(null, 404);
     const file = d.library.abs(row.file);
     if (!existsSync(file)) return c.body(null, 404);
-    return sendFile(c, file, "audio/mpeg", { "Cache-Control": "private, max-age=3600" });
+    const extra: Record<string, string> = { "Cache-Control": "private, max-age=3600" };
+    const book = c.req.query("download") !== undefined && d.books.get(c.req.param("id"));
+    if (book) {
+      const title = findChapter(bookCatalog(book), row.chapter_id)?.chapterTitle ?? row.chapter_id;
+      extra["Content-Disposition"] = disposition(`${safeName(book.title)} - ${safeName(title)}.mp3`);
+    }
+    return sendFile(c, file, "audio/mpeg", extra);
+  });
+
+  /** A chapter's text as a .txt download (pages not read yet are fetched from the site). */
+  app.get("/api/books/:id/chapters/:chapter/text", async (c) => {
+    const book = d.books.get(c.req.param("id"));
+    const chapterId = c.req.param("chapter");
+    const place = book && findChapter(bookCatalog(book), chapterId);
+    if (!book || !place) return c.json({ error: "该章节不存在" }, 404);
+    try {
+      const pages = await d.source.chapterPages(book.id, chapterId);
+      return textResponse(c, chapterText(place.chapterTitle, pages), `${safeName(book.title)} - ${safeName(place.chapterTitle)}.txt`);
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  /** A volume's text as one .txt; a chapter the site won't give is marked, not fatal. */
+  app.get("/api/books/:id/volumes/:vi/text", async (c) => {
+    const book = d.books.get(c.req.param("id"));
+    const vi = Number(c.req.param("vi"));
+    const volume = book && bookCatalog(book)?.volumes[vi];
+    if (!book || !volume) return c.json({ error: "该卷不存在" }, 404);
+    const parts = [`${book.title}\n\n${volume.title}`];
+    for (const ch of volume.chapters) {
+      if (!ch.chapterId) continue;
+      try {
+        parts.push(chapterText(ch.title, await d.source.chapterPages(book.id, ch.chapterId)));
+      } catch (err) {
+        console.warn(`[library] text of ${book.id}/${ch.chapterId}:`, err instanceof Error ? err.message : String(err));
+        parts.push(`${ch.title}\n\n［本章获取失败：${err instanceof Error ? err.message : String(err)}］`);
+      }
+    }
+    const name = `${safeName(book.title)} - ${String(vi + 1).padStart(2, "0")} ${safeName(volume.title)}.txt`;
+    return textResponse(c, parts.join("\n\n\n"), name);
   });
 
   /** Segments of a chapter in the current voice, or another voice (`voice`, a profile id). */
