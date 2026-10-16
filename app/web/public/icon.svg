@@ -24,9 +24,8 @@
     <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%">
       <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#431407" flood-opacity="0.33"/>
     </filter>
-    <clipPath id="r"><rect width="1024" height="1024" rx="232"/></clipPath>
   </defs>
-  <g clip-path="url(#r)">
+  <g>
   <rect width="1024" height="1024" fill="url(#bg)"/>
   <rect width="1024" height="1024" fill="url(#glow)"/>
   <g filter="url(#shadow)">

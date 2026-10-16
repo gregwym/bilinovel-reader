@@ -166,6 +166,8 @@ export class ReaderView {
   private scrollRaf = 0;
   private chipTimer?: ReturnType<typeof setTimeout>;
   private savedPageStyles?: { html: string; body: string };
+  /** The page's background and theme-color metas while the reader paints them (paintChrome). */
+  private savedChrome?: { bg: string; metas: { el: HTMLMetaElement; content: string }[]; added?: HTMLMetaElement };
   private voices: VoiceInfo[] = [];
   private cloud: Record<CloudProvider, CloudState> = {
     azure: { voices: AZURE_PRESET_VOICES, keySet: false, status: "", usage: "", fallback: false },
@@ -308,6 +310,7 @@ export class ReaderView {
     this.root.hidden = false;
     this.pillEl.hidden = true;
     this.lockPageScroll();
+    this.paintChrome();
   }
 
   collapse(): void {
@@ -316,6 +319,7 @@ export class ReaderView {
     this.root.hidden = true;
     this.pillEl.hidden = false;
     this.unlockPageScroll();
+    this.restoreChrome();
   }
 
   private lockPageScroll(): void {
@@ -332,6 +336,38 @@ export class ReaderView {
     document.documentElement.style.overflow = this.savedPageStyles.html;
     if (document.body) document.body.style.overflow = this.savedPageStyles.body;
     this.savedPageStyles = undefined;
+  }
+
+  /**
+   * Gives the browser's own areas (the status bar, and around the page in
+   * Safari: behind its toolbars and when scrolled past the ends) the bars'
+   * colour, so the bars reach the edges of the screen.
+   */
+  private paintChrome(): void {
+    if (this.root.hidden) return;
+    const color = getComputedStyle(this.root).getPropertyValue("--chrome").trim();
+    if (!color) return;
+    const html = document.documentElement;
+    if (!this.savedChrome) {
+      const metas = [...document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]')];
+      this.savedChrome = { bg: html.style.backgroundColor, metas: metas.map((el) => ({ el, content: el.content })) };
+      if (!metas.length && document.head) {
+        const added = h("meta", { name: "theme-color" });
+        document.head.append(added);
+        this.savedChrome.added = added;
+      }
+    }
+    html.style.backgroundColor = color;
+    for (const { el } of this.savedChrome.metas) el.content = color;
+    if (this.savedChrome.added) this.savedChrome.added.content = color;
+  }
+
+  private restoreChrome(): void {
+    if (!this.savedChrome) return;
+    document.documentElement.style.backgroundColor = this.savedChrome.bg;
+    for (const { el, content } of this.savedChrome.metas) el.content = content;
+    this.savedChrome.added?.remove();
+    this.savedChrome = undefined;
   }
 
   // ---------------------------------------------------------------------------
@@ -756,6 +792,7 @@ export class ReaderView {
   private applyTheme(): void {
     const t: Theme = this.settings.theme;
     this.root.dataset.theme = t === "system" ? (this.systemDark?.matches ? "dark" : "light") : t;
+    this.paintChrome();
   }
 
   private update(patch: Partial<Settings>): void {
