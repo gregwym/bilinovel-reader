@@ -358,14 +358,14 @@ export class ReaderView {
       }
     }
     html.style.backgroundColor = color;
-    for (const { el } of this.savedChrome.metas) el.content = color;
-    if (this.savedChrome.added) this.savedChrome.added.content = color;
+    for (const m of this.savedChrome.metas) m.el = setThemeColor(m.el, color);
+    if (this.savedChrome.added) this.savedChrome.added = setThemeColor(this.savedChrome.added, color);
   }
 
   private restoreChrome(): void {
     if (!this.savedChrome) return;
     document.documentElement.style.backgroundColor = this.savedChrome.bg;
-    for (const { el, content } of this.savedChrome.metas) el.content = content;
+    for (const { el, content } of this.savedChrome.metas) setThemeColor(el, content);
     this.savedChrome.added?.remove();
     this.savedChrome = undefined;
   }
@@ -1069,4 +1069,16 @@ export class ReaderView {
       note,
     ].filter((el): el is HTMLElement => !!el);
   }
+}
+
+/**
+ * Sets a theme-color meta's colour by swapping in a new element: Safari reads
+ * theme-color when the meta is inserted, and ignores later edits to its content.
+ */
+function setThemeColor(el: HTMLMetaElement, color: string): HTMLMetaElement {
+  if (el.content === color) return el;
+  const next = el.cloneNode() as HTMLMetaElement;
+  next.content = color;
+  el.replaceWith(next);
+  return next;
 }
