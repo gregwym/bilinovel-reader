@@ -80,9 +80,18 @@ export class LibraryAdapter implements SiteAdapter {
   }
 }
 
-/** Reader settings and progress on the server, with a local copy for when it can't be reached. */
+/**
+ * Reader settings and progress on the server, with a local copy for when it
+ * can't be reached. What changed offline is sent when the server is back, so
+ * reading offline moves the progress on every device.
+ */
 export class ServerKvStore implements KeyValueStore {
   async get(key: string): Promise<string | null> {
+    if (this.unsent(key)) {
+      const value = this.local(key);
+      if (value !== null) await this.send(key, value);
+      return value;
+    }
     try {
       const { value } = await api.get<{ value: string | null }>(`/api/kv/${encodeURIComponent(key)}`);
       if (value !== null) this.local(key, value);
@@ -94,7 +103,26 @@ export class ServerKvStore implements KeyValueStore {
 
   async set(key: string, value: string): Promise<void> {
     this.local(key, value);
-    await api.put(`/api/kv/${encodeURIComponent(key)}`, { value }).catch(() => undefined);
+    await this.send(key, value);
+  }
+
+  private async send(key: string, value: string): Promise<void> {
+    try {
+      await api.put(`/api/kv/${encodeURIComponent(key)}`, { value });
+      this.unsent(key, false);
+    } catch {
+      this.unsent(key, true);
+    }
+  }
+
+  private unsent(key: string, set?: boolean): boolean {
+    try {
+      if (set === true) localStorage.setItem(`library.unsent.${key}`, "1");
+      if (set === false) localStorage.removeItem(`library.unsent.${key}`);
+      return localStorage.getItem(`library.unsent.${key}`) === "1";
+    } catch {
+      return false;
+    }
   }
 
   private local(key: string, value?: string): string | null {

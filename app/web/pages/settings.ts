@@ -5,6 +5,7 @@ import { FISH_MODELS } from "../../../src/speech/FishSpeechEngine";
 import type { AzureVoice } from "../../../src/speech/AzureSpeechEngine";
 import type { AppInfo, LibraryStats, PageProvider, RescanResult, ServerSettings, ServerSettingsUpdate } from "../../shared/api";
 import { api } from "../api";
+import { offlineSupported, removeSaved, savedBooks, usage } from "../offline";
 import { act, formatBytes, stepper, toast, topbar, type Page } from "../ui";
 
 const READER_SETTINGS_KEY = "biliReader.settings";
@@ -26,11 +27,9 @@ export function settingsPage(): Page {
     ]);
     const reader = { ...DEFAULT_SETTINGS, ...(kv.value ? (JSON.parse(kv.value) as Partial<Settings>) : {}) };
     body.replaceChildren(
-      voiceCard(server, reader),
-      keysCard(server),
-      siteCard(server),
-      libraryCard(server, stats),
-      aboutCard(info),
+      ...[voiceCard(server, reader), keysCard(server), siteCard(server), libraryCard(server, stats), offlineCard(), aboutCard(info)].filter(
+        (el): el is HTMLElement => !!el,
+      ),
     );
   }
 
@@ -340,6 +339,42 @@ export function settingsPage(): Page {
       ),
       h("div", { class: "actions" }, saveTemplate),
       h("div", { class: "actions" }, rescan, clearSegments),
+    );
+  }
+
+  /** Chapters saved on this device (see offline.ts). */
+  function offlineCard(): HTMLElement | null {
+    if (!offlineSupported) return null;
+    const books = Object.values(savedBooks());
+    const chapters = books.reduce((n, b) => n + Object.keys(b).length, 0);
+    const bytes = books.reduce((n, b) => n + Object.values(b).reduce((m, c) => m + c.bytes, 0), 0);
+    const total = h("div", { class: "hint" });
+    void usage().then((n) => (total.textContent = n ? `本站在本机共占用 ${formatBytes(n)}` : ""));
+    const clear = h("button", { class: "btn small danger", disabled: !chapters }, "删除全部本机内容");
+    clear.addEventListener("click", () => {
+      if (!confirm(`删除本机保存的 ${chapters} 章（${formatBytes(bytes)}）？服务器上的内容不受影响。`)) return;
+      void act(clear, async () => {
+        await removeSaved();
+        toast("已删除");
+        reload();
+      });
+    });
+    return h(
+      "section",
+      { class: "card" },
+      h("h2", {}, "离线阅读"),
+      h(
+        "div",
+        { class: "row" },
+        h(
+          "div",
+          { class: "grow" },
+          h("div", { class: "label" }, chapters ? `本机已保存 ${books.length} 本书的 ${chapters} 章 · ${formatBytes(bytes)}` : "本机未保存章节"),
+          h("div", { class: "hint" }, "在书的页面保存章节；只存在这台设备的这个浏览器（或主屏 App）里"),
+          total,
+        ),
+      ),
+      h("div", { class: "actions" }, clear),
     );
   }
 
