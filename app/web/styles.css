@@ -980,6 +980,56 @@ textarea {
   transition: stroke-dashoffset 0.3s;
 }
 
+/* Saved on this device: a mark on the chapter's download button. */
+.state.dl {
+  position: relative;
+}
+
+.state.dl .mark {
+  position: absolute;
+  right: 4px;
+  bottom: 5px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 0 2px var(--card);
+}
+
+.state.dl .mark.ok {
+  background: var(--ok);
+  color: var(--card);
+}
+
+.state.dl .mark.ok svg {
+  width: 9px;
+  height: 9px;
+}
+
+.state.dl .mark.partial {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--ok);
+  background: var(--card);
+}
+
+.state.dl .mark.queued {
+  width: 8px;
+  height: 8px;
+  background: var(--faint);
+}
+
+.state.dl.saving .ring .bar {
+  stroke: var(--ok);
+}
+
+.badge svg {
+  width: 11px;
+  height: 11px;
+}
+
 /* ------------------------------------------------------------------ player */
 
 .player {

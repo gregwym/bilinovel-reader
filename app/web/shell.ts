@@ -5,6 +5,7 @@ import { icon, type Page } from "./ui";
 import { libraryPage } from "./pages/library";
 import { bookPage } from "./pages/book";
 import { jobsPage } from "./pages/jobs";
+import { onSaveChange, saveTasks } from "./offline";
 import { settingsPage } from "./pages/settings";
 import { loginPage } from "./pages/login";
 import { api } from "./api";
@@ -49,15 +50,21 @@ export function startShell(): void {
     if (!path.startsWith("/book/")) document.title = "Bili Reader";
   });
 
-  // Active job count on the tab.
+  // Active job count on the tab: the server's, and saving on this device.
+  let server: JobsOverview | undefined;
+  const show = () => {
+    const blocked = !!server && Object.keys(server.blocked).length > 0;
+    const saving = saveTasks().filter((t) => t.status === "queued" || t.status === "running").length;
+    const n = (server ? server.counts.running + server.counts.queued : 0) + saving;
+    dot.hidden = !n && !blocked;
+    dot.textContent = blocked ? "!" : n > 99 ? "99+" : String(n);
+  };
   const tick = async () => {
     if (document.hidden || location.pathname.startsWith("/login")) return;
-    const jobs = await api.get<JobsOverview>("/api/jobs").catch(() => undefined);
-    if (!jobs) return;
-    const n = jobs.counts.running + jobs.counts.queued;
-    dot.hidden = !n && !Object.keys(jobs.blocked).length;
-    dot.textContent = Object.keys(jobs.blocked).length ? "!" : n > 99 ? "99+" : String(n);
+    server = await api.get<JobsOverview>("/api/jobs").catch(() => server);
+    show();
   };
+  onSaveChange(show);
   void tick();
   setInterval(() => void tick(), 5000);
 }
