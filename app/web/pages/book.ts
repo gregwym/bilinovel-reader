@@ -3,6 +3,7 @@ import type { BookDetail, BookVoice, BookVoices, ChapterInfo, VolumeInfo } from 
 import type { Settings } from "../../../src/reader/ProgressStore";
 import { api } from "../api";
 import { segmentSheet } from "../segments";
+import { offlineSupported, removeSaved, saveChapter, saveChapters, savedChapters } from "../offline";
 import { navigate } from "../router";
 import {
   act,
@@ -17,6 +18,7 @@ import {
   poll,
   stepper,
   switchInput,
+  type MenuItem,
   toast,
   topbar,
   type Page,
@@ -162,7 +164,7 @@ export function bookPage({ id }: Record<string, string>): Page {
             ),
           )
         : null;
-    return [hero, status, intro, audioCard(book), ...book.volumes.map((v, vi) => volume(book, v, vi)), dangerZone(book)].filter(
+    return [hero, status, intro, audioCard(book), offlineCard(book), ...book.volumes.map((v, vi) => volume(book, v, vi)), dangerZone(book)].filter(
       Boolean,
     ) as Node[];
   }
@@ -222,6 +224,52 @@ export function bookPage({ id }: Record<string, string>): Page {
         : null,
       h("div", { class: "actions" }, nextBtn, allBtn),
     );
+  }
+
+  /** Chapters saved on this device, to read and listen to without the server. */
+  function offlineCard(book: BookDetail): HTMLElement | null {
+    if (!offlineSupported) return null;
+    const saved = Object.values(savedChapters(id));
+    const bytes = saved.reduce((s, c) => s + c.bytes, 0);
+    const linked = book.volumes.flatMap((v) => v.chapters).filter((c) => c.chapterId);
+    const from = Math.max(0, linked.findIndex((c) => c.chapterId === (book.position?.chapterId ?? firstChapter(book)?.chapterId)));
+    const nextBtn = h("button", { class: "btn small" }, "从当前起保存 10 章");
+    nextBtn.addEventListener("click", () => void saveMany(nextBtn, linked.slice(from, from + 10).flatMap((c) => c.chapterId ?? [])));
+    const delBtn = saved.length ? h("button", { class: "btn small danger" }, "删除本机内容") : null;
+    delBtn?.addEventListener("click", () => {
+      if (!confirm(`删除本机保存的《${book.title}》${saved.length} 章（${formatBytes(bytes)}）？服务器上的内容不受影响。`)) return;
+      void act(delBtn, async () => {
+        await removeSaved(id);
+        toast("已删除本机内容");
+        draw(book);
+      });
+    });
+    return h(
+      "section",
+      { class: "card" },
+      h("h2", {}, "离线阅读"),
+      h(
+        "div",
+        { class: "row" },
+        h(
+          "div",
+          { class: "grow" },
+          h("div", { class: "label" }, saved.length ? `本机已保存 ${saved.length} 章 · ${formatBytes(bytes)}` : "本机未保存章节"),
+          h("div", { class: "hint" }, "保存原文、插图和当前声音已生成的语音；连不上服务器时照常阅读和朗读。也可在章节或整卷的「下载」菜单里保存"),
+        ),
+      ),
+      h("div", { class: "actions" }, nextBtn, delBtn),
+    );
+  }
+
+  /** Saves chapters on this device, telling progress (pages not read yet are fetched from the site first). */
+  function saveMany(btn: HTMLButtonElement, chapterIds: string[]) {
+    return act(btn, async () => {
+      toast(`正在保存到本机 0/${chapterIds.length} 章…`);
+      const r = await saveChapters(id, chapterIds, (done) => toast(`正在保存到本机 ${done}/${chapterIds.length} 章…`));
+      toast(`已保存 ${r.saved} 章（${formatBytes(r.bytes)}）${r.failed ? `，${r.failed} 章失败` : ""}`);
+      if (shown) draw(shown);
+    });
   }
 
   /** Voices this book has audio in: listen (per chapter), switch to, or delete. */
@@ -327,6 +375,9 @@ export function bookPage({ id }: Record<string, string>): Page {
                   }),
               },
       { label: "原文（TXT）", hint: "整卷", run: () => saveText(dl, `/api/books/${id}/volumes/${vi}/text`) },
+      ...(offlineSupported
+        ? [{ label: "保存到本机", hint: `离线阅读 · ${linked.length} 章`, run: () => saveMany(dl, linked.flatMap((c) => c.chapterId ?? [])) }]
+        : []),
     ]);
     tools.append(dl);
     if (packing) tools.append(h("span", { class: "hint" }, exp.status === "queued" ? "M4B 排队打包中…" : `M4B 打包中 ${exp.progress}%`));
@@ -345,6 +396,8 @@ export function bookPage({ id }: Record<string, string>): Page {
     else if (c.duration) sub.push(formatDuration(c.duration));
     if (c.audio === "stale") sub.push("声音已更换，需重新生成");
     if ((c.audio === "running" || c.audio === "queued" || c.audio === "failed") && c.message) sub.push(c.message);
+    const saved = savedChapters(id)[c.chapterId];
+    if (saved) sub.push(saved.total && saved.segments < saved.total ? `已存本机（语音 ${saved.segments}/${saved.total} 段）` : "已存本机");
     const name = h(
       "div",
       { class: "name" },
@@ -363,13 +416,44 @@ export function bookPage({ id }: Record<string, string>): Page {
     });
     const dl = h("button", { class: "state", type: "button", title: "下载", "aria-label": "下载" }, icon("download"));
     const audio = c.audio === "done" && !c.silent;
+    const chapterId = c.chapterId;
     menu(dl, () => [
       audio
         ? { label: "语音（MP3）", hint: c.duration ? formatDuration(c.duration) : "", href: `/api/books/${id}/chapters/${c.chapterId}/audio?download` }
         : { label: "语音（MP3）", hint: c.silent ? "仅插图" : "尚未生成", disabled: true },
       { label: "原文（TXT）", run: () => saveText(dl, `/api/books/${id}/chapters/${c.chapterId}/text`) },
+      ...(offlineSupported ? offlineItems(dl, chapterId) : []),
     ]);
     return h("li", { class: cls }, name, segBtn, dl, stateButton(book, c));
+  }
+
+  /** Save a chapter on this device (again, to take newly generated audio), or delete it. */
+  function offlineItems(btn: HTMLButtonElement, chapterId: string): MenuItem[] {
+    const saved = savedChapters(id)[chapterId];
+    const save = () =>
+      act(btn, async () => {
+        const slow = setTimeout(() => toast("正在保存到本机…"), 800);
+        try {
+          const r = await saveChapter(id, chapterId);
+          toast(`已保存到本机（${formatBytes(r.bytes)}${r.total ? `，语音 ${r.segments}/${r.total} 段` : "，无语音"}）`);
+        } finally {
+          clearTimeout(slow);
+        }
+        if (shown) draw(shown);
+      });
+    if (!saved) return [{ label: "保存到本机", hint: "离线阅读", run: save }];
+    return [
+      { label: "更新本机内容", hint: formatBytes(saved.bytes), run: save },
+      {
+        label: "从本机删除",
+        run: () =>
+          act(btn, async () => {
+            await removeSaved(id, [chapterId]);
+            toast("已从本机删除");
+            if (shown) draw(shown);
+          }),
+      },
+    ];
   }
 
   function stateButton(book: BookDetail, c: ChapterInfo): HTMLElement {
