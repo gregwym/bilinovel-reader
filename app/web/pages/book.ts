@@ -3,7 +3,7 @@ import type { BookDetail, BookVoice, BookVoices, ChapterInfo, VolumeInfo } from 
 import type { Settings } from "../../../src/reader/ProgressStore";
 import { api } from "../api";
 import { segmentSheet } from "../segments";
-import { offlineSupported, removeSaved, saveChapter, saveChapters, savedChapters } from "../offline";
+import { offlineSupported, onSaveChange, queueSave, removeSaved, savedChapters, savingState, type SavedChapter } from "../offline";
 import { navigate } from "../router";
 import {
   act,
@@ -234,7 +234,7 @@ export function bookPage({ id }: Record<string, string>): Page {
     const linked = book.volumes.flatMap((v) => v.chapters).filter((c) => c.chapterId);
     const from = Math.max(0, linked.findIndex((c) => c.chapterId === (book.position?.chapterId ?? firstChapter(book)?.chapterId)));
     const nextBtn = h("button", { class: "btn small" }, "从当前起保存 10 章");
-    nextBtn.addEventListener("click", () => void saveMany(nextBtn, linked.slice(from, from + 10).flatMap((c) => c.chapterId ?? [])));
+    nextBtn.addEventListener("click", () => saveMany(book, linked.slice(from, from + 10)));
     const delBtn = saved.length ? h("button", { class: "btn small danger" }, "删除本机内容") : null;
     delBtn?.addEventListener("click", () => {
       if (!confirm(`删除本机保存的《${book.title}》${saved.length} 章（${formatBytes(bytes)}）？服务器上的内容不受影响。`)) return;
@@ -255,21 +255,19 @@ export function bookPage({ id }: Record<string, string>): Page {
           "div",
           { class: "grow" },
           h("div", { class: "label" }, saved.length ? `本机已保存 ${saved.length} 章 · ${formatBytes(bytes)}` : "本机未保存章节"),
-          h("div", { class: "hint" }, "保存原文、插图和当前声音已生成的语音；连不上服务器时照常阅读和朗读。也可在章节或整卷的「下载」菜单里保存"),
+          h("div", { class: "hint" }, "保存原文、插图和当前声音已生成的语音；连不上服务器时照常阅读和朗读。也可在章节或整卷的「下载」菜单里保存。章节的下载按钮上：实心勾＝已存（含全部语音），空心圈＝已存原文、语音不全，圆环＝正在保存。进度也在“任务”页"),
         ),
       ),
       h("div", { class: "actions" }, nextBtn, delBtn),
     );
   }
 
-  /** Saves chapters on this device, telling progress (pages not read yet are fetched from the site first). */
-  function saveMany(btn: HTMLButtonElement, chapterIds: string[]) {
-    return act(btn, async () => {
-      toast(`正在保存到本机 0/${chapterIds.length} 章…`);
-      const r = await saveChapters(id, chapterIds, (done) => toast(`正在保存到本机 ${done}/${chapterIds.length} 章…`));
-      toast(`已保存 ${r.saved} 章（${formatBytes(r.bytes)}）${r.failed ? `，${r.failed} 章失败` : ""}`);
-      if (shown) draw(shown);
-    });
+  /** Queues chapters to save on this device (pages not read yet are fetched from the site first). */
+  function saveMany(book: BookDetail, chapters: ChapterInfo[]) {
+    const list = chapters.flatMap((c) => (c.chapterId ? [{ id: c.chapterId, title: c.title }] : []));
+    if (!list.length) return;
+    queueSave(id, book.title, list);
+    toast(list.length > 1 ? `正在保存 ${list.length} 章到本机，进度见“任务”页` : "正在保存到本机…");
   }
 
   /** Voices this book has audio in: listen (per chapter), switch to, or delete. */
@@ -329,6 +327,15 @@ export function bookPage({ id }: Record<string, string>): Page {
     refresh();
   }
 
+  /** How many of a volume's chapters are saved on this device. */
+  function offlineBadge(linked: ChapterInfo[]): HTMLElement | null {
+    if (!offlineSupported) return null;
+    const saved = savedChapters(id);
+    const n = linked.filter((c) => c.chapterId && saved[c.chapterId]).length;
+    if (!n) return null;
+    return h("span", { class: n === linked.length ? "badge ok" : "badge muted", title: `已存本机 ${n}/${linked.length} 章` }, icon("device"), `${n}/${linked.length}`);
+  }
+
   function volume(book: BookDetail, v: VolumeInfo, vi: number): HTMLElement {
     const linked = v.chapters.filter((c) => c.chapterId);
     const done = linked.filter((c) => c.audio === "done").length;
@@ -338,6 +345,7 @@ export function bookPage({ id }: Record<string, string>): Page {
       {},
       h("span", { class: "chev" }, icon("chevron")),
       h("span", { class: "title" }, v.title),
+      offlineBadge(linked),
       done ? h("span", { class: done === linked.length ? "badge ok" : "badge" }, `🎧 ${done}/${linked.length}`) : h("span", { class: "count" }, `${linked.length} 章`),
     );
     const section = h("section", { class: isOpen ? "volume open" : "volume" }, header);
@@ -376,7 +384,7 @@ export function bookPage({ id }: Record<string, string>): Page {
               },
       { label: "原文（TXT）", hint: "整卷", run: () => saveText(dl, `/api/books/${id}/volumes/${vi}/text`) },
       ...(offlineSupported
-        ? [{ label: "保存到本机", hint: `离线阅读 · ${linked.length} 章`, run: () => saveMany(dl, linked.flatMap((c) => c.chapterId ?? [])) }]
+        ? [{ label: "保存到本机", hint: `离线阅读 · ${linked.length} 章`, run: () => saveMany(book, linked) }]
         : []),
     ]);
     tools.append(dl);
@@ -396,8 +404,6 @@ export function bookPage({ id }: Record<string, string>): Page {
     else if (c.duration) sub.push(formatDuration(c.duration));
     if (c.audio === "stale") sub.push("声音已更换，需重新生成");
     if ((c.audio === "running" || c.audio === "queued" || c.audio === "failed") && c.message) sub.push(c.message);
-    const saved = savedChapters(id)[c.chapterId];
-    if (saved) sub.push(saved.total && saved.segments < saved.total ? `已存本机（语音 ${saved.segments}/${saved.total} 段）` : "已存本机");
     const name = h(
       "div",
       { class: "name" },
@@ -414,46 +420,61 @@ export function bookPage({ id }: Record<string, string>): Page {
       player = undefined;
       sheet = segmentSheet(book, c);
     });
-    const dl = h("button", { class: "state", type: "button", title: "下载", "aria-label": "下载" }, icon("download"));
+    const dl = downloadButton(c.chapterId);
     const audio = c.audio === "done" && !c.silent;
-    const chapterId = c.chapterId;
     menu(dl, () => [
       audio
         ? { label: "语音（MP3）", hint: c.duration ? formatDuration(c.duration) : "", href: `/api/books/${id}/chapters/${c.chapterId}/audio?download` }
         : { label: "语音（MP3）", hint: c.silent ? "仅插图" : "尚未生成", disabled: true },
       { label: "原文（TXT）", run: () => saveText(dl, `/api/books/${id}/chapters/${c.chapterId}/text`) },
-      ...(offlineSupported ? offlineItems(dl, chapterId) : []),
+      ...(offlineSupported ? offlineItems(book, c) : []),
     ]);
     return h("li", { class: cls }, name, segBtn, dl, stateButton(book, c));
   }
 
   /** Save a chapter on this device (again, to take newly generated audio), or delete it. */
-  function offlineItems(btn: HTMLButtonElement, chapterId: string): MenuItem[] {
+  function offlineItems(book: BookDetail, c: ChapterInfo): MenuItem[] {
+    const chapterId = c.chapterId!;
+    const busy = savingState(id, chapterId);
+    if (busy) return [{ label: "保存到本机", hint: "fraction" in busy ? `保存中 ${Math.round(busy.fraction * 100)}%` : "排队中", disabled: true }];
     const saved = savedChapters(id)[chapterId];
-    const save = () =>
-      act(btn, async () => {
-        const slow = setTimeout(() => toast("正在保存到本机…"), 800);
-        try {
-          const r = await saveChapter(id, chapterId);
-          toast(`已保存到本机（${formatBytes(r.bytes)}${r.total ? `，语音 ${r.segments}/${r.total} 段` : "，无语音"}）`);
-        } finally {
-          clearTimeout(slow);
-        }
-        if (shown) draw(shown);
-      });
-    if (!saved) return [{ label: "保存到本机", hint: "离线阅读", run: save }];
+    if (!saved) return [{ label: "保存到本机", hint: "离线阅读", run: () => saveMany(book, [c]) }];
     return [
-      { label: "更新本机内容", hint: formatBytes(saved.bytes), run: save },
+      { label: "更新本机内容", hint: `${formatBytes(saved.bytes)} · ${offlineAudio(saved)}`, run: () => saveMany(book, [c]) },
       {
         label: "从本机删除",
-        run: () =>
-          act(btn, async () => {
-            await removeSaved(id, [chapterId]);
-            toast("已从本机删除");
-            if (shown) draw(shown);
-          }),
+        run: async () => {
+          await removeSaved(id, [chapterId]);
+          toast("已从本机删除");
+          if (shown) draw(shown);
+        },
       },
     ];
+  }
+
+  /** The chapter's download button, which also shows whether it is saved on this device (or being saved). */
+  function downloadButton(chapterId: string): HTMLButtonElement {
+    const btn = h("button", { class: "state dl", type: "button", "aria-label": "下载" });
+    const busy = offlineSupported ? savingState(id, chapterId) : undefined;
+    const saved = offlineSupported ? savedChapters(id)[chapterId] : undefined;
+    if (busy && "fraction" in busy) {
+      btn.innerHTML = ring(busy.fraction);
+      btn.classList.add("saving");
+      btn.title = `正在保存到本机 ${Math.round(busy.fraction * 100)}%`;
+      return btn;
+    }
+    btn.append(icon("download"));
+    if (busy) {
+      btn.append(h("span", { class: "mark queued" }));
+      btn.title = "等待保存到本机";
+    } else if (saved) {
+      const full = !saved.total || saved.segments >= saved.total;
+      btn.append(full ? h("span", { class: "mark ok" }, icon("tick")) : h("span", { class: "mark partial" }));
+      btn.title = `已存本机（${formatBytes(saved.bytes)}，${offlineAudio(saved)}）`;
+    } else {
+      btn.title = "下载";
+    }
+    return btn;
   }
 
   function stateButton(book: BookDetail, c: ChapterInfo): HTMLElement {
@@ -472,9 +493,7 @@ export function bookPage({ id }: Record<string, string>): Page {
         break;
       case "running": {
         const p = (c.progress ?? 0) / 100;
-        const r = 9;
-        const len = 2 * Math.PI * r;
-        btn.innerHTML = `<svg class="ring" viewBox="0 0 22 22"><circle class="track" cx="11" cy="11" r="${r}"/><circle class="bar" cx="11" cy="11" r="${r}" stroke-dasharray="${len}" stroke-dashoffset="${len * (1 - p)}"/></svg>`;
+        btn.innerHTML = ring(p);
         btn.title = `生成中 ${c.progress ?? 0}%（点击取消）`;
         btn.addEventListener("click", () => cancel(btn, c));
         break;
@@ -550,10 +569,21 @@ export function bookPage({ id }: Record<string, string>): Page {
 
   void load().catch((err: Error) => body.replaceChildren(h("div", { class: "banner error" }, err.message)));
   const stop = poll(() => load(), 3000);
+  // Saving on this device: redrawn as it goes (at most once a frame).
+  let frame = 0;
+  const unsubscribe = onSaveChange(() => {
+    if (frame || !shown) return;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      if (shown) draw(shown);
+    });
+  });
   return {
     el,
     dispose: () => {
       stop();
+      unsubscribe();
+      cancelAnimationFrame(frame);
       player?.remove();
       sheet?.close();
     },
@@ -568,4 +598,14 @@ function firstChapter(book: BookDetail): { chapterId: string; pageIndex: number 
 function currentVolume(book: BookDetail): number {
   const id = book.position?.chapterId;
   return id ? book.volumes.findIndex((v) => v.chapters.some((c) => c.chapterId === id)) : -1;
+}
+
+function ring(fraction: number): string {
+  const r = 9;
+  const len = 2 * Math.PI * r;
+  return `<svg class="ring" viewBox="0 0 22 22"><circle class="track" cx="11" cy="11" r="${r}"/><circle class="bar" cx="11" cy="11" r="${r}" stroke-dasharray="${len}" stroke-dashoffset="${len * (1 - fraction)}"/></svg>`;
+}
+
+function offlineAudio(saved: SavedChapter): string {
+  return saved.total ? `语音 ${saved.segments}/${saved.total} 段` : "无语音";
 }

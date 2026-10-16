@@ -1,7 +1,8 @@
 import { h } from "../../../src/utils/dom";
 import type { JobInfo, JobStatus, JobsOverview } from "../../shared/api";
 import { api } from "../api";
-import { act, formatTime, poll, progressBar, toast, topbar, type Page } from "../ui";
+import { cancelSave, offlineSupported, onSaveChange, saveTasks, type SaveTask } from "../offline";
+import { act, formatBytes, formatTime, poll, progressBar, toast, topbar, type Page } from "../ui";
 
 const STATUS_LABEL: Record<JobStatus, string> = {
   queued: "排队",
@@ -17,8 +18,10 @@ export function jobsPage(): Page {
   const el = h("div");
   const pauseBtn = h("button", { class: "btn small" });
   el.append(topbar("任务", undefined, pauseBtn));
+  /** Saving on this device: runs in this browser, not on the server. */
+  const local = h("div");
   const body = h("div");
-  el.append(body);
+  el.append(local, body);
   let state: JobsOverview | undefined;
   let last = "";
 
@@ -135,6 +138,59 @@ export function jobsPage(): Page {
     );
   }
 
+  function drawLocal() {
+    const tasks = offlineSupported ? saveTasks() : [];
+    if (!tasks.length) return local.replaceChildren();
+    local.replaceChildren(h("div", { class: "section-title" }, "保存到本机"), h("section", { class: "card" }, ...tasks.map(saveTask)));
+  }
+
+  function saveTask(t: SaveTask): HTMLElement {
+    const active = t.status === "queued" || t.status === "running";
+    const cancel = active ? h("button", { class: "btn small ghost" }, "取消") : null;
+    cancel?.addEventListener("click", () => cancelSave(t.id));
+    const current = t.chapters.find((c) => c.id === t.current);
+    const total = t.chapters.length;
+    const title = total === 1 ? t.chapters[0].title : current ? current.title : `${total} 章`;
+    const state =
+      t.status === "queued"
+        ? "排队"
+        : t.status === "running"
+          ? `${t.done}/${total} 章`
+          : t.status === "cancelled"
+            ? `已取消 · ${t.done}/${total} 章`
+            : `完成 · ${formatBytes(t.bytes)}`;
+    return h(
+      "div",
+      { class: "job" },
+      h(
+        "div",
+        { class: "body" },
+        h("div", { class: "title" }, title),
+        h("a", { class: "book", href: `/book/${t.bookId}`, "data-link": true }, `${t.bookTitle} · ${state} · ${formatTime(t.updatedAt)}`),
+        t.failed ? h("div", { class: "msg error" }, `${t.failed} 章失败（网站或服务器无法访问）`) : null,
+        t.status === "running" ? progressBar((t.done + t.fraction) / total) : null,
+      ),
+      cancel,
+    );
+  }
+
+  let frame = 0;
+  const unsubscribe = onSaveChange(() => {
+    if (frame) return;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      drawLocal();
+    });
+  });
+  drawLocal();
   void load().catch((err: Error) => toast(err.message));
-  return { el, dispose: poll(load, 2000) };
+  const stop = poll(load, 2000);
+  return {
+    el,
+    dispose: () => {
+      stop();
+      unsubscribe();
+      cancelAnimationFrame(frame);
+    },
+  };
 }

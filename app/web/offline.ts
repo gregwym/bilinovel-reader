@@ -1,5 +1,6 @@
 import type { PageContent } from "../../src/adapters/types";
 import type { ChapterSegments } from "../shared/api";
+import { formatBytes, toast } from "./ui";
 
 /**
  * Chapters saved on this device for reading and listening without the
@@ -75,7 +76,12 @@ async function saveBook(cache: Cache, bookId: string): Promise<void> {
  * hasn't been yet), its illustrations, and the segments of the current voice
  * that are generated. Returns what was saved.
  */
-export async function saveChapter(bookId: string, chapterId: string, withBook = true): Promise<SavedChapter> {
+export async function saveChapter(
+  bookId: string,
+  chapterId: string,
+  withBook = true,
+  step: (fraction: number) => void = () => undefined,
+): Promise<SavedChapter> {
   const cache = await caches.open(CACHE);
   void navigator.storage?.persist?.().catch(() => false);
   if (withBook) await saveBook(cache, bookId);
@@ -89,7 +95,10 @@ export async function saveChapter(bookId: string, chapterId: string, withBook = 
       if (p.imageUrl) bytes += (await keep(cache, `/api/img?url=${encodeURIComponent(p.imageUrl)}`).catch(() => ({ bytes: 0 }))).bytes;
     }
     if (data.nextType !== "same-chapter-page") break;
+    // Pages are the first part of the work; how many there are is known only at the last.
+    step(Math.min(0.4, 0.15 * (page + 1)));
   }
+  step(0.4);
   let segments = 0;
   let total = 0;
   const list = await fetch(`/api/books/${bookId}/chapters/${chapterId}/segments`, { credentials: "same-origin" })
@@ -97,8 +106,9 @@ export async function saveChapter(bookId: string, chapterId: string, withBook = 
     .catch(() => undefined);
   if (list) {
     total = list.segments.length;
-    for (const seg of list.segments) {
-      if (!seg.ready) continue;
+    const ready = list.segments.filter((seg) => seg.ready);
+    for (const [i, seg] of ready.entries()) {
+      step(0.4 + (0.6 * i) / ready.length);
       // The same URL the reader asks for (serverStore in reader.ts).
       const got = await keep(cache, `/api/segments/${list.provider}/${encodeURIComponent(seg.key)}`).catch(() => undefined);
       if (!got) continue;
@@ -113,27 +123,126 @@ export async function saveChapter(bookId: string, chapterId: string, withBook = 
   return saved;
 }
 
-/** Saves chapters one after another; `progress` is told after each. */
-export async function saveChapters(
-  bookId: string,
-  chapterIds: string[],
-  progress: (done: number) => void,
-): Promise<{ saved: number; failed: number; bytes: number }> {
-  const cache = await caches.open(CACHE);
-  await saveBook(cache, bookId);
-  let saved = 0;
-  let failed = 0;
-  let bytes = 0;
-  for (const id of chapterIds) {
-    try {
-      bytes += (await saveChapter(bookId, id, false)).bytes;
-      saved++;
-    } catch {
-      failed++;
-    }
-    progress(saved + failed);
+/** Saving a list of chapters on this device, shown on the book and jobs pages. */
+export interface SaveTask {
+  id: number;
+  bookId: string;
+  bookTitle: string;
+  chapters: { id: string; title: string }[];
+  status: "queued" | "running" | "done" | "cancelled";
+  /** Chapters finished (saved or failed). */
+  done: number;
+  failed: number;
+  bytes: number;
+  /** Chapter being saved and how far (0–1). */
+  current?: string;
+  fraction: number;
+  updatedAt: number;
+}
+
+const tasks: SaveTask[] = [];
+const listeners = new Set<() => void>();
+let nextId = 1;
+let running = false;
+
+/** Tasks, newest first: the ones queued or running, and the last few finished. */
+export function saveTasks(): readonly SaveTask[] {
+  return tasks;
+}
+
+/** Calls `fn` on every change of the tasks; returns the unsubscribe. */
+export function onSaveChange(fn: () => void): () => void {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+}
+
+const changed = () => listeners.forEach((fn) => fn());
+
+/** Whether a chapter waits to be saved or is being saved (`fraction` 0–1). */
+export function savingState(bookId: string, chapterId: string): { queued: true } | { fraction: number } | undefined {
+  for (const t of tasks) {
+    if (t.bookId !== bookId || (t.status !== "queued" && t.status !== "running")) continue;
+    if (t.current === chapterId) return { fraction: t.fraction };
+    const i = t.chapters.findIndex((c) => c.id === chapterId);
+    if (i >= t.done) return { queued: true };
   }
-  return { saved, failed, bytes };
+  return undefined;
+}
+
+/** Queues chapters to save; they are saved one after another, also while other pages are open. */
+export function queueSave(bookId: string, bookTitle: string, chapters: { id: string; title: string }[]): SaveTask {
+  const task: SaveTask = {
+    id: nextId++,
+    bookId,
+    bookTitle,
+    chapters,
+    status: "queued",
+    done: 0,
+    failed: 0,
+    bytes: 0,
+    fraction: 0,
+    updatedAt: Date.now(),
+  };
+  tasks.unshift(task);
+  // The last few finished ones stay listed.
+  const finished = tasks.filter((t) => t.status === "done" || t.status === "cancelled");
+  for (const old of finished.slice(5)) tasks.splice(tasks.indexOf(old), 1);
+  changed();
+  void run();
+  return task;
+}
+
+export function cancelSave(id: number): void {
+  const task = tasks.find((t) => t.id === id);
+  if (!task || task.status === "done" || task.status === "cancelled") return;
+  task.status = "cancelled";
+  task.current = undefined;
+  task.updatedAt = Date.now();
+  changed();
+}
+
+async function run(): Promise<void> {
+  if (running) return;
+  running = true;
+  try {
+    for (let task = next(); task; task = next()) {
+      task.status = "running";
+      changed();
+      const cache = await caches.open(CACHE);
+      await saveBook(cache, task.bookId);
+      for (const ch of task.chapters.slice(task.done)) {
+        // cancelSave() changes it meanwhile.
+        if ((task.status as SaveTask["status"]) === "cancelled") break;
+        task.current = ch.id;
+        task.fraction = 0;
+        changed();
+        try {
+          const saved = await saveChapter(task.bookId, ch.id, false, (f) => {
+            task.fraction = f;
+            changed();
+          });
+          task.bytes += saved.bytes;
+        } catch {
+          task.failed++;
+        }
+        task.done++;
+        task.updatedAt = Date.now();
+      }
+      task.current = undefined;
+      if ((task.status as SaveTask["status"]) === "running") {
+        task.status = "done";
+        const failed = task.failed ? `，${task.failed} 章失败` : "";
+        toast(`《${task.bookTitle}》已保存到本机 ${task.done - task.failed} 章（${formatBytes(task.bytes)}）${failed}`);
+      }
+      changed();
+    }
+  } finally {
+    running = false;
+  }
+}
+
+function next(): SaveTask | undefined {
+  return [...tasks].reverse().find((t) => t.status === "queued");
 }
 
 /** Removes saved chapters (all of a book's without `chapterIds`, or everything without `bookId`). */
