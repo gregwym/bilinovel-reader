@@ -1,5 +1,6 @@
 :root {
   --bg: #f7f5f0;
+  --bar: rgba(247, 245, 240, 0.88);
   --card: #ffffff;
   --fg: #2a2723;
   --muted: #8a847a;
@@ -26,6 +27,7 @@
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #141312;
+    --bar: rgba(20, 19, 18, 0.88);
     --card: #1e1d1b;
     --fg: #e4ded4;
     --muted: #8f887d;
@@ -124,7 +126,8 @@ textarea {
   justify-content: center;
   gap: 8px;
   padding: 6px 12px calc(var(--safe-bottom) + 6px);
-  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  /* Plain rgba, like --bg: Safari tints its bottom bar with this colour. */
+  background: var(--bar);
   backdrop-filter: saturate(1.6) blur(18px);
   -webkit-backdrop-filter: saturate(1.6) blur(18px);
   border-top: 1px solid var(--border);
