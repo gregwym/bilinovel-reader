@@ -545,16 +545,29 @@ export class ReaderView {
   /** Keeps the spoken paragraph in view without fighting a user who is scrolling. */
   follow(id: string): void {
     if (this.userScrolledRecently) return;
+    // In the background a smooth scroll never runs; revealActive() catches up on return.
+    this.bringIntoBand(id, document.hidden ? "instant" : "smooth");
+  }
+
+  /**
+   * Jumps straight to the spoken paragraph, for coming back to the page:
+   * while it was in the background the view could not keep up.
+   */
+  revealActive(): void {
+    if (this.activeId) this.bringIntoBand(this.activeId, "instant");
+  }
+
+  private bringIntoBand(id: string, behavior: ScrollBehavior): void {
     if (this.anchor?.id !== id) this.anchor = undefined;
     const el = this.byId.get(id);
-    if (!el) return;
+    if (!el || this.root.hidden) return;
     const view = this.scrollEl.getBoundingClientRect();
     const r = el.getBoundingClientRect();
     const bandTop = view.top + view.height * 0.1;
     const bandBottom = view.top + view.height * 0.75;
     if (r.top < bandTop || r.bottom > bandBottom) {
       const target = this.scrollEl.scrollTop + (r.top - view.top) - view.height * 0.3;
-      this.scrollEl.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
+      this.scrollEl.scrollTo({ top: Math.max(0, target), behavior });
     }
   }
 
