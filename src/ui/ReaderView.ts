@@ -357,13 +357,24 @@ export class ReaderView {
         this.savedChrome.added = added;
       }
     }
-    // Safari 26 ignores theme-color and samples the body and full-width fixed
-    // elements instead; set the colour on each directly so a change is seen.
+    // Safari 26 ignores theme-color and samples the body and the sticky bars
+    // at the screen's edges instead (see .br-top in styles.css).
     html.style.backgroundColor = color;
     if (document.body) document.body.style.backgroundColor = color;
-    this.root.style.backgroundColor = color;
     for (const m of this.savedChrome.metas) m.el = setThemeColor(m.el, color);
     if (this.savedChrome.added) this.savedChrome.added = setThemeColor(this.savedChrome.added, color);
+    this.resampleTint();
+  }
+
+  /**
+   * Safari 26 samples the bars' colour only when a fixed element comes or goes
+   * (WebKit's WebPage::didAddOrRemoveViewportConstrainedObjects), not when a
+   * colour changes: add an invisible one for a frame.
+   */
+  private resampleTint(): void {
+    const probe = h("div", { class: "br-tint-probe" });
+    this.root.append(probe);
+    requestAnimationFrame(() => requestAnimationFrame(() => probe.remove()));
   }
 
   private restoreChrome(): void {
@@ -829,8 +840,12 @@ export class ReaderView {
   }
 
   private closeSheet(): void {
-    this.sheetEl?.remove();
+    if (!this.sheetEl) return;
+    this.sheetEl.remove();
     this.sheetEl = undefined;
+    // While the sheet covered the bars Safari kept their old colour; a theme
+    // picked in it shows only now.
+    this.resampleTint();
   }
 
   private renderSheetIfOpen(): void {
