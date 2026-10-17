@@ -167,7 +167,7 @@ export class ReaderView {
   private chipTimer?: ReturnType<typeof setTimeout>;
   private savedPageStyles?: { html: string; body: string };
   /** The page's background and theme-color metas while the reader paints them (paintChrome). */
-  private savedChrome?: { bg: string; metas: { el: HTMLMetaElement; content: string }[]; added?: HTMLMetaElement };
+  private savedChrome?: { bg: string; bodyBg: string; metas: { el: HTMLMetaElement; content: string }[]; added?: HTMLMetaElement };
   private voices: VoiceInfo[] = [];
   private cloud: Record<CloudProvider, CloudState> = {
     azure: { voices: AZURE_PRESET_VOICES, keySet: false, status: "", usage: "", fallback: false },
@@ -350,14 +350,18 @@ export class ReaderView {
     const html = document.documentElement;
     if (!this.savedChrome) {
       const metas = [...document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]')];
-      this.savedChrome = { bg: html.style.backgroundColor, metas: metas.map((el) => ({ el, content: el.content })) };
+      this.savedChrome = { bg: html.style.backgroundColor, bodyBg: document.body?.style.backgroundColor ?? "", metas: metas.map((el) => ({ el, content: el.content })) };
       if (!metas.length && document.head) {
         const added = h("meta", { name: "theme-color" });
         document.head.append(added);
         this.savedChrome.added = added;
       }
     }
+    // Safari 26 ignores theme-color and samples the body and full-width fixed
+    // elements instead; set the colour on each directly so a change is seen.
     html.style.backgroundColor = color;
+    if (document.body) document.body.style.backgroundColor = color;
+    this.root.style.backgroundColor = color;
     for (const m of this.savedChrome.metas) m.el = setThemeColor(m.el, color);
     if (this.savedChrome.added) this.savedChrome.added = setThemeColor(this.savedChrome.added, color);
   }
@@ -365,6 +369,7 @@ export class ReaderView {
   private restoreChrome(): void {
     if (!this.savedChrome) return;
     document.documentElement.style.backgroundColor = this.savedChrome.bg;
+    if (document.body) document.body.style.backgroundColor = this.savedChrome.bodyBg;
     for (const { el, content } of this.savedChrome.metas) setThemeColor(el, content);
     this.savedChrome.added?.remove();
     this.savedChrome = undefined;
