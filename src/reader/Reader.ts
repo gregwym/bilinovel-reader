@@ -7,6 +7,7 @@ import {
   type SiteAdapter,
 } from "../adapters/types";
 import { SpeechPlayer, splitIntoChunks, type PlaybackSource } from "../speech/SpeechPlayer";
+import { spokenText } from "../speech/spoken";
 import { WebSpeechEngine, type SpeechEngine } from "../speech/SpeechEngine";
 import {
   AzureSpeechEngine,
@@ -1070,7 +1071,12 @@ export class Reader implements PlaybackSource {
   private pagesFrom(id: string, count: number, maxChunk: number): PageContext {
     const p = this.buffer.get(id);
     if (!p) return { pages: [], index: 0 };
-    const chunks = (ps: ReaderParagraph[]) => ps.flatMap((q) => (q.text ? splitIntoChunks(q.text, maxChunk) : []));
+    const title = this.buffer.chapterOf(id)?.title;
+    const chunks = (ps: ReaderParagraph[]) =>
+      ps.flatMap((q, i) => {
+        const text = spokenText(ps, i, q.pageIndex, title);
+        return text ? splitIntoChunks(text, maxChunk) : [];
+      });
     let page = this.buffer.pageParagraphs(p.chapterId, p.pageIndex);
     const ctx: PageContext = { pages: [chunks(page)], index: chunks(page.slice(0, page.indexOf(p))).length };
     while (ctx.pages.length < count && page.length) {
@@ -1311,7 +1317,10 @@ export class Reader implements PlaybackSource {
   }
 
   textOf(id: string): string | undefined {
-    return this.buffer.get(id)?.text;
+    const p = this.buffer.get(id);
+    if (!p || p.pageIndex !== 0) return p?.text;
+    const page = this.buffer.pageParagraphs(p.chapterId, 0);
+    return spokenText(page, page.indexOf(p), 0, this.buffer.chapterOf(id)?.title);
   }
 
   next(id: string): string | "pending" | "end" {

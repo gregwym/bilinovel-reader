@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { PageContent } from "../../src/adapters/types";
 import { splitIntoChunks } from "../../src/speech/SpeechPlayer";
+import { spokenText } from "../../src/speech/spoken";
 import { SpeechEngineError } from "../../src/speech/SpeechEngine";
 import {
   hash,
@@ -207,7 +208,10 @@ export class Tts {
   parts(provider: PageProvider, pages: PageContent[]): string[][] {
     const max = this.backends[provider].maxChars;
     return pages.flatMap((page) => {
-      const texts = page.paragraphs.flatMap((p) => (p.text ? splitIntoChunks(p.text, max) : []));
+      const texts = page.paragraphs.flatMap((_, i) => {
+        const text = spokenText(page.paragraphs, i, page.pageIndex, page.chapterTitle);
+        return text ? splitIntoChunks(text, max) : [];
+      });
       return texts.length ? splitPage(texts, max) : [];
     });
   }

@@ -188,6 +188,15 @@ npm run serve      # 在局域网提供 dist/，iPhone 打开 http://<电脑IP>:
 
 `main` 分支的每次 push 都会由 GitHub Actions 执行 lint → test → build，并把脚本和安装页发布到 GitHub Pages（仓库需在 Settings → Pages 中把 Source 设为 **GitHub Actions**）。
 
+### userscript 与服务器版保持同步
+
+阅读器有两种形态：userscript（`src/main.ts`）和有声书库的网页 / PWA（`app/web/`，服务器在 `app/server/`）。两者共用 `src/` 下的阅读器、解析和语音代码，**任何功能或优化都要两边同时生效**：
+
+- 阅读和朗读的行为写在共享的 `src/`（`Reader`、`ReaderView`、`speech/`）里，不要只改其中一个入口。
+- 服务器预生成的语音必须和阅读器请求的文字完全一致（缓存按文字计算 key）：朗读文字一律经过 `src/speech/spoken.ts`，分段经过 `splitIntoChunks` / `splitPage`，服务器端入口是 `app/server/tts.ts` 的 `parts()`。
+- 只有一方才有的能力（例如服务器的预生成、离线保存，userscript 的站点页面接管）要在 PR 说明里写明原因。
+- 每个 PR 都要分别验证 userscript（`npm run build`）和服务器版（`npm run build:app`）。
+
 ## 架构
 
 ```
@@ -217,6 +226,7 @@ src/
 │   ├── FishSpeechEngine.ts    Fish Audio 语音
 │   ├── FallbackSpeechEngine.ts 云端语音失败（额度/密钥/网络）时自动改用系统语音
 │   ├── SpeechPlayer.ts        逐段朗读状态机 idle/playing/paused/buffering/error
+│   ├── spoken.ts              每段实际朗读的文字（章节首段前读标题），阅读器和服务器共用
 │   └── VoiceManager.ts        中文声音列表
 ├── ui/                        ReaderView（Shadow DOM）与样式
 └── utils/                     RequestQueue（串行限速 + 重试）、日志、DOM 工具
