@@ -10,21 +10,40 @@ import { act, formatBytes, stepper, toast, topbar, type Page } from "../ui";
 
 const READER_SETTINGS_KEY = "biliReader.settings";
 type Usage = Record<PageProvider, { requests: number; chars: number }>;
+type Data = [ServerSettings & { usage: Usage }, { value: string | null }, LibraryStats, AppInfo];
 
 /** Voice, keys, site access and library storage. */
 export function settingsPage(): Page {
   const el = h("div", {}, topbar("设置"));
   const body = h("div");
   el.append(body);
-  void load().catch((err: Error) => body.replaceChildren(h("div", { class: "banner error" }, err.message)));
+  const PATHS = ["/api/settings", `/api/kv/${READER_SETTINGS_KEY}`, "/api/library/stats", "/api/info"];
+  /** What is shown; edited fields aren't redrawn under the user when the server's answer comes. */
+  let shown = "";
+  let touched = false;
+  body.addEventListener("input", () => (touched = true));
+  body.addEventListener("pointerdown", () => (touched = true));
+  const reload = () => void load().catch((err: Error) => toast(err.message));
+  // Drawn at once from the last answers; the server's replace them when they come (unless being edited).
+  const kept = PATHS.map((p) => api.cached(p));
+  if (kept.every((d) => d !== undefined)) {
+    shown = JSON.stringify(kept);
+    draw(kept as Data);
+  }
+  void load(false).catch((err: Error) =>
+    shown ? toast(err.message) : body.replaceChildren(h("div", { class: "banner error" }, err.message)),
+  );
 
-  async function load() {
-    const [server, kv, stats, info] = await Promise.all([
-      api.get<ServerSettings & { usage: Usage }>("/api/settings"),
-      api.get<{ value: string | null }>(`/api/kv/${READER_SETTINGS_KEY}`),
-      api.get<LibraryStats>("/api/library/stats"),
-      api.get<AppInfo>("/api/info"),
-    ]);
+  async function load(redraw = true) {
+    const data = (await Promise.all(PATHS.map((p) => api.keep(p)))) as Data;
+    const sig = JSON.stringify(data);
+    if (!redraw && (sig === shown || touched)) return;
+    shown = sig;
+    touched = false;
+    draw(data);
+  }
+
+  function draw([server, kv, stats, info]: Data) {
     const reader = { ...DEFAULT_SETTINGS, ...(kv.value ? (JSON.parse(kv.value) as Partial<Settings>) : {}) };
     body.replaceChildren(
       ...[voiceCard(server, reader), keysCard(server), siteCard(server), libraryCard(server, stats), offlineCard(), aboutCard(info)].filter(
@@ -33,7 +52,6 @@ export function settingsPage(): Page {
     );
   }
 
-  const reload = () => void load().catch((err: Error) => toast(err.message));
 
   async function saveServer(patch: ServerSettingsUpdate, message = "已保存") {
     await api.put("/api/settings", patch);

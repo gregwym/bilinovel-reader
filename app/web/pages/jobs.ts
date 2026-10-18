@@ -32,8 +32,8 @@ export function jobsPage(): Page {
     }),
   );
 
-  const load = async () => {
-    const data = await api.get<JobsOverview>("/api/jobs");
+  const load = async () => show(await api.keep<JobsOverview>("/api/jobs"));
+  const show = (data: JobsOverview) => {
     state = data;
     pauseBtn.textContent = data.paused ? "继续" : "暂停";
     pauseBtn.className = data.paused ? "btn small primary" : "btn small";
@@ -183,6 +183,9 @@ export function jobsPage(): Page {
     });
   });
   drawLocal();
+  // Drawn at once from the last answer; the server's replaces it when it comes.
+  const kept = api.cached<JobsOverview>("/api/jobs");
+  if (kept) show(kept);
   void load().catch((err: Error) => toast(err.message));
   const stop = poll(load, 2000);
   return {
