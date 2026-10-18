@@ -10,6 +10,8 @@ import { createApp } from "../../app/server/http";
 import { Ffmpeg } from "../../app/server/audio/ffmpeg";
 import type { BookDetail, BookSummary, BookVoices, ChapterSegments, JobsOverview } from "../../app/shared/api";
 import type { HttpRequest, HttpResponse } from "../../src/utils/http";
+import type { PageContent } from "../../src/adapters/types";
+import { spokenText } from "../../src/speech/spoken";
 import { fixture } from "../helpers";
 
 const ORIGIN = "https://www.bilinovel.com";
@@ -229,8 +231,10 @@ describe("library server", () => {
   });
 
   it.skipIf(!hasFfmpeg)("serves the generated segments to the reader without new requests", async () => {
-    const page = await json<{ paragraphs: { text?: string }[] }>(call("/api/page?book=5369&chapter=180204&page=1"));
-    const texts = page.paragraphs.flatMap((p) => (p.text ? [p.text] : []));
+    const page = await json<PageContent>(call("/api/page?book=5369&chapter=180204&page=0"));
+    // As the reader builds them (Reader.pagesFrom): the chapter's title comes first.
+    const texts = page.paragraphs.flatMap((_, i) => spokenText(page.paragraphs, i, page.pageIndex, page.chapterTitle) ?? []);
+    expect(texts[0].startsWith("第四章 分页的章节")).toBe(true);
     ttsRequests = [];
     const res = await send("POST", "/api/segments/fish", { texts, voice: { model: "s2.1-pro-free", voice: "" } });
     expect(res.status).toBe(200);
