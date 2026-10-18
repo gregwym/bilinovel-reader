@@ -36,8 +36,34 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   return data;
 }
 
+const KEPT = "app.kept:";
+
+/** Keeps a GET's answer on this device (see `api.keep`). */
+function store(path: string, data: unknown): void {
+  try {
+    localStorage.setItem(KEPT + path, JSON.stringify(data));
+  } catch {
+    // Storage full or blocked: the page just waits for the server next time.
+  }
+}
+
 export const api = {
   get: <T>(path: string) => call<T>("GET", path),
+  /** A GET whose answer is kept on this device, so the page can be drawn from `cached` at once next time. */
+  keep: async <T>(path: string) => {
+    const data = await call<T>("GET", path);
+    store(path, data);
+    return data;
+  },
+  /** The last answer `keep` got for `path`, if any (shown while the server answers). */
+  cached: <T>(path: string): T | undefined => {
+    try {
+      const raw = localStorage.getItem(KEPT + path);
+      return raw ? (JSON.parse(raw) as T) : undefined;
+    } catch {
+      return undefined;
+    }
+  },
   post: <T>(path: string, body: unknown = {}) => call<T>("POST", path, body),
   put: <T>(path: string, body: unknown) => call<T>("PUT", path, body),
   patch: <T>(path: string, body: unknown) => call<T>("PATCH", path, body),

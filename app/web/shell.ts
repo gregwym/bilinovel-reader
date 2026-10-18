@@ -51,7 +51,9 @@ export function startShell(): void {
   });
 
   // Active job count on the tab: the server's, and saving on this device.
-  let server: JobsOverview | undefined;
+  let server = api.cached<JobsOverview>("/api/jobs");
+  /** One request at a time: a busy server isn't sent more while it is slow to answer. */
+  let busy = false;
   const show = () => {
     const blocked = !!server && Object.keys(server.blocked).length > 0;
     const saving = saveTasks().filter((t) => t.status === "queued" || t.status === "running").length;
@@ -60,8 +62,10 @@ export function startShell(): void {
     dot.textContent = blocked ? "!" : n > 99 ? "99+" : String(n);
   };
   const tick = async () => {
-    if (document.hidden || location.pathname.startsWith("/login")) return;
-    server = await api.get<JobsOverview>("/api/jobs").catch(() => server);
+    if (busy || document.hidden || location.pathname.startsWith("/login")) return;
+    busy = true;
+    server = await api.keep<JobsOverview>("/api/jobs").catch(() => server);
+    busy = false;
     show();
   };
   onSaveChange(show);

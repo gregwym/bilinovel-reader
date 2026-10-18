@@ -47,7 +47,7 @@ export function bookPage({ id }: Record<string, string>): Page {
 
   const loadVoices = async () => {
     voicesAt = Date.now();
-    voices = await api.get<BookVoices>(`/api/books/${id}/voices`);
+    voices = await api.keep<BookVoices>(`/api/books/${id}/voices`);
     if (shown) draw(shown);
   };
 
@@ -57,8 +57,8 @@ export function bookPage({ id }: Record<string, string>): Page {
     window.scrollTo(0, y);
   };
 
-  const load = async (force = false) => {
-    const book = await api.get<BookDetail>(`/api/books/${id}`);
+  const load = async (force = false) => show(await api.keep<BookDetail>(`/api/books/${id}`), force);
+  const show = (book: BookDetail, force = false) => {
     const sig = JSON.stringify(book);
     if (sig === last && !force) return;
     last = sig;
@@ -567,7 +567,11 @@ export function bookPage({ id }: Record<string, string>): Page {
     );
   }
 
-  void load().catch((err: Error) => body.replaceChildren(h("div", { class: "banner error" }, err.message)));
+  // Drawn at once from the last answers; the server's replace them when they come.
+  voices = api.cached<BookVoices>(`/api/books/${id}/voices`);
+  const kept = api.cached<BookDetail>(`/api/books/${id}`);
+  if (kept) show(kept);
+  void load().catch((err: Error) => (kept ? toast(err.message) : body.replaceChildren(h("div", { class: "banner error" }, err.message))));
   const stop = poll(() => load(), 3000);
   // Saving on this device: redrawn as it goes (at most once a frame).
   let frame = 0;

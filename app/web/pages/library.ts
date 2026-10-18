@@ -55,14 +55,17 @@ export function libraryPage(): Page {
   el.append(h("header", { class: "topbar" }, h("h1", {}, "书架")), form, error, body);
 
   let last = "";
-  const load = async () => {
-    const books = await api.get<BookSummary[]>("/api/books");
+  const show = (books: BookSummary[]) => {
     const sig = JSON.stringify(books);
     if (sig === last) return;
     last = sig;
     body.replaceChildren(...render(books));
   };
-  void load().catch((err: Error) => body.replaceChildren(h("div", { class: "banner error" }, err.message)));
+  const load = async () => show(await api.keep<BookSummary[]>("/api/books"));
+  // Drawn at once from the last answer; the server's replaces it when it comes.
+  const kept = api.cached<BookSummary[]>("/api/books");
+  if (kept) show(kept);
+  void load().catch((err: Error) => (kept ? toast(err.message) : body.replaceChildren(h("div", { class: "banner error" }, err.message))));
   return { el, dispose: poll(load, 5000) };
 }
 
