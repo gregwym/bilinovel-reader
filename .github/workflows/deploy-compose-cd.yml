@@ -1,0 +1,46 @@
+name: Deploy published image
+
+on:
+  workflow_run:
+    workflows: ["Docker image"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
+      (github.event.workflow_run.event == 'workflow_dispatch' || !contains(github.event.workflow_run.head_commit.message, '[skip-cd]'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sign and notify the fixed VPS route
+        env:
+          BILI_READER_CD_HMAC: ${{ secrets.BILI_READER_CD_HMAC }}
+        run: |
+          set -euo pipefail
+          signature="$(python3 - "$GITHUB_EVENT_PATH" <<'PY'
+          import hashlib
+          import hmac
+          import os
+          import sys
+
+          with open(sys.argv[1], "rb") as event_file:
+              body = event_file.read()
+          digest = hmac.new(
+              os.environ["BILI_READER_CD_HMAC"].encode(), body, hashlib.sha256
+          ).hexdigest()
+          print("sha256=" + digest)
+          PY
+          )"
+          status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --header 'X-GitHub-Event: workflow_run' \
+            --header "X-Hub-Signature-256: ${signature}" \
+            --data-binary "@${GITHUB_EVENT_PATH}" \
+            'https://bili.dolast.com/hooks/bili-reader')"
+          test "$status" = 202
