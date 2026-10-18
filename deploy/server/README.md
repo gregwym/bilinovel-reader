@@ -1,4 +1,4 @@
-# Server CD: signed push notification, locally authorized rootless rollout
+# Server CD: isolated webhook receiver, locally authorized rollout
 
 This is a deployment kit, **not an automatically installed host migration**.
 GitHub gets no SSH credentials or sudo rights. A webhook can only send a constant
@@ -22,6 +22,80 @@ artifact digest, and deploys only that artifact's immutable image digest.
   webhook authenticity, **not image safety**. Rootless containers share the host
   kernel and are not a VM security boundary.
 
+## Receiver on the existing rootful Docker engine
+
+The receiver can run on the existing system Docker engine using
+`../webhook/Dockerfile` and `../webhook/compose.yml`. This **does not** authorize the receiver
+or worker to control that engine, and requires no unprivileged user namespaces.
+The rootless prerequisites below concern the application deployment worker only.
+Do not run both the container receiver and `bili-reader-hook.service`.
+
+Administrator-managed receiver setup:
+
+1. Create the dedicated `bili-hook` UID/GID and `bili-signal` group, with no login,
+   sudo or Docker membership. Set `CD_HOOK_UID`, `CD_HOOK_GID`,
+   `CD_SIGNAL_GID` to their numeric host IDs in an administrator-owned Compose
+   env file. Provision the secret as root:bili-hook0640. Never commit secrets.
+   Also set `CD_HOOK_CONFIG_DIR=/etc/bili-reader-hook`,
+   `CD_HOOK_SIGNAL_DIR=/run/bili-reader-cd`, `CD_HOOK_NETWORK=bili_hook_net`,
+   `CD_HOOK_DNS=cd-hook-reader` (unique across targets).
+   Install `../webhook/reader.json` as policy.json (root:bili-hook0640) in the config
+   directory. The socket path in this policy is the **container-side**
+   `/run/cd-hook/wake.sock`, mapping to the worker's existing host socket.
+2. Provision `/run/bili-reader-cd` as bili-run:bili-signal0710 using tmpfiles.
+   The worker owns the directory and creates wake.sock as bili-run:bili-signal0620.
+   Mount the directory read-only: Unix datagram send is allowed by socket
+   permissions, but the receiver cannot create, remove or replace its entries.
+   Start the worker first; without it valid notifications return503, not202.
+3. Create a dedicated Docker bridge network `bili_hook_net`, attach only Caddy
+   and this receiver, and proxy the exact `/hooks/bili-reader` path to
+   `cd-hook-reader:18791`. Do not attach it to shared application networks or publish
+   a host port. Binding0.0.0.0 is intentional **inside this container only**;
+   host service mode still requires a private explicit address.
+4. From the reviewed source checkout, run Docker Compose with
+   `deploy/webhook/compose.yml` and the administrator-owned env file to
+   build/start the receiver. For an installed copy outside the checkout, build
+   the image from the reviewed source first and use `up --no-build` (the relative
+   build context is for the source tree, not `/etc`). Recreate/restart the
+   receiver after replacing its bind-mounted secret or recreating the runtime
+   directory. Keep default seccomp enabled; do not disable SELinux or add
+   privileged/socket mounts to bypass denials. Validate host policy explicitly.
+5. Verify the effective UID, read-only mounts, resource limits, capabilities,
+   no-new-privileges and absence of Docker socket. Test valid/invalid signatures,
+   the fixed wake datagram, and public proxy routing before installing the GitHub
+   webhook. Container202 is notification acceptance, not deployment success.
+
+This isolates the receiver, not the whole deployment system. Containers still
+share the host kernel. The existing CentOS7 host is not thereby made supported or
+fully secure. **The deployment worker remains rootless-only and disabled until
+its separate runtime migration gate is satisfied.** No system Docker authority
+is granted by this receiver configuration.
+
+## Reusing the receiver for other CD targets
+
+The receiver is shared code, **not a shared deployment credential**. Its source
+lives in `deploy/webhook/receiver.py`; the `--config` interface and Compose template are application-independent.
+Run a separate Compose project/UID/secret/signal group/config directory/proxy
+network per target (for example `-p cd-hook-reader` and `-p cd-hook-rsshub`).
+Caddy routes each exact path to that target's unique upstream alias, such as
+`cd-hook-reader:18791` or `cd-hook-rsshub:18791`, never the ambiguous common service name.
+Never attach a receiver to another target's signal directory or proxy network.
+
+Each root-owned local JSON policy fixes repository name **and numeric ID**,
+workflow path, branch, public `/hooks/<target>` route and local socket path.
+Each instance reads only its own policy/secret and has its own request cache.
+Remote payloads cannot choose targets, images, shell commands or mount paths.
+Keep identities distinct from the accounts that own application data.
+
+An RSSHub receiver can reuse the same image with a different policy, but its
+repository/workflow must first be verified; no guessed RSSHub workflow or live
+RSSHub deployment is supplied here. Its independent worker must verify release
+provenance and immutable digest, enforce a fixed local runtime configuration,
+serialize updates, and provide application-appropriate health checks/rollback.
+The reader worker/deploy script are intentionally **not** a generic privileged
+Docker API. The shared receiver does not solve the separate executor permission
+decision or enable CD automatically for any target.
+
 ## Supported installation prerequisites
 
 Use a maintained Linux OS with working user namespaces, a tested rootless Docker
@@ -44,7 +118,8 @@ directives is not successful isolation validation.
    application data. Provision subordinate UID/GID ranges and rootless Docker per
    its official instructions; enable the user daemon with lingering. The provided
    services are clients of that daemon, not a system-wide rootless dockerd unit.
-2. Install `.py`, `.sh`, and `check.mjs` from this reviewed kit at
+2. Install `worker.py`, `.sh`, and `check.mjs` from this reviewed kit, plus
+   `../webhook/receiver.py` as `webhook.py`, at
    `/opt/bili-reader-cd` root:root; directories0755, code0644, deploy script0755.
    Provision `/srv/bili-reader/{data,library}` and `/srv/bili-reader-cd` as
    bili-run:bili-run0700, plus its backups directory. Install tmpfiles.conf and
