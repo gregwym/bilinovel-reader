@@ -8,3 +8,10 @@ library
 coverage
 .git
 *.log
+.github
+.env
+.env.*
+*.pem
+*.key
+compose*.yml
+docker-compose*.yml
