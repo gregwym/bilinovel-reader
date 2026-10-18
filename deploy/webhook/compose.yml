@@ -1,0 +1,37 @@
+# Administrator-managed receiver only. Never use this file to run the worker.
+services:
+  cd-hook:
+    image: cd-hook:reviewed
+    build:
+      context: ../..
+      dockerfile: deploy/webhook/Dockerfile
+    user: "${CD_HOOK_UID:?set dedicated host bili-hook UID}:${CD_HOOK_GID:?set dedicated host bili-hook GID}"
+    group_add:
+      - "${CD_SIGNAL_GID:?set host bili-signal GID}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 64m
+    cpus: 0.25
+    pids_limit: 16
+    restart: unless-stopped
+    volumes:
+      - ${CD_HOOK_CONFIG_DIR:?set administrator-owned target config directory}/secret:/etc/cd-hook/secret:ro
+      - ${CD_HOOK_CONFIG_DIR:?set administrator-owned target config directory}/policy.json:/etc/cd-hook/policy.json:ro
+      - ${CD_HOOK_SIGNAL_DIR:?set this target socket directory}:/run/cd-hook:ro
+    command: ["--config", "/etc/cd-hook/policy.json", "--secret-file", "/etc/cd-hook/secret"]
+    networks:
+      hook-proxy:
+        aliases:
+          - ${CD_HOOK_DNS:?set unique per-target Caddy upstream alias}
+    logging:
+      driver: json-file
+      options:
+        max-size: 2m
+        max-file: "2"
+    # No published ports, Docker socket, app data, or deployment configuration.
+networks:
+  hook-proxy:
+    external: true
+    name: ${CD_HOOK_NETWORK:?set dedicated Caddy-to-target network}
