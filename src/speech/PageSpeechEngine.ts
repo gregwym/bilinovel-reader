@@ -537,6 +537,7 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
   private token = 0;
   private guard?: ReturnType<typeof setTimeout>;
   private unlocked = false;
+  private held = false;
 
   constructor(
     private readonly backend: PageBackend<C>,
@@ -578,6 +579,7 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
 
   async speak(text: string, options: SpeakOptions): Promise<"done" | "cancelled"> {
     const token = ++this.token;
+    this.held = false;
     this.settleCurrent("cancelled");
     const cfg = this.getConfig();
     if (!cfg?.key) {
@@ -616,7 +618,22 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
     void this.audio.play().catch(() => undefined);
   }
 
+  pauseInPlace(): boolean {
+    if (!this.speaking) return false;
+    this.held = true;
+    this.audio.pause();
+    return true;
+  }
+
+  resumeInPlace(): boolean {
+    if (!this.held || !this.settle) return false;
+    this.held = false;
+    void this.audio.play().catch(() => this.stop());
+    return true;
+  }
+
   stop(): void {
+    this.held = false;
     this.token++;
     this.settleCurrent("cancelled");
     this.pauseAudio();
@@ -835,7 +852,7 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
       };
       // Paused by the system (call, other audio, lock-screen control).
       const onPause = () => {
-        if (this.settle === settle && audio.paused && !audio.ended) settle("cancelled");
+        if (this.settle === settle && !this.held && audio.paused && !audio.ended) settle("cancelled");
       };
       this.settle = settle;
       audio.addEventListener("timeupdate", check);

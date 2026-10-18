@@ -58,6 +58,7 @@ export abstract class CloudSpeechEngine implements SpeechEngine {
   private objectUrl?: string;
   private token = 0;
   private unlocked = false;
+  private held = false;
 
   constructor(protected readonly options: CloudEngineOptions = {}) {
     this.request = options.request ?? httpRequest;
@@ -142,7 +143,7 @@ export abstract class CloudSpeechEngine implements SpeechEngine {
       // control): report it so the player shows "paused" instead of waiting forever.
       // A stale event from stopping the previous chunk arrives after play() and is ignored.
       const onPause = () => {
-        if (this.settle === settle && audio.paused && !audio.ended) settle("cancelled");
+        if (this.settle === settle && !this.held && audio.paused && !audio.ended) settle("cancelled");
       };
       audio.addEventListener("ended", onEnded);
       audio.addEventListener("error", onError);
@@ -173,7 +174,22 @@ export abstract class CloudSpeechEngine implements SpeechEngine {
     void this.audio.play().catch(() => undefined);
   }
 
+  pauseInPlace(): boolean {
+    if (!this.speaking) return false;
+    this.held = true;
+    this.audio.pause();
+    return true;
+  }
+
+  resumeInPlace(): boolean {
+    if (!this.held || !this.settle) return false;
+    this.held = false;
+    void this.audio.play().catch(() => this.stop());
+    return true;
+  }
+
   stop(): void {
+    this.held = false;
     this.token++;
     const settle = this.settle;
     this.settle = undefined;

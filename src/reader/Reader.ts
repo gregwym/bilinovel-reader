@@ -6,7 +6,7 @@ import {
   type PageContent,
   type SiteAdapter,
 } from "../adapters/types";
-import { SpeechPlayer, splitIntoChunks, type PlaybackSource } from "../speech/SpeechPlayer";
+import { SpeechPlayer, splitIntoChunks, type PlaybackSource, type PlayerState } from "../speech/SpeechPlayer";
 import { spokenText } from "../speech/spoken";
 import { WebSpeechEngine, type SpeechEngine } from "../speech/SpeechEngine";
 import {
@@ -348,6 +348,7 @@ export class Reader implements PlaybackSource {
       onState: (state, message) => {
         this.view.setPlayerState(state, message);
         if (state === "idle") this.view.setActive(undefined);
+        this.setMediaPlaybackState(state);
       },
       onParagraph: (id) => {
         this.view.setSelected(undefined);
@@ -1297,6 +1298,13 @@ export class Reader implements PlaybackSource {
         /* unsupported action */
       }
     }
+  }
+
+  /** Tells the system whether we are playing, so a headphone click sends "play" rather than "pause". */
+  private setMediaPlaybackState(state: PlayerState): void {
+    const ms = (navigator as Navigator & { mediaSession?: MediaSession }).mediaSession;
+    if (!ms) return;
+    ms.playbackState = state === "playing" || state === "buffering" ? "playing" : state === "idle" ? "none" : "paused";
   }
 
   private updateMediaMetadata(chapterTitle?: string): void {
