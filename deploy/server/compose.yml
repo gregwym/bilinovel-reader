@@ -1,0 +1,16 @@
+services:
+  bili-reader:
+    image: ${BILI_IMAGE:?immutable image required}
+    container_name: bili-reader
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    env_file: /etc/bili-reader-cd/app.env
+    # Administrator fixes this to the host-side Caddy bridge gateway, not 0.0.0.0.
+    ports: ["${BILI_BIND_IP:?Caddy bridge gateway required}:18790:8790"]
+    tmpfs: [/tmp:size=128m,mode=1777]
+    volumes:
+      - /srv/bili-reader/data:/data
+      - /srv/bili-reader/library:/library
