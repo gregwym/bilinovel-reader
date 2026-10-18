@@ -127,10 +127,23 @@ Fish Audio 的 `s2.1-pro-free` 模型通过 API **免费使用至 2026-11-30**�
 
 ### 部署（Docker）
 
+GitHub Actions 会自动构建镜像并发布到 `ghcr.io/gregwym/bilinovel-reader`（amd64 和 arm64，适用于大多数 NAS）：
+
+- `latest`：`main` 分支的最新版本；
+- `0.10.8` 这样的版本号：对应 `package.json` 里的版本；
+- `sha-<commit>`：某次提交。
+
+GHCR 新建的镜像默认是私有的：第一次发布后，在仓库主页右侧的 Packages → `bilinovel-reader` → Package settings 里把可见性改成 Public，NAS 才能免登录拉取。
+
+只需要 `docker-compose.yml` 一个文件：
+
 ```bash
-git clone https://github.com/gregwym/bilinovel-reader.git && cd bilinovel-reader
-docker compose up -d --build     # 打开 http://<NAS-IP>:8790
+mkdir bili-reader && cd bili-reader
+curl -O https://raw.githubusercontent.com/gregwym/bilinovel-reader/main/docker-compose.yml
+docker compose up -d             # 打开 http://<NAS-IP>:8790
 ```
+
+更新：`docker compose pull && docker compose up -d`。想从源码自己构建，把 `docker-compose.yml` 里的 `image:` 换成 `build: .`，再运行 `docker compose up -d --build`。
 
 `docker-compose.yml` 挂载两个目录：`./data`（数据库、语音片段缓存、导出文件）和 `./library`（整理好的有声书）。
 

@@ -1,10 +1,17 @@
 # Bili Reader library (NAS): web app + audiobook generation server.
-FROM node:24-alpine AS build
+# The build output and the production dependencies are plain JavaScript, so they
+# are built once on the build machine; only the final stage is per platform.
+FROM --platform=$BUILDPLATFORM node:24-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
 RUN npm run build:app
+
+FROM --platform=$BUILDPLATFORM node:24-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
 
 FROM node:24-alpine
 RUN apk add --no-cache ffmpeg tini
@@ -14,8 +21,8 @@ ENV NODE_ENV=production \
     DATA_DIR=/data \
     LIBRARY_DIR=/library \
     WEB_DIR=/app/dist-app/web
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+COPY package.json ./
+COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist-app ./dist-app
 VOLUME ["/data", "/library"]
 EXPOSE 8790
