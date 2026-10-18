@@ -31,8 +31,8 @@ export function createServices(config: Config, version: string, options: Service
   const client = new SiteClient(() => settings.get(), options.fetch, options.sleep);
   const source = new SiteSource(db, client, () => settings.get().siteOrigin);
   const ffmpeg = options.ffmpeg ?? new Ffmpeg(config.ffmpeg, config.ffprobe);
-  const tts = new Tts(db, settings, ffmpeg, config.dataDir, options.request, options.sleep);
-  const library = new Library(db, settings, ffmpeg, config.libraryDir, config.dataDir);
+  const tts = new Tts(db, settings, ffmpeg, config.dataDir, config.libraryDir, options.request, options.sleep);
+  const library = new Library(db, settings, ffmpeg, tts, config.libraryDir, config.dataDir);
   const books = new Books(db, settings, source, client, library, tts, ffmpeg);
   const jobs = new Jobs(db, source, tts, library, ffmpeg);
   const planner = new Planner(books, jobs, tts, library);

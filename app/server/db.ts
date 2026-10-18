@@ -71,6 +71,8 @@ const MIGRATIONS = [
   `,
   // Paragraph timing method of each segment (see BOUNDS_VERSION).
   `alter table segments add column bounds_v integer not null default 0;`,
+  // A segment inside its chapter's library file: the audio offset there (null: its own file).
+  `alter table segments add column start integer;`,
 ];
 
 export type Row = Record<string, SQLInputValue>;

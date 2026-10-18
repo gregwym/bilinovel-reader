@@ -8,7 +8,7 @@ import type { Db } from "./db";
 import type { Ffmpeg } from "./audio/ffmpeg";
 import type { SiteSource } from "./site/source";
 import { BLOCKING_CODES, describeError, type Tts } from "./tts";
-import { bookCatalog, type ChapterAudioRow, type Library } from "./library";
+import { bookCatalog, type ChapterAudioRow, type ChapterPart, type Library } from "./library";
 
 interface JobRow {
   id: number;
@@ -50,6 +50,9 @@ class Paused extends Error {}
 export class Jobs {
   private blocked: Partial<Record<BlockKey, ProviderBlock>> = {};
   private running = new Set<number>();
+  private compaction?: Promise<number>;
+  /** Chapter files compaction looked at (each once per run of the server). */
+  private compactSeen = new Set<string>();
   private timer?: ReturnType<typeof setTimeout>;
   private stopped = false;
   private listeners: (() => void)[] = [];
@@ -268,6 +271,7 @@ export class Jobs {
         if (job) void this.run(job);
       }
     }
+    if (!this.running.size) void this.compact().catch(() => undefined);
     const waiting = this.db.get<{ t: number | null }>(
       "select min(not_before) as t from jobs where status = 'queued' and not_before > ?",
       this.now(),
@@ -376,7 +380,7 @@ export class Jobs {
       this.library.markSilent(book.id, job.target, profileId);
       return;
     }
-    const files: string[] = [];
+    const segments: ChapterPart[] = [];
     const total = parts.reduce((n, p) => n + p.join("").length, 0);
     let done = 0;
     for (const [i, texts] of parts.entries()) {
@@ -389,15 +393,64 @@ export class Jobs {
         priority: job.priority,
         onStatus: (msg) => this.update(job.id, { message: msg }),
       });
-      files.push(seg.file);
+      segments.push({ provider: profile.provider, key: this.tts.key(profile.provider, this.tts.config(profile.provider), texts), audio: seg });
       done += texts.join("").length;
       this.update(job.id, { progress: (done / total) * 0.95 });
     }
     this.checkCancelled(job.id);
     this.update(job.id, { message: "合成章节文件…" });
     if (!(await this.ffmpeg.check())) throw new Error("未找到 ffmpeg，无法合成章节文件");
-    await this.library.assemble(book, job.target, files, profileId);
+    await this.library.assemble(book, job.target, segments, profileId);
     this.update(job.id, { message: null });
+  }
+
+  // -------------------------------------------------------------------------
+  // Compaction
+
+  /**
+   * Chapter files made before segments were kept inside them: their segments
+   * still have their own copy. While no job runs, the chapter file is made
+   * again from those segments (no requests, no ffmpeg) and the copies go.
+   * Returns how many chapters were done.
+   */
+  compact(): Promise<number> {
+    this.compaction ??= this.compactAll().finally(() => (this.compaction = undefined));
+    return this.compaction;
+  }
+
+  private async compactAll(): Promise<number> {
+    const rows = this.db.all<ChapterAudioRow>(
+      `select * from chapter_audio a where file != ''
+       and not exists (select 1 from segments s where s.file = a.file and s.start is not null)`,
+    );
+    let done = 0;
+    for (const row of rows) {
+      if (this.stopped || this.running.size) break;
+      const seen = `${row.book_id}/${row.chapter_id}/${row.updated_at}`;
+      if (this.compactSeen.has(seen)) continue;
+      this.compactSeen.add(seen);
+      if (await this.compactChapter(row).catch(() => false)) done++;
+      // Yield to requests between chapters.
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return done;
+  }
+
+  private async compactChapter(row: ChapterAudioRow): Promise<boolean> {
+    const book = this.library.book(row.book_id);
+    const voice = this.tts.parseProfileId(row.profile);
+    if (!book || !voice || this.library.chapterPath(book, row.chapter_id) !== row.file || !existsSync(this.library.abs(row.file))) return false;
+    const { pages, complete } = this.source.cachedChapterPages(book.id, row.chapter_id);
+    if (!complete) return false;
+    const segments: ChapterPart[] = [];
+    for (const texts of this.tts.parts(voice.provider, pages)) {
+      const key = this.tts.keyIn(row.profile, texts);
+      const audio = this.tts.stored(voice.provider, key);
+      if (!audio || audio.start !== undefined) return false;
+      segments.push({ provider: voice.provider, key, audio });
+    }
+    if (!segments.length) return false;
+    return !!(await this.library.assemble(book, row.chapter_id, segments, row.profile, true));
   }
 
   // -------------------------------------------------------------------------

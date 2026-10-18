@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { PageContent } from "../../src/adapters/types";
 import { splitIntoChunks } from "../../src/speech/SpeechPlayer";
@@ -31,6 +32,7 @@ import type { PageProvider, VoiceProfile } from "../shared/api";
 import type { Db } from "./db";
 import type { Settings } from "./config";
 import type { Ffmpeg } from "./audio/ffmpeg";
+import { id3Size, isFrameStart } from "./audio/mp3";
 
 /** Where the reader keeps its settings (synced to the server's key-value store). */
 export const READER_SETTINGS_KEY = "biliReader.settings";
@@ -49,6 +51,8 @@ export interface Configs {
 /** A segment as stored: audio file plus paragraph start fractions. */
 export interface StoredAudio {
   file: string;
+  /** Inside a chapter's library file: where its audio starts after the file's ID3 tag (`bytes` long). */
+  start?: number;
   mime: string;
   bounds: number[];
   bytes: number;
@@ -88,6 +92,7 @@ export class Tts {
     private readonly settings: Settings,
     private readonly ffmpeg: Ffmpeg,
     private readonly dataDir: string,
+    private readonly libraryDir: string,
     private readonly request: (req: HttpRequest) => Promise<HttpResponse> = httpRequest,
     private readonly wait: (ms: number) => Promise<void> = sleep,
   ) {
@@ -226,13 +231,14 @@ export class Tts {
   private rowKey = (provider: PageProvider, key: string) => `${provider}/${key}`;
 
   stored(provider: PageProvider, key: string): StoredAudio | undefined {
-    const row = this.db.get<{ file: string; mime: string; bounds: string; bytes: number; bounds_v: number }>(
-      "select file, mime, bounds, bytes, bounds_v from segments where key = ?",
+    const row = this.db.get<{ file: string; mime: string; bounds: string; bytes: number; bounds_v: number; start: number | null }>(
+      "select file, mime, bounds, bytes, bounds_v, start from segments where key = ?",
       this.rowKey(provider, key),
     );
     return row
       ? {
-          file: join(this.dataDir, row.file),
+          file: row.start === null ? join(this.dataDir, row.file) : join(this.libraryDir, ...row.file.split("/")),
+          start: row.start ?? undefined,
           mime: row.mime,
           bounds: JSON.parse(row.bounds) as number[],
           bytes: row.bytes,
@@ -250,7 +256,7 @@ export class Tts {
     if (s.boundsVersion >= BOUNDS_VERSION || !key.endsWith(`:${hash(texts.join("\n"))}`)) return s;
     if (!(await this.ffmpeg.check())) return s;
     try {
-      const { samples, rate } = await this.ffmpeg.decode(await readFile(s.file));
+      const { samples, rate } = await this.ffmpeg.decode(await this.data(s));
       const bounds = paragraphBounds(texts, samples, rate);
       this.db.run(
         "update segments set bounds = ?, bounds_v = ? where key = ?",
@@ -271,13 +277,98 @@ export class Tts {
     if (known[h] !== style) this.db.setJson(STYLES_KEY, { ...known, [h]: style });
   }
 
-  /** Deletes stored segments (files and rows). */
+  /** A stored segment's audio. Throws when it can't be read (a chapter file changed or gone). */
+  async data(s: StoredAudio): Promise<Buffer> {
+    if (s.start === undefined) return readFile(s.file);
+    const fh = await open(s.file, "r");
+    try {
+      const head = Buffer.alloc(10);
+      await fh.read(head, 0, 10, 0);
+      const out = Buffer.alloc(s.bytes);
+      const { bytesRead } = await fh.read(out, 0, s.bytes, id3Size(head) + s.start);
+      if (bytesRead !== s.bytes || !isFrameStart(out)) throw new Error(`segment no longer in ${s.file}`);
+      return out;
+    } finally {
+      await fh.close();
+    }
+  }
+
+  /**
+   * Points segments at their audio inside a chapter's library file (`rel`,
+   * offsets after its ID3 tag) and deletes their own files: the audio is
+   * kept once.
+   */
+  async adopt(rel: string, parts: { provider: PageProvider; key: string; start: number; bytes: number }[]): Promise<void> {
+    for (const p of parts) {
+      const s = this.stored(p.provider, p.key);
+      if (!s) continue;
+      this.db.run(
+        "update segments set file = ?, start = ?, bytes = ? where key = ?",
+        rel,
+        p.start,
+        p.bytes,
+        this.rowKey(p.provider, p.key),
+      );
+      if (s.start === undefined) await rm(s.file, { force: true });
+    }
+  }
+
+  /**
+   * Before a chapter's library file is replaced or deleted: its segments
+   * (except `except`, row keys) get their own files again when `keep`, else
+   * are forgotten.
+   */
+  async release(rel: string, keep: boolean, except = new Set<string>()): Promise<void> {
+    const rows = this.db.all<{ key: string }>("select key from segments where file = ? and start is not null", rel);
+    for (const { key } of rows) {
+      if (except.has(key)) continue;
+      const [provider, ...rest] = key.split("/");
+      const s = keep ? this.stored(provider as PageProvider, rest.join("/")) : undefined;
+      const data = s ? await this.data(s).catch(() => undefined) : undefined;
+      if (!data) {
+        this.db.run("delete from segments where key = ?", key);
+        continue;
+      }
+      const own = this.ownFile(key, "mp3");
+      await this.write(own, data);
+      this.db.run("update segments set file = ?, start = null where key = ?", own, key);
+    }
+  }
+
+  /** A chapter file moved (template change): its segments follow. */
+  moved(from: string, to: string): void {
+    this.db.run("update segments set file = ? where file = ? and start is not null", to, from);
+  }
+
+  /** Where a segment gets its own file (relative to the data folder). */
+  private ownFile(rowKey: string, ext: string): string {
+    const digest = createHash("sha1").update(rowKey).digest("hex");
+    const [provider] = rowKey.split("/");
+    return join("segments", provider, digest.slice(0, 2), `${digest}.${ext}`);
+  }
+
+  private async write(rel: string, data: Buffer): Promise<void> {
+    const file = join(this.dataDir, rel);
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(`${file}.tmp`, data);
+    await rename(`${file}.tmp`, file);
+  }
+
+  /** Changes when segments are added or deleted (for caching what is computed from them). */
+  revision(): string {
+    const r = this.db.get<{ n: number; t: number | null; b: number | null }>(
+      "select count(*) as n, max(created_at) as t, sum(bytes) as b from segments",
+    )!;
+    return `${r.n}:${r.t ?? 0}:${r.b ?? 0}`;
+  }
+
+  /** Deletes stored segments (files and rows; audio inside a chapter file stays there). */
   async remove(provider: PageProvider, keys: string[]): Promise<number> {
     let bytes = 0;
     for (const key of keys) {
       const s = this.stored(provider, key);
       if (!s) continue;
-      await rm(s.file, { force: true });
+      if (s.start === undefined) await rm(s.file, { force: true });
       this.db.run("delete from segments where key = ?", this.rowKey(provider, key));
       bytes += s.bytes;
     }
@@ -292,17 +383,15 @@ export class Tts {
       data = await this.ffmpeg.toMp3(data);
       mime = "audio/mpeg";
     }
-    const digest = createHash("sha1").update(this.rowKey(provider, key)).digest("hex");
     const ext = mime === "audio/mpeg" ? "mp3" : mime === "audio/wav" ? "wav" : "bin";
-    const rel = join("segments", provider, digest.slice(0, 2), `${digest}.${ext}`);
+    const rel = this.ownFile(this.rowKey(provider, key), ext);
     const file = join(this.dataDir, rel);
-    await mkdir(dirname(file), { recursive: true });
-    await writeFile(`${file}.tmp`, data);
-    await rename(`${file}.tmp`, file);
+    await this.write(rel, data);
     this.db.run(
-      `insert into segments (key, file, mime, bytes, bounds, bounds_v, chars, created_at) values (?, ?, ?, ?, ?, ?, ?, ?)
+      `insert into segments (key, file, mime, bytes, bounds, bounds_v, chars, created_at, start) values (?, ?, ?, ?, ?, ?, ?, ?, null)
        on conflict (key) do update set file = excluded.file, mime = excluded.mime, bytes = excluded.bytes,
-       bounds = excluded.bounds, bounds_v = excluded.bounds_v, chars = excluded.chars, created_at = excluded.created_at`,
+       bounds = excluded.bounds, bounds_v = excluded.bounds_v, chars = excluded.chars, created_at = excluded.created_at,
+       start = null`,
       this.rowKey(provider, key),
       rel,
       mime,
@@ -322,7 +411,7 @@ export class Tts {
     if (!s) return undefined;
     if (texts) s = await this.aligned(provider, key, texts, s);
     try {
-      return { ...s, data: await readFile(s.file) };
+      return { ...s, data: await this.data(s) };
     } catch {
       this.db.run("delete from segments where key = ?", this.rowKey(provider, key));
       return undefined;
@@ -332,7 +421,8 @@ export class Tts {
   async clear(provider?: PageProvider): Promise<void> {
     const providers = provider ? [provider] : PROVIDERS;
     for (const p of providers) {
-      this.db.run("delete from segments where key like ?", `${p}/%`);
+      // Audio inside chapter files takes no extra space: kept.
+      this.db.run("delete from segments where key like ? and start is null", `${p}/%`);
       await rm(join(this.dataDir, "segments", p), { recursive: true, force: true });
     }
   }
@@ -375,7 +465,12 @@ export class Tts {
     if (provider === "gemini") this.rememberStyle((cfg as GeminiConfig).style);
     if (!cfg.key) return Promise.reject(new SpeechEngineError("config"));
     const key = this.key(provider, cfg, texts);
-    const existing = this.stored(provider, key);
+    let existing = this.stored(provider, key);
+    // Its chapter file was deleted or moved outside the app: made again.
+    if (existing?.start !== undefined && !existsSync(existing.file)) {
+      this.db.run("delete from segments where key = ?", this.rowKey(provider, key));
+      existing = undefined;
+    }
     if (existing) return options.align ? this.aligned(provider, key, texts, existing) : Promise.resolve(existing);
     const id = this.rowKey(provider, key);
     let p = this.inflight.get(id);

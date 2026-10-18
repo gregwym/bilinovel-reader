@@ -165,6 +165,12 @@ export class SiteSource {
   }
 
   /** The pages of a chapter already in the database (from the first, until one is missing). */
+  /** Changes when a page of the book is cached or fetched again. */
+  pagesRevision(bookId: string): string {
+    const r = this.db.get<{ n: number; t: number | null }>("select count(*) as n, max(fetched_at) as t from pages where book_id = ?", bookId)!;
+    return `${r.n}:${r.t ?? 0}`;
+  }
+
   cachedChapterPages(bookId: string, chapterId: string): { pages: PageContent[]; complete: boolean } {
     const pages: PageContent[] = [];
     for (let i = 0; i < 100; i++) {
