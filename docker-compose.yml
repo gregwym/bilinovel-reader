@@ -1,6 +1,8 @@
 services:
   bili-reader:
-    build: .
+    # Built by GitHub Actions for amd64 and arm64. To build from this checkout
+    # instead, replace `image:` with `build: .`.
+    image: ghcr.io/gregwym/bilinovel-reader:latest
     container_name: bili-reader
     restart: unless-stopped
     ports:
