@@ -22,6 +22,8 @@ class FakeEngine implements SpeechEngine {
   }
   pause(): void {}
   resume(): void {}
+  pauseInPlace?: () => boolean;
+  resumeInPlace?: () => boolean;
   stop(): void {
     this.pending?.("cancelled");
     this.pending = undefined;
@@ -122,6 +124,53 @@ describe("SpeechPlayer", () => {
     await settle();
     expect(engine.spoken).toEqual(["文本a。", "文本a。"]);
     expect(player.currentId).toBe("a");
+  });
+
+  it("pauses in place and continues the same audio when the engine supports it", async () => {
+    const engine = new FakeEngine();
+    engine.hold = true;
+    let paused = false;
+    let resumed = 0;
+    engine.pauseInPlace = () => (paused = true);
+    engine.resumeInPlace = () => {
+      resumed++;
+      paused = false;
+      return true;
+    };
+    const player = new SpeechPlayer(engine, new FakeSource(["a", "b"]));
+    player.play();
+    await settle();
+    player.pause();
+    expect(paused).toBe(true);
+    expect(player.state).toBe("paused");
+    player.resume();
+    expect(player.state).toBe("playing");
+    expect(resumed).toBe(1);
+    await settle();
+    expect(engine.spoken).toEqual(["文本a。"]); // not restarted
+  });
+
+  it("restarts instead of continuing in place after moving or changing the rate while paused", async () => {
+    const engine = new FakeEngine();
+    engine.hold = true;
+    let resumed = 0;
+    engine.pauseInPlace = () => true;
+    engine.resumeInPlace = () => (resumed++, true);
+    const player = new SpeechPlayer(engine, new FakeSource(["a", "b"]));
+    player.play();
+    await settle();
+    player.pause();
+    player.setRate(1.5);
+    player.resume();
+    await settle();
+    expect(resumed).toBe(0);
+    expect(engine.rates).toEqual([1, 1.5]);
+    player.pause();
+    player.nextParagraph();
+    player.resume();
+    await settle();
+    expect(resumed).toBe(0);
+    expect(engine.spoken.at(-1)).toBe("文本b。");
   });
 
   it("starts from a tapped paragraph and supports next/previous", async () => {

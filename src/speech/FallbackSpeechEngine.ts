@@ -136,6 +136,14 @@ export class FallbackSpeechEngine implements SpeechEngine {
     this.lastUsed.resume();
   }
 
+  pauseInPlace(): boolean {
+    return this.lastUsed.pauseInPlace?.() ?? false;
+  }
+
+  resumeInPlace(): boolean {
+    return this.lastUsed.resumeInPlace?.() ?? false;
+  }
+
   stop(): void {
     this.primary.stop();
     this.secondary.stop();

@@ -30,6 +30,14 @@ export interface SpeechEngine {
   readonly prefetchCount?: number;
   pause(): void;
   resume(): void;
+  /**
+   * Optional: pauses the playing utterance where it is, leaving `speak`
+   * pending; false when there is nothing to pause that way. `resumeInPlace`
+   * continues it synchronously, so it works inside a headphone / lock-screen
+   * handler while iOS has the page in the background (an async `play()` is refused there).
+   */
+  pauseInPlace?(): boolean;
+  resumeInPlace?(): boolean;
   stop(): void;
   /** True while audio is (supposed to be) playing. */
   readonly speaking: boolean;

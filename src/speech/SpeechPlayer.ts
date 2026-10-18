@@ -69,6 +69,8 @@ export class SpeechPlayer {
   private generation = 0;
   private rate: number;
   private voiceURI?: string;
+  /** What was playing when `pause()` paused the engine in place (see SpeechEngine.pauseInPlace). */
+  private held?: { gen: number; id: string; chunk: number; rate: number; voiceURI?: string };
 
   constructor(
     private engine: SpeechEngine,
@@ -112,6 +114,12 @@ export class SpeechPlayer {
 
   pause(): void {
     if (!this.isActive) return;
+    if (this._state === "playing" && this.current && this.engine.pauseInPlace?.()) {
+      const { generation: gen, current: id, chunkIndex: chunk, rate, voiceURI } = this;
+      this.held = { gen, id, chunk, rate, voiceURI };
+      this.setState("paused");
+      return;
+    }
     this.generation++;
     this.engine.stop();
     this.setState("paused");
@@ -119,6 +127,22 @@ export class SpeechPlayer {
 
   resume(): void {
     if (this._state !== "paused" && this._state !== "error") return;
+    const h = this.held;
+    this.held = undefined;
+    // Same place and settings: continue the paused audio right here (iOS background), no restart.
+    if (
+      h &&
+      this._state === "paused" &&
+      h.gen === this.generation &&
+      h.id === this.current &&
+      h.chunk === this.chunkIndex &&
+      h.rate === this.rate &&
+      h.voiceURI === this.voiceURI &&
+      this.engine.resumeInPlace?.()
+    ) {
+      this.setState("playing");
+      return;
+    }
     this.play();
   }
 

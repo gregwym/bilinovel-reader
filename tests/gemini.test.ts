@@ -221,6 +221,35 @@ describe("GeminiSpeechEngine", () => {
     e.stop();
   });
 
+  it("pauses in place and continues the same audio synchronously", async () => {
+    const { e, audio } = engine([1, 2, 3].map(() => audioResponse(pcm([1, 1, 1]))), undefined, 4);
+    const first = e.speak(book[0][0], at(0, 0));
+    await flush();
+    audio.at(0.5);
+    expect(e.pauseInPlace()).toBe(true);
+    expect(audio.paused).toBe(true);
+    let result: string | undefined;
+    void first.then((r) => (result = r));
+    await flush();
+    expect(result).toBeUndefined(); // still pending, not cancelled
+    expect(e.resumeInPlace()).toBe(true);
+    expect(audio.paused).toBe(false); // play() called inside the same handler
+    expect(audio.currentTime).toBe(0.5);
+    audio.at(1.6);
+    await expect(first).resolves.toBe("done");
+    expect(e.resumeInPlace()).toBe(false);
+    e.stop();
+  });
+
+  it("still reports a system pause as cancelled", async () => {
+    const { e, audio } = engine([1, 2, 3].map(() => audioResponse(pcm([1, 1, 1]))), undefined, 4);
+    const first = e.speak(book[0][0], at(0, 0));
+    await flush();
+    audio.pause();
+    await expect(first).resolves.toBe("cancelled");
+    expect(e.pauseInPlace()).toBe(false);
+  });
+
   it("generates the following pages ahead", async () => {
     const { e, requests } = engine([1, 2, 3].map(() => audioResponse(pcm([1]))));
     const p = e.speak(book[0][0], at(0, 0));
