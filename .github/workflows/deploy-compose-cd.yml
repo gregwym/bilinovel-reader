@@ -22,6 +22,10 @@ jobs:
           BILI_READER_CD_HMAC: ${{ secrets.BILI_READER_CD_HMAC }}
         run: |
           set -euo pipefail
+          if [ -z "$BILI_READER_CD_HMAC" ]; then
+            echo "BILI_READER_CD_HMAC is not set; skipping the deploy notification."
+            exit 0
+          fi
           signature="$(python3 - "$GITHUB_EVENT_PATH" <<'PY'
           import hashlib
           import hmac
@@ -43,4 +47,4 @@ jobs:
             --header "X-Hub-Signature-256: ${signature}" \
             --data-binary "@${GITHUB_EVENT_PATH}" \
             'https://bili.dolast.com/hooks/bili-reader')"
-          test "$status" = 202
+          case "$status" in 2??) ;; *) echo "Deploy hook returned HTTP $status" >&2; exit 1 ;; esac
