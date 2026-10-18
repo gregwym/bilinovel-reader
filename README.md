@@ -127,13 +127,11 @@ Fish Audio 的 `s2.1-pro-free` 模型通过 API **免费使用至 2026-11-30**�
 
 ### 部署（Docker）
 
-GitHub Actions 会自动构建镜像并发布到 `ghcr.io/gregwym/bilinovel-reader`（amd64 和 arm64，适用于大多数 NAS）：
+每次合并到 `main`，GitHub Actions 会自动构建镜像并发布到 `ghcr.io/gregwym/bilinovel-reader`（amd64 和 arm64，适用于大多数 NAS）：
 
 - `latest`：`main` 分支的最新版本；
 - `0.10.8` 这样的版本号：对应 `package.json` 里的版本；
 - `sha-<commit>`：某次提交。
-
-GHCR 新建的镜像默认是私有的：第一次发布后，在仓库主页右侧的 Packages → `bilinovel-reader` → Package settings 里把可见性改成 Public，NAS 才能免登录拉取。
 
 只需要 `docker-compose.yml` 一个文件：
 
