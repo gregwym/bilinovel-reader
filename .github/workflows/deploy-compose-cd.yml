@@ -1,4 +1,4 @@
-name: Deploy published image
+name: Notify image availability (temporary bridge)
 
 on:
   workflow_run:
@@ -41,11 +41,11 @@ jobs:
           print("sha256=" + digest)
           PY
           )"
-          status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+          status="$(curl --silent --max-time 20 --output /dev/null --write-out '%{http_code}' \
             --request POST \
             --header 'Content-Type: application/json' \
             --header 'X-GitHub-Event: workflow_run' \
             --header "X-Hub-Signature-256: ${signature}" \
             --data-binary "@${GITHUB_EVENT_PATH}" \
-            "$BILI_READER_CD_URL")"
+            "$BILI_READER_CD_URL" 2>/dev/null)"
           case "$status" in 2??) ;; *) echo "Deploy hook returned HTTP $status" >&2; exit 1 ;; esac
