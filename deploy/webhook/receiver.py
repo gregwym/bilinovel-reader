@@ -15,9 +15,30 @@ REPOSITORY_ID = 1406537869
 WORKFLOW = ".github/workflows/server-image.yml"
 SIGNAL_SOCKET = "/run/bili-reader-cd/wake.sock"
 MAX_BODY = 262144
+DEFAULT_POLICY = dict(repository=REPOSITORY, repository_id=REPOSITORY_ID,
+                      workflow=WORKFLOW, branch="main", route="/hooks/bili-reader",
+                      signal_socket=SIGNAL_SOCKET)
 
 
-def validate(body, signature, event, secret, now=None):
+def load_policy(path):
+    """Only administrator-owned local configuration selects a wake target."""
+    policy = json.loads(Path(path).read_text())
+    if not isinstance(policy, dict) or set(policy) != set(DEFAULT_POLICY):
+        raise ValueError("invalid receiver policy keys")
+    if (type(policy["repository_id"]) is not int or policy["repository_id"] <= 0
+            or any(not isinstance(policy[k], str) or not policy[k]
+                   for k in policy if k != "repository_id")
+            or len(policy["repository"].split("/")) != 2
+            or not policy["workflow"].startswith(".github/workflows/")
+            or not policy["route"].startswith("/hooks/")
+            or not policy["signal_socket"].startswith("/")
+            or ".." in Path(policy["signal_socket"]).parts):
+        raise ValueError("invalid receiver policy")
+    return policy
+
+
+def validate(body, signature, event, secret, now=None, policy=None):
+    policy = DEFAULT_POLICY if policy is None else policy
     if len(secret) < 32 or len(body) > MAX_BODY:
         raise ValueError("size/secret")
     expected = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
@@ -27,11 +48,12 @@ def validate(body, signature, event, secret, now=None):
         raise ValueError("event")
     payload = json.loads(body)
     repo, run = payload["repository"], payload["workflow_run"]
-    if (repo["id"] != REPOSITORY_ID or repo["full_name"] != REPOSITORY
+    if (repo["id"] != policy["repository_id"] or repo["full_name"] != policy["repository"]
             or payload["action"] != "completed" or run["status"] != "completed"
-            or run["conclusion"] != "success" or run["head_branch"] != "main"
+            or run["conclusion"] != "success" or run["head_branch"] != policy["branch"]
             or run["event"] not in ("push", "workflow_dispatch")
-            or run["path"] != WORKFLOW or run["head_repository"]["id"] != REPOSITORY_ID):
+            or run["path"] != policy["workflow"]
+            or run["head_repository"]["id"] != policy["repository_id"]):
         raise ValueError("unapproved run")
     stamp = datetime.fromisoformat(run["updated_at"].replace("Z", "+00:00")).timestamp()
     age = (time.time() if now is None else now) - stamp
@@ -41,6 +63,7 @@ def validate(body, signature, event, secret, now=None):
 
 
 class Receiver(BaseHTTPRequestHandler):
+    policy = DEFAULT_POLICY
     seen = {}
     last_wake = 0.0
     secret = b""
@@ -49,7 +72,7 @@ class Receiver(BaseHTTPRequestHandler):
         pass  # Never log request bodies, headers, or credentials.
 
     def do_POST(self):
-        if self.path != "/hooks/bili-reader":
+        if self.path != self.policy["route"]:
             self.send_error(404)
             return
         try:
@@ -63,12 +86,13 @@ class Receiver(BaseHTTPRequestHandler):
             if len(body) != length:
                 raise ValueError("truncated body")
             key = validate(body, self.headers.get("X-Hub-Signature-256", ""),
-                           self.headers.get("X-GitHub-Event", ""), self.secret)
+                           self.headers.get("X-GitHub-Event", ""), self.secret,
+                           policy=self.policy)
             now = time.monotonic()
             self.__class__.seen = {k: t for k, t in self.seen.items() if now - t < 660}
             if key not in self.seen and now - self.last_wake >= 10:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
-                    client.sendto(b"check", SIGNAL_SOCKET)
+                    client.sendto(b"check", self.policy["signal_socket"])
                 self.__class__.last_wake = now
                 if len(self.seen) < 4096:
                     self.seen[key] = now
@@ -88,13 +112,23 @@ class BoundedHTTPServer(HTTPServer):
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", help="administrator-owned local JSON policy")
+    parser.add_argument("--secret-file", default="/etc/bili-reader-hook/secret")
+    parser.add_argument("--container", action="store_true",
+                        help="listen on container interfaces; requires isolated Docker network, no published ports")
+    args = parser.parse_args()
+    if args.config:
+        Receiver.policy = load_policy(args.config)
     os.umask(0o077)
-    Receiver.secret = Path("/etc/bili-reader-hook/secret").read_bytes().strip()
+    Receiver.secret = Path(args.secret_file).read_bytes().strip()
     if len(Receiver.secret) < 32:
         raise SystemExit("webhook secret must contain at least 32 bytes")
     # Bind address is local administrator configuration, never webhook input.
-    address = Path("/etc/bili-reader-hook/bind-address").read_text().strip()
+    address = ("0.0.0.0" if args.container else
+               Path("/etc/bili-reader-hook/bind-address").read_text().strip())
     import ipaddress
-    if not ipaddress.ip_address(address).is_private or address == "0.0.0.0":
+    if not args.container and (not ipaddress.ip_address(address).is_private or address == "0.0.0.0"):
         raise SystemExit("receiver requires a private host/proxy bridge address")
     BoundedHTTPServer((address, 18791), Receiver).serve_forever()

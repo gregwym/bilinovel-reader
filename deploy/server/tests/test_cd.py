@@ -14,7 +14,7 @@ HERE = Path(__file__).resolve().parents[1]
 
 
 def load(name):
-    spec = importlib.util.spec_from_file_location(name, HERE / (name + ".py"))
+    spec = importlib.util.spec_from_file_location(name, (HERE.parent / "webhook/receiver.py" if name == "webhook" else HERE / (name + ".py")))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -76,6 +76,38 @@ class WebhookTests(unittest.TestCase):
     def test_oversized(self):
         with self.assertRaises(ValueError):
             hook.validate(b"x" * (hook.MAX_BODY + 1), "", "workflow_run", self.secret)
+
+    def test_local_target_policy_isolation(self):
+        policy = dict(hook.DEFAULT_POLICY, repository="test/other", repository_id=42,
+                      workflow=".github/workflows/other.yml")
+        body = json.dumps(self.payload).encode()
+        sig = "sha256=" + hmac.new(self.secret, body, hashlib.sha256).hexdigest()
+        with self.assertRaises(ValueError):
+            hook.validate(body, sig, "workflow_run", self.secret, 1792195200, policy)
+        self.payload["repository"] = dict(id=42, full_name="test/other")
+        self.payload["workflow_run"].update(path=policy["workflow"], head_repository=dict(id=42))
+        body = json.dumps(self.payload).encode()
+        sig = "sha256=" + hmac.new(self.secret, body, hashlib.sha256).hexdigest()
+        self.assertEqual(len(hook.validate(body, sig, "workflow_run", self.secret,
+                                          1792195200, policy)), 32)
+        with self.assertRaises(ValueError):
+            hook.validate(body, sig, "workflow_run", self.secret, 1792195200)
+
+    def test_policy_rejects_commands_and_invalid_paths(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "policy.json"
+            for changes in (dict(command="docker run arbitrary"),
+                            dict(signal_socket="/run/../docker.sock"),
+                            dict(repository_id=True), dict(route="/admin")):
+                with self.subTest(changes=changes):
+                    path.write_text(json.dumps(dict(hook.DEFAULT_POLICY, **changes)))
+                    with self.assertRaises(ValueError):
+                        hook.load_policy(path)
+
+    def test_reader_example_policy(self):
+        policy = hook.load_policy(HERE.parent / "webhook/reader.json")
+        self.assertEqual(policy["repository_id"], hook.REPOSITORY_ID)
+        self.assertEqual(policy["signal_socket"], "/run/cd-hook/wake.sock")
 
 
 class ReconcileTests(unittest.TestCase):
