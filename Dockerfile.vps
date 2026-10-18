@@ -1,0 +1,22 @@
+# VPS-only compatibility override; upstream source stays unmodified.
+FROM node:24-bookworm-slim AS base
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg tini && apt-get clean && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+
+FROM base AS build
+# The VPS has 1 GB RAM. Keep compilation/test workers bounded.
+ENV NODE_OPTIONS=--max-old-space-size=384
+COPY package.json package-lock.json ./
+RUN npm ci && npm cache clean --force
+COPY . .
+RUN npm run lint && npm test -- --maxWorkers=1 --testTimeout=60000 --hookTimeout=60000 && npm run build:app
+
+FROM base AS runtime
+ENV NODE_ENV=production PORT=8790 DATA_DIR=/data LIBRARY_DIR=/library WEB_DIR=/app/dist-app/web
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+COPY --from=build /app/dist-app ./dist-app
+VOLUME ["/data", "/library"]
+EXPOSE 8790
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["node", "--disable-warning=ExperimentalWarning", "dist-app/server/main.js"]
