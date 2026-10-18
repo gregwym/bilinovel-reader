@@ -118,6 +118,16 @@ afterAll(async () => {
 });
 
 describe("library server", () => {
+  /** Every segment of 180204 points into its chapter file; none has a file of its own. */
+  const expectSegmentsInChapter = () => {
+    const rows = services.db.all<{ file: string; start: number | null }>("select file, start from segments");
+    const inChapter = rows.filter((r) => r.file.endsWith("004 第四章 分页的章节.mp3"));
+    expect(inChapter).toHaveLength(3);
+    expect(inChapter.every((r) => r.start !== null)).toBe(true);
+    const own = existsSync(join(dir, "data", "segments", "fish")) ? execFileSync("find", [join(dir, "data", "segments", "fish"), "-type", "f"]).toString().trim() : "";
+    expect(own.split("\n").filter(Boolean).length).toBe(rows.filter((r) => r.start === null).length);
+  };
+
   it("reports the app and the voice profile", async () => {
     const info = await json<{ auth: boolean; profile?: { provider: string } }>(call("/api/info"));
     expect(info.auth).toBe(false);
@@ -172,6 +182,27 @@ describe("library server", () => {
     const audio = await call("/api/books/5369/chapters/180204/audio", { headers: { range: "bytes=0-99" } });
     expect(audio.status).toBe(206);
     expect((await audio.arrayBuffer()).byteLength).toBe(100);
+
+    // The segments now live inside the chapter file only, and are still served from it.
+    expectSegmentsInChapter();
+    const ffprobe = Number(execFileSync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", join(dir, "library", files[0].slice(join(dir, "library").length + 1))]));
+    expect(Math.abs(ffprobe - chapter(detail).duration!)).toBeLessThan(0.1);
+    const stats = await services.library.stats();
+    expect(stats.segmentFiles).toBe(0);
+  });
+
+  it.skipIf(!hasFfmpeg)("moves the segments of chapter files made before into them", async () => {
+    const row = services.library.chapterAudio("5369").find((r) => r.chapter_id === "180204")!;
+    // As an older version left it: every segment also in its own file.
+    await services.tts.release(row.file, true);
+    expect(services.db.all("select key from segments where start is not null")).toHaveLength(0);
+    expect((await services.library.stats()).segmentFiles).toBe(3);
+    await services.jobs.compact();
+    expectSegmentsInChapter();
+    expect((await services.library.stats()).segmentFiles).toBe(0);
+    const audio = await call("/api/books/5369/chapters/180204/segments/2/audio");
+    expect(audio.status).toBe(200);
+    expect((await audio.arrayBuffer()).byteLength).toBeGreaterThan(1000);
   });
 
   it.skipIf(!hasFfmpeg)("downloads a chapter's audio and text, and a volume's text", async () => {
@@ -393,6 +424,7 @@ describe("library server", () => {
     expect(ttsRequests).toHaveLength(1);
     const segs = await json<ChapterSegments>(call("/api/books/5369/chapters/180204/segments"));
     expect(segs.segments.every((s) => s.ready)).toBe(true);
+    expectSegmentsInChapter();
     expect((await send("POST", "/api/books/5369/chapters/180204/segments/9/regenerate")).status).toBe(404);
   });
 

@@ -445,7 +445,7 @@ export function createApp(d: AppDeps): Hono {
     await d.tts.remove(profile.provider, [d.tts.keyIn(d.tts.profileId(profile), texts)]);
     void d.tts.segment(profile.provider, texts, { priority: READER_PRIORITY }).catch(() => undefined);
     if (d.library.chapterAudio(book.id).some((r) => r.chapter_id === chapterId)) {
-      await d.library.deleteChapter(book.id, chapterId);
+      await d.library.deleteChapter(book.id, chapterId, true);
       const title =
         bookCatalog(book)
           ?.volumes.flatMap((v) => v.chapters)
@@ -581,7 +581,7 @@ export function createApp(d: AppDeps): Hono {
         priority: READER_PRIORITY,
         align: true,
       });
-      const data = await readFile(seg.file);
+      const data = await d.tts.data(seg);
       return c.body(new Uint8Array(data), 200, { "Content-Type": seg.mime, "X-Bounds": JSON.stringify(seg.bounds) });
     } catch (err) {
       if (err instanceof SpeechEngineError) {
@@ -603,7 +603,7 @@ export function createApp(d: AppDeps): Hono {
         voice: { model, voice, style: provider === "gemini" ? (c.req.query("style") ?? undefined) : undefined },
         priority: READER_PRIORITY,
       });
-      return c.body(new Uint8Array(await readFile(seg.file)), 200, {
+      return c.body(new Uint8Array(await d.tts.data(seg)), 200, {
         "Content-Type": seg.mime,
         "Cache-Control": "private, max-age=86400",
       });

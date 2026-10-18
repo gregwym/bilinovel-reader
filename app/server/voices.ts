@@ -3,22 +3,27 @@ import { bookCatalog, type BookRow, type Library } from "./library";
 import type { SiteSource } from "./site/source";
 import { PROVIDERS, type Tts } from "./tts";
 
-/** A book's audio per voice, with the segment keys of each (for deleting them). */
-export function bookVoices(
-  book: BookRow,
-  tts: Tts,
-  source: SiteSource,
-  library: Library,
-): BookVoices & { keys: Map<string, { provider: PageProvider; keys: string[] }> } {
-  const profile = tts.profile();
-  const current = profile ? tts.profileId(profile) : "";
-  const files = new Map<string, number>();
-  for (const row of library.chapterAudio(book.id)) files.set(row.profile, (files.get(row.profile) ?? 0) + 1);
+type Stats = Omit<BookVoice, "label" | "current" | "switchable" | "chapterFiles" | "provider" | "model" | "voice">;
+interface SegmentStats {
+  stats: Map<string, Stats>;
+  keys: Map<string, { provider: PageProvider; keys: string[] }>;
+  withSegments: Set<string>;
+}
 
+/** Per book: the last count and what it was counted from (the book page asks often; counting is heavy). */
+const counted = new WeakMap<Tts, Map<string, { revision: string; result: SegmentStats }>>();
+
+/** A book's stored segments per voice: every cached chapter's segment keys in every stored voice, looked up. */
+function segmentStats(book: BookRow, tts: Tts, source: SiteSource): SegmentStats {
+  const revision = [tts.revision(), source.pagesRevision(book.id), book.catalog_at ?? 0].join("|");
+  const books = counted.get(tts) ?? new Map<string, { revision: string; result: SegmentStats }>();
+  counted.set(tts, books);
+  const last = books.get(book.id);
+  if (last?.revision === revision) return last.result;
   const chapterIds = (bookCatalog(book)?.volumes ?? []).flatMap((v) => v.chapters.flatMap((c) => (c.chapterId ? [c.chapterId] : [])));
   const chapters = chapterIds.map((id) => ({ id, ...source.cachedChapterPages(book.id, id) })).filter((c) => c.pages.length);
 
-  const stats = new Map<string, Omit<BookVoice, "label" | "current" | "switchable" | "chapterFiles" | "provider" | "model" | "voice">>();
+  const stats = new Map<string, Stats>();
   const keys = new Map<string, { provider: PageProvider; keys: string[] }>();
   const withSegments = new Set<string>();
   for (const provider of PROVIDERS) {
@@ -46,6 +51,25 @@ export function bookVoices(
       }
     }
   }
+
+  const result = { stats, keys, withSegments };
+  books.set(book.id, { revision, result });
+  return result;
+}
+
+/** A book's audio per voice, with the segment keys of each (for deleting them). */
+export function bookVoices(
+  book: BookRow,
+  tts: Tts,
+  source: SiteSource,
+  library: Library,
+): BookVoices & { keys: Map<string, { provider: PageProvider; keys: string[] }> } {
+  const profile = tts.profile();
+  const current = profile ? tts.profileId(profile) : "";
+  const files = new Map<string, number>();
+  for (const row of library.chapterAudio(book.id)) files.set(row.profile, (files.get(row.profile) ?? 0) + 1);
+
+  const { stats, keys, withSegments } = segmentStats(book, tts, source);
 
   const ids = new Set([...stats.keys(), ...files.keys()]);
   if (current) ids.add(current);

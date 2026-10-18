@@ -1,11 +1,21 @@
-import { copyFile, mkdir, readdir, rename, rm, rmdir, stat } from "node:fs/promises";
+import { copyFile, mkdir, open, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join, sep } from "node:path";
 import type { Catalog } from "../../src/adapters/types";
 import type { LibraryStats, RescanResult } from "../shared/api";
 import type { Db } from "./db";
 import type { Settings } from "./config";
-import type { Ffmpeg } from "./audio/ffmpeg";
+import type { Ffmpeg, Tags } from "./audio/ffmpeg";
+import { id3Tag, mp3Frames, sameFormat, type Mp3Format } from "./audio/mp3";
+import type { StoredAudio, Tts } from "./tts";
+import type { PageProvider } from "../shared/api";
+
+/** A segment going into a chapter file. */
+export interface ChapterPart {
+  provider: PageProvider;
+  key: string;
+  audio: StoredAudio;
+}
 
 /**
  * The audiobook library on disk: one MP3 per chapter in folders named from
@@ -140,6 +150,7 @@ export class Library {
     private readonly db: Db,
     private readonly settings: Settings,
     private readonly ffmpeg: Ffmpeg,
+    private readonly tts: Tts,
     readonly dir: string,
     private readonly dataDir: string,
   ) {}
@@ -185,8 +196,14 @@ export class Library {
     return this.db.all<ChapterAudioRow>("select * from chapter_audio where book_id = ?", bookId);
   }
 
-  /** Joins a chapter's segment files into its library file and indexes it. */
-  async assemble(book: BookRow, chapterId: string, segments: string[], profile: string): Promise<ChapterAudioRow> {
+  /**
+   * Joins a chapter's segments into its library file and indexes it. When
+   * their MP3 frames can simply be put one after another (the usual case),
+   * that is done without ffmpeg and the segments then point into the file
+   * instead of keeping their own copy. With `joinOnly`, nothing is done
+   * (undefined) when that isn't possible.
+   */
+  async assemble(book: BookRow, chapterId: string, parts: ChapterPart[], profile: string, joinOnly = false): Promise<ChapterAudioRow | undefined> {
     const rel = this.chapterPath(book, chapterId);
     const place = findChapter(bookCatalog(book), chapterId);
     if (!rel || !place) throw new Error(`Chapter ${chapterId} is not in the catalog`);
@@ -194,7 +211,7 @@ export class Library {
     const tmp = this.tmpFile(`${book.id}-${chapterId}-${Date.now()}.mp3`);
     await mkdir(dirname(tmp), { recursive: true });
     await mkdir(dirname(out), { recursive: true });
-    const tags = {
+    const tags: Tags = {
       title: place.chapterTitle,
       album: [book.title, place.volumeTitle].filter(Boolean).join(" "),
       artist: book.author,
@@ -202,19 +219,40 @@ export class Library {
       disc: String(place.volumeIndex + 1),
       genre: "Audiobook",
     };
-    try {
-      await this.ffmpeg.concatMp3(segments, tmp, tags, `${tmp}.txt`);
-      await this.moveInto(tmp, out);
-    } finally {
-      await rm(tmp, { force: true });
-      await rm(`${tmp}.txt`, { force: true });
-    }
-    await this.placeCover(book.id, dirname(out));
     const old = this.db.get<ChapterAudioRow>(
       "select * from chapter_audio where book_id = ? and chapter_id = ?",
       book.id,
       chapterId,
     );
+    let joined: Awaited<ReturnType<Library["joinFrames"]>>;
+    try {
+      joined = await this.joinFrames(parts, tags, tmp);
+      if (!joined && joinOnly) return undefined;
+      if (!joined) {
+        const files: string[] = [];
+        for (const [i, p] of parts.entries()) {
+          if (p.audio.start === undefined) files.push(p.audio.file);
+          else {
+            const own = `${tmp}.${i}.mp3`;
+            await writeFile(own, await this.tts.data(p.audio));
+            files.push(own);
+          }
+        }
+        await this.ffmpeg.concatMp3(files, tmp, tags, `${tmp}.txt`);
+      }
+      // The old file's other segments get their own files again before it goes.
+      if (old?.file) {
+        const keep = old.profile !== profile || !joined;
+        await this.tts.release(old.file, keep, joined ? new Set(parts.map((p) => `${p.provider}/${p.key}`)) : undefined);
+      }
+      await this.moveInto(tmp, out);
+    } finally {
+      await rm(tmp, { force: true });
+      await rm(`${tmp}.txt`, { force: true });
+      for (const i of parts.keys()) await rm(`${tmp}.${i}.mp3`, { force: true });
+    }
+    if (joined) await this.tts.adopt(rel, joined.parts);
+    await this.placeCover(book.id, dirname(out));
     if (old?.file && old.file !== rel) await this.removeFile(old.file);
     const row: ChapterAudioRow = {
       book_id: book.id,
@@ -222,7 +260,7 @@ export class Library {
       profile,
       file: rel,
       bytes: (await stat(out)).size,
-      duration: (await this.ffmpeg.duration(out)) ?? null,
+      duration: joined ? joined.seconds : ((await this.ffmpeg.duration(out)) ?? null),
       updated_at: Date.now(),
     };
     this.db.run(
@@ -238,6 +276,39 @@ export class Library {
       row.updated_at,
     );
     return row;
+  }
+
+  /**
+   * Writes an ID3 tag and the segments' frames to `out`, read one at a time.
+   * Undefined (nothing written) when they aren't all MP3 of one format.
+   */
+  private async joinFrames(
+    parts: ChapterPart[],
+    tags: Tags,
+    out: string,
+  ): Promise<{ parts: { provider: PageProvider; key: string; start: number; bytes: number }[]; seconds: number } | undefined> {
+    if (!parts.length || parts.some((p) => p.audio.mime !== "audio/mpeg")) return undefined;
+    const fh = await open(out, "w");
+    try {
+      const tag = id3Tag(tags);
+      await fh.write(tag);
+      let format: Mp3Format | undefined;
+      let start = 0;
+      let seconds = 0;
+      const placed = [];
+      for (const p of parts) {
+        const mp3 = mp3Frames(await this.tts.data(p.audio));
+        if (!mp3 || (format && !sameFormat(format, mp3.format))) return undefined;
+        format = mp3.format;
+        await fh.write(mp3.frames);
+        placed.push({ provider: p.provider, key: p.key, start, bytes: mp3.frames.length });
+        start += mp3.frames.length;
+        seconds += mp3.seconds;
+      }
+      return { parts: placed, seconds: Math.round(seconds * 1000) / 1000 };
+    } finally {
+      await fh.close();
+    }
   }
 
   /** Moves a file, also across file systems (data and library are often different volumes). */
@@ -283,20 +354,28 @@ export class Library {
     }
   }
 
-  async deleteChapter(bookId: string, chapterId: string): Promise<void> {
+  /** Deletes a chapter file; its segments are kept (in their own files) when `keepSegments`. */
+  async deleteChapter(bookId: string, chapterId: string, keepSegments = false): Promise<void> {
     const row = this.db.get<ChapterAudioRow>(
       "select * from chapter_audio where book_id = ? and chapter_id = ?",
       bookId,
       chapterId,
     );
     if (!row) return;
-    if (row.file) await this.removeFile(row.file);
+    if (row.file) {
+      await this.tts.release(row.file, keepSegments);
+      await this.removeFile(row.file);
+    }
     this.db.run("delete from chapter_audio where book_id = ? and chapter_id = ?", bookId, chapterId);
   }
 
   /** Removes a book's audio (library files and exports). */
   async deleteBookAudio(bookId: string): Promise<void> {
-    for (const row of this.chapterAudio(bookId)) if (row.file) await this.removeFile(row.file);
+    for (const row of this.chapterAudio(bookId)) {
+      if (!row.file) continue;
+      await this.tts.release(row.file, false);
+      await this.removeFile(row.file);
+    }
     this.db.run("delete from chapter_audio where book_id = ?", bookId);
     await rm(join(this.dataDir, "exports", bookId), { recursive: true, force: true });
   }
@@ -320,8 +399,10 @@ export class Library {
           row.book_id,
           row.chapter_id,
         );
+        this.tts.moved(row.file, expected);
         result.moved++;
       } else {
+        await this.tts.release(row.file, false);
         this.db.run("delete from chapter_audio where book_id = ? and chapter_id = ?", row.book_id, row.chapter_id);
         result.missing++;
       }
@@ -353,6 +434,7 @@ export class Library {
         row.book_id,
         row.chapter_id,
       );
+      this.tts.moved(row.file, expected);
       result.moved++;
     }
     return result;
@@ -360,7 +442,7 @@ export class Library {
 
   async stats(): Promise<LibraryStats> {
     const lib = this.db.get<{ n: number; bytes: number }>("select count(*) as n, coalesce(sum(bytes), 0) as bytes from chapter_audio")!;
-    const seg = this.db.get<{ n: number; bytes: number }>("select count(*) as n, coalesce(sum(bytes), 0) as bytes from segments")!;
+    const seg = this.db.get<{ n: number; bytes: number }>("select count(*) as n, coalesce(sum(bytes), 0) as bytes from segments where start is null")!;
     const books = this.db.get<{ n: number }>("select count(*) as n from books")!;
     const exports = await dirSize(join(this.dataDir, "exports"));
     return {
