@@ -54,6 +54,7 @@ import type { FishConfig } from "../speech/FishSpeechEngine";
 import { FallbackSpeechEngine } from "../speech/FallbackSpeechEngine";
 import { SpeechEngineError } from "../speech/SpeechEngine";
 import { VoiceManager } from "../speech/VoiceManager";
+import { holdAudioSession, releaseAudioSession } from "../speech/keepAlive";
 import { ReaderView, type TocState, type TocStep, type ViewAction } from "../ui/ReaderView";
 import { debounce } from "../utils/async";
 import { log } from "../utils/log";
@@ -348,6 +349,7 @@ export class Reader implements PlaybackSource {
       onState: (state, message) => {
         this.view.setPlayerState(state, message);
         if (state === "idle") this.view.setActive(undefined);
+        if (state === "playing" || state === "buffering" || state === "idle") releaseAudioSession();
         this.setMediaPlaybackState(state);
       },
       onParagraph: (id) => {
@@ -461,6 +463,7 @@ export class Reader implements PlaybackSource {
 
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") {
+        releaseAudioSession();
         this.view.revealActive();
         this.player.recoverIfStalled();
         void this.checkExternalProgress();
@@ -1286,8 +1289,22 @@ export class Reader implements PlaybackSource {
     const ms = (navigator as Navigator & { mediaSession?: MediaSession }).mediaSession;
     if (!ms) return;
     const handlers: [MediaSessionAction, () => void][] = [
-      ["play", () => !this.player.isActive && this.togglePlay()],
-      ["pause", () => this.player.pause()],
+      [
+        "play",
+        () => {
+          if (!this.player.isActive) this.togglePlay();
+          releaseAudioSession();
+        },
+      ],
+      [
+        "pause",
+        () => {
+          const was = this.player.isActive;
+          this.player.pause();
+          // In the background iOS would take the audio away from us while paused (see keepAlive).
+          if (was && document.visibilityState === "hidden" && this.settings.ttsEngine !== "system") holdAudioSession();
+        },
+      ],
       ["nexttrack", () => this.player.nextParagraph()],
       ["previoustrack", () => this.player.previousParagraph()],
     ];
