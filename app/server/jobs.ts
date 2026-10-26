@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
-import { FetchError } from "../../src/adapters/types";
+import { FetchError, type CatalogChapter } from "../../src/adapters/types";
 import { SpeechEngineError } from "../../src/speech/SpeechEngine";
 import type { JobInfo, JobKind, JobReason, JobStatus, JobsOverview, PageProvider, ProviderBlock } from "../shared/api";
 import type { Db } from "./db";
@@ -124,6 +124,29 @@ export class Jobs {
     const id = this.insert("export", bookId, String(volumeIndex), title, "manual");
     this.kick();
     return id;
+  }
+
+  /** Fill holes in an otherwise generated volume, without generating unread volumes. */
+  recoverChapters(bookId: string, recovered: CatalogChapter[]): void {
+    const book = this.library.book(bookId);
+    const profile = this.tts.profile();
+    if (!book || !profile) return;
+    const profileId = this.tts.profileId(profile);
+    const audio = new Map(this.library.chapterAudio(bookId).map((r) => [r.chapter_id, r]));
+    const ready = (id: string) => {
+      const row = audio.get(id);
+      return row?.profile === profileId && (!row.file || existsSync(this.library.abs(row.file)));
+    };
+    const recoveredIds = new Set(recovered.map((c) => c.chapterId));
+    for (const volume of bookCatalog(book)?.volumes ?? []) {
+      const other = volume.chapters.filter((c) => c.chapterId && !recoveredIds.has(c.chapterId));
+      if (!other.length || !other.every((c) => ready(c.chapterId!))) continue;
+      for (const chapter of volume.chapters) {
+        if (chapter.chapterId && recoveredIds.has(chapter.chapterId) && !ready(chapter.chapterId)) {
+          this.enqueueChapter(bookId, chapter.chapterId, chapter.title, "manual");
+        }
+      }
+    }
   }
 
   private insert(kind: JobKind, bookId: string, target: string, title: string, reason: JobReason): number {

@@ -8,6 +8,7 @@ import { findChapterLogScript, findContent, markComputedHidden, parseBilinovelDo
 import { defaultFrameHost, loadInFrame, type FrameHost, type LoadedFrame } from "./frameLoader";
 import { SUPPORTED_HOSTS, buildPageUrl, isChapterUrl } from "./url";
 import { catalogUrl, hasCatalog, parseCatalogDocument } from "./catalog";
+import { reconcileCatalog } from "./reconcileCatalog";
 
 const TEMPLATE_CACHE_KEY = "biliReader.chapterlogTemplate";
 
@@ -28,6 +29,8 @@ export class BilinovelAdapter implements SiteAdapter {
 
   /** Recent page loads, for the "copy diagnostics" button. */
   private readonly diagnostics: Record<string, unknown>[] = [];
+  private readonly firstPages = new Map<string, PageContent>();
+  private readonly catalogs = new Map<string, Catalog>();
 
   constructor(
     private readonly queue: RequestQueue = new RequestQueue(),
@@ -131,6 +134,8 @@ export class BilinovelAdapter implements SiteAdapter {
     const u = new URL(url);
     const parse = async (doc: Document) => {
       const catalog = parseCatalogDocument(doc, u, bookId);
+      reconcileCatalog(catalog, this.firstPages.values());
+      this.catalogs.set(bookId, catalog);
       this.record({ url, method: "catalog", chapters: catalog.volumes.reduce((n, v) => n + v.chapters.length, 0) });
       return catalog;
     };
@@ -196,6 +201,12 @@ export class BilinovelAdapter implements SiteAdapter {
   }
 
   private logged(page: PageContent): PageContent {
+    if (page.pageIndex === 0) {
+      // Keep only lightweight evidence, not the full text of every visited chapter.
+      this.firstPages.set(`${page.bookId}:${page.chapterId}`, { ...page, paragraphs: page.paragraphs.slice(0, 1) });
+      const catalog = this.catalogs.get(page.bookId);
+      if (catalog) reconcileCatalog(catalog, this.firstPages.values());
+    }
     log.debug("parsed", page.url, {
       chapter: page.chapterTitle,
       paragraphs: page.paragraphs.length,

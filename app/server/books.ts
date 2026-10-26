@@ -1,7 +1,7 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { SavedProgress } from "../../src/reader/ProgressStore";
-import type { Catalog } from "../../src/adapters/types";
+import type { Catalog, CatalogChapter } from "../../src/adapters/types";
 import type {
   BookDetail,
   BookSummary,
@@ -88,6 +88,29 @@ export class Books {
   /** Catalog loads in flight, and the last failure per book (shown until the next attempt). */
   private readonly syncs = new Map<string, Promise<BookRow>>();
   private readonly syncErrors = new Map<string, string>();
+  private readonly recoveryListeners: ((bookId: string, chapters: CatalogChapter[]) => void)[] = [];
+
+  onRecovered(fn: (bookId: string, chapters: CatalogChapter[]) => void): void {
+    this.recoveryListeners.push(fn);
+  }
+
+  /** Startup/new-content backfill; catalog_at remains the upstream fetch time. */
+  reconcile(id: string): void {
+    const book = this.get(id);
+    const catalog = book && bookCatalog(book);
+    if (catalog) this.saveCatalog(id, catalog);
+  }
+
+  /** Every catalog write uses the same recovery path, including reader refreshes. */
+  saveCatalog(id: string, catalog: Catalog, fetchedAt?: number): void {
+    const recovered = this.source.reconcileCatalog(catalog);
+    if (!recovered.length && fetchedAt === undefined) return;
+    this.db.tx(() => {
+      this.db.run("update books set catalog = ?, catalog_at = coalesce(?, catalog_at) where id = ?",
+        JSON.stringify(catalog), fetchedAt ?? null, id);
+      if (recovered.length) this.recoveryListeners.forEach((fn) => fn(id, recovered));
+    });
+  }
 
   /**
    * Adds a book (or refreshes it if already there). Waits at most `waitMs` for
@@ -173,15 +196,14 @@ export class Books {
     const [info, catalog] = await Promise.all([this.source.bookInfo(id).catch(() => undefined), this.source.catalog(id, true)]);
     if (!this.get(id)) throw new Error("书籍已删除");
     this.db.run(
-      `update books set title = ?, author = ?, cover_url = coalesce(?, cover_url), intro = ?, catalog = ?, catalog_at = ? where id = ?`,
+      `update books set title = ?, author = ?, cover_url = coalesce(?, cover_url), intro = ? where id = ?`,
       info?.title || catalog.title || book.title,
       info?.author || book.author,
       info?.coverUrl ?? catalog.cover ?? null,
       info?.intro || book.intro,
-      JSON.stringify(catalog),
-      Date.now(),
       id,
     );
+    this.saveCatalog(id, catalog, Date.now());
     if (!existsSync(this.library.coverFile(id))) {
       await this.fetchCover(id).catch((err) => console.warn("[library] cover", id, String(err)));
     }

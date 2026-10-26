@@ -3,6 +3,7 @@ import { ParseError, type Catalog, type PageContent } from "../../../src/adapter
 import { decodeText, parseChapterLogScript, type ShuffleTemplate } from "../../../src/adapters/bilinovel/deobfuscate";
 import { findChapterLogScript, parseBilinovelDocument } from "../../../src/adapters/bilinovel/parser";
 import { catalogUrl, parseCatalogDocument } from "../../../src/adapters/bilinovel/catalog";
+import { reconcileCatalog } from "../../../src/adapters/bilinovel/reconcileCatalog";
 import { buildPageUrl, parseChapterUrl, resolveHref } from "../../../src/adapters/bilinovel/url";
 import type { Db } from "../db";
 import type { SiteClient } from "./client";
@@ -73,6 +74,7 @@ export class SiteSource {
   private readonly templates = new Map<string, Promise<ShuffleTemplate>>();
   private readonly catalogs = new Map<string, { at: number; catalog: Promise<SiteCatalog> }>();
   private readonly pending = new Map<string, Promise<PageContent>>();
+  private readonly pageListeners: ((bookId: string) => void)[] = [];
 
   constructor(
     private readonly db: Db,
@@ -82,6 +84,17 @@ export class SiteSource {
 
   pageUrl(bookId: string, chapterId: string, pageIndex: number): string {
     return buildPageUrl(this.origin(), bookId, chapterId, pageIndex);
+  }
+
+  onPageCached(fn: (bookId: string) => void): void {
+    this.pageListeners.push(fn);
+  }
+
+  /** Reuses existing content without network requests or guessing IDs. */
+  reconcileCatalog(catalog: Catalog) {
+    if (!catalog.volumes.some((v) => v.chapters.some((c) => !c.chapterId))) return [];
+    const pages = this.db.all<PageRow>("select data from pages where book_id = ? and page_index = 0", catalog.bookId);
+    return reconcileCatalog(catalog, pages.map((r) => JSON.parse(r.data) as PageContent));
   }
 
   private parse<T>(html: string, url: string, fn: (doc: Document) => T): T {
@@ -134,6 +147,7 @@ export class SiteSource {
       JSON.stringify(page),
       Date.now(),
     );
+    this.pageListeners.forEach((fn) => fn(page.bookId));
     return page;
   }
 
