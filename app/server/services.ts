@@ -36,6 +36,11 @@ export function createServices(config: Config, version: string, options: Service
   const books = new Books(db, settings, source, client, library, tts, ffmpeg);
   const jobs = new Jobs(db, source, tts, library, ffmpeg);
   const planner = new Planner(books, jobs, tts, library);
+  books.onRecovered((id, recovered) => jobs.recoverChapters(id, recovered));
+  source.onPageCached((id) => books.reconcile(id));
+  // Upgrade existing libraries before the planner sees their reading positions.
+  // This is idempotent and does not require fetching the catalog again.
+  for (const book of books.list()) books.reconcile(book.id);
   settings.onChange(() => {
     client.reset();
     jobs.unblock();

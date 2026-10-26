@@ -76,6 +76,28 @@ type Loader = ConstructorParameters<typeof BilinovelAdapter>[2];
 const host: FrameHost = { attach() {}, reveal() {}, detach() {} };
 const queue = () => new RequestQueue({ minIntervalMs: 0 });
 
+describe("userscript catalog recovery", () => {
+  it.each([true, false])("repairs both catalog-first and content-first loads (catalog first: %s)", async (catalogFirst) => {
+    const html = `<div id="volumes"><h2>卷</h2><ul>
+      <li><a href="/novel/5369/180209.html">前</a></li>
+      <li class="jsChapter"><a href="javascript:cid(1)">第十章 普通的一章</a></li>
+      <li><a href="/novel/5369/180211.html">后</a></li></ul></div>`;
+    const loader: Loader = async () => ({
+      doc: new DOMParser().parseFromString(html, "text/html"), win: window, dispose() {},
+    });
+    const adapter = new BilinovelAdapter(queue(), host, loader);
+    const parsePage = () => adapter.parseRenderedDocument(loadFixture("normal-chapter.html"), new URL(`${ORIGIN}/novel/5369/180210.html`));
+    if (!catalogFirst) await parsePage();
+    const catalog = await adapter.fetchCatalog("5369");
+    if (catalogFirst) {
+      expect(catalog.volumes[0].chapters[1].chapterId).toBeUndefined();
+      await parsePage();
+    }
+    expect(catalog.volumes[0].chapters[1].chapterId).toBe("180210");
+    expect(catalog.volumes[0].chapters[1].url).toBe(`${ORIGIN}/novel/5369/180210.html`);
+  });
+});
+
 /**
  * Fake frame loader: a script-less frame gets the server HTML (or a challenge),
  * a scripted frame gets the page after the site's chapterlog.js ran.

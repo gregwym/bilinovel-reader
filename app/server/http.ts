@@ -498,7 +498,8 @@ export function createApp(d: AppDeps): Hono {
     if (saved && book.catalog_at && Date.now() - book.catalog_at < 3600_000) return c.json(saved);
     try {
       const catalog = await d.source.catalog(id);
-      if (book) db.run("update books set catalog = ?, catalog_at = ? where id = ?", JSON.stringify(catalog), Date.now(), id);
+      if (book) d.books.saveCatalog(id, catalog, Date.now());
+      else d.source.reconcileCatalog(catalog);
       return c.json(catalog);
     } catch (err) {
       return saved ? c.json(saved) : errorResponse(c, err);
