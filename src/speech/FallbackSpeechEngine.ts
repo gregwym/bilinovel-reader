@@ -34,6 +34,12 @@ export class FallbackSpeechEngine implements SpeechEngine {
   /** A fallback happened and the recovery has not been announced yet. */
   private degraded = false;
   private lastUsed: SpeechEngine;
+  /**
+   * The paragraph the secondary engine is speaking: it stays with it to the
+   * paragraph's end, as the paragraph was split for it (`maxChunkLength`) and
+   * the primary's stored audio is found by its own split.
+   */
+  private secondaryParagraph?: string;
 
   constructor(
     private readonly primary: SpeechEngine,
@@ -78,6 +84,7 @@ export class FallbackSpeechEngine implements SpeechEngine {
     this.openUntil = 0;
     this.failures = 0;
     this.lastCode = undefined;
+    this.secondaryParagraph = undefined;
   }
 
   unlock(): void {
@@ -86,7 +93,9 @@ export class FallbackSpeechEngine implements SpeechEngine {
   }
 
   async speak(text: string, options: SpeakOptions): Promise<"done" | "cancelled"> {
-    if (!this.usingFallback) {
+    const finishing = options.paragraphId !== undefined && options.paragraphId === this.secondaryParagraph;
+    if (!this.usingFallback && !finishing) {
+      this.secondaryParagraph = undefined;
       try {
         this.lastUsed = this.primary;
         const r = await this.primary.speak(text, options);
@@ -105,6 +114,7 @@ export class FallbackSpeechEngine implements SpeechEngine {
       }
     }
     this.lastUsed = this.secondary;
+    this.secondaryParagraph = options.paragraphId;
     return this.secondary.speak(text, options);
   }
 
