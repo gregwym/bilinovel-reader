@@ -184,6 +184,15 @@ describe("FallbackSpeechEngine (circuit breaker)", () => {
     expect(f.usingFallback).toBe(false);
   });
 
+  it("the secondary finishes its paragraph after the cooldown (it was split for it)", async () => {
+    const { f, spoken, advance } = setup(["network", null]);
+    await f.speak("一", { rate: 1, paragraphId: "p1" });
+    advance(20_001);
+    await f.speak("二", { rate: 1, paragraphId: "p1" });
+    await f.speak("三", { rate: 1, paragraphId: "p2" });
+    expect(spoken).toEqual(["azure:一", "web:一", "web:二", "azure:三"]);
+  });
+
   it("backs off longer on repeated transient failures", async () => {
     const { f, events, advance } = setup(["server", "server"]);
     await f.speak("一", { rate: 1 });

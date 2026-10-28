@@ -496,6 +496,8 @@ interface Segment {
   texts: string[];
   rendered?: Promise<Rendered>;
   done?: Rendered;
+  /** Not stored: being generated. */
+  generating?: boolean;
 }
 
 /** Pages for planning: the one containing a paragraph and the loaded ones after it. */
@@ -532,6 +534,8 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
   private readonly segments = new Map<string, Segment>();
   private queue: Segment[] = [];
   private working = false;
+  /** The segment speak() waits for (its status says whether it is loaded or generated). */
+  private waiting?: Segment;
   private playing?: { seg: Segment; idx: number; url: string; duration: number };
   private settle?: (r: "done" | "cancelled") => void;
   private token = 0;
@@ -599,15 +603,28 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
     );
     let rendered = seg.done;
     if (!rendered) {
-      this.options.onStatus?.(`${this.backend.name} 正在生成约 ${seg.texts.join("").length} 字的语音，请稍候…`);
+      this.waiting = seg;
+      this.showStatus(seg);
       try {
         rendered = await current;
       } finally {
-        if (token === this.token) this.options.onStatus?.("");
+        if (token === this.token) {
+          this.waiting = undefined;
+          this.options.onStatus?.("");
+        }
       }
       if (token !== this.token) return "cancelled";
     }
     return this.playParagraph(seg, idx, rendered, options.rate, continuing);
+  }
+
+  /** Stored audio only loads; only audio that isn't stored is said to be generated. */
+  private showStatus(seg: Segment): void {
+    this.options.onStatus?.(
+      seg.generating
+        ? `${this.backend.name} 正在生成约 ${seg.texts.join("").length} 字的语音，请稍候…`
+        : `${this.backend.name} 正在载入语音…`,
+    );
   }
 
   pause(): void {
@@ -727,6 +744,8 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
     seg.rendered ??= (async () => {
       const stored = await this.store.get(seg.key, seg.texts).catch(() => undefined);
       if (stored) return { audio: stored.audio, bounds: stored.bounds };
+      seg.generating = true;
+      if (this.waiting === seg) this.showStatus(seg);
       const rendered = await this.backend.generate(cfg, seg.texts, this.io);
       this.options.usage?.add(seg.texts.join("").length);
       try {

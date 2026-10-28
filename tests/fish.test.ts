@@ -10,7 +10,7 @@ import {
   type AudioDecoder,
   type FishConfig,
 } from "../src/speech/FishSpeechEngine";
-import { MemorySegmentStore } from "../src/speech/PageSpeechEngine";
+import { MemorySegmentStore, segmentKey } from "../src/speech/PageSpeechEngine";
 import { DEFAULT_SETTINGS, sanitizeSettings } from "../src/reader/ProgressStore";
 import type { HttpRequest, HttpResponse } from "../src/utils/http";
 
@@ -73,6 +73,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 function engine(responses: HttpResponse[], cfg: Partial<FishConfig> = {}, decode = decoder([1, 1])) {
   const requests: HttpRequest[] = [];
   const waits: number[] = [];
+  const statuses: string[] = [];
   const audio = new FakeAudio();
   const store = new MemorySegmentStore();
   const e = new FishSpeechEngine(() => ({ key: "k", model: FISH_DEFAULT_MODEL, voice: VOICE, ahead: 1, ...cfg }), {
@@ -91,8 +92,9 @@ function engine(responses: HttpResponse[], cfg: Partial<FishConfig> = {}, decode
       return res;
     },
     sleep: async (ms) => void waits.push(ms),
+    onStatus: (msg) => void statuses.push(msg),
   });
-  return { e, audio, requests, waits, store };
+  return { e, audio, requests, waits, store, statuses };
 }
 
 beforeAll(() => {
@@ -169,6 +171,29 @@ describe("FishSpeechEngine", () => {
     expect(audio.playbackRate).toBe(1.1);
     e.stop();
     await expect(p).resolves.toBe("cancelled");
+  });
+
+  it("says stored audio is loaded, not generated", async () => {
+    const { e, requests, store, statuses } = engine([mp3()]);
+    const audio = new Blob([new Uint8Array(64)], { type: "audio/mpeg" });
+    await store.put({ key: segmentKey(`${FISH_DEFAULT_MODEL}|${VOICE}`, BOOK[0]), texts: BOOK[0], audio, bounds: [0, 0.5] });
+    const p = e.speak(BOOK[0][0], { rate: 1, paragraphId: "0:0" });
+    for (let i = 0; i < 5; i++) await flush();
+    expect(statuses[0]).toBe("Fish Audio 正在载入语音…");
+    expect(statuses.some((s) => s.includes("生成"))).toBe(false);
+    // Only the page ahead was generated.
+    expect(requests).toHaveLength(1);
+    e.stop();
+    await p;
+  });
+
+  it("says audio that isn't stored is generated", async () => {
+    const { e, statuses } = engine([mp3(), mp3()]);
+    const p = e.speak(BOOK[0][0], { rate: 1, paragraphId: "0:0" });
+    for (let i = 0; i < 5; i++) await flush();
+    expect(statuses).toContain(`Fish Audio 正在生成约 ${BOOK[0].join("").length} 字的语音，请稍候…`);
+    e.stop();
+    await p;
   });
 
   it("starts a later paragraph at the pause before it", async () => {
