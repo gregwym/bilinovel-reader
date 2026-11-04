@@ -11,7 +11,7 @@ import { SpeechEngineError } from "../../src/speech/SpeechEngine";
 import { GEMINI_VOICES } from "../../src/speech/GeminiSpeechEngine";
 import { listFishVoices } from "../../src/speech/FishSpeechEngine";
 import { mergeProgress, type SavedProgress } from "../../src/reader/ProgressStore";
-import type { AppInfo, BookVoices, ChapterSegments, PageProvider, ServerSettingsUpdate } from "../shared/api";
+import type { AppInfo, BookVoices, ChapterSegments, GenerateResult, PageProvider, ServerSettingsUpdate } from "../shared/api";
 import type { Db } from "./db";
 import type { Config, Settings } from "./config";
 import type { SiteClient } from "./site/client";
@@ -307,13 +307,17 @@ export function createApp(d: AppDeps): Hono {
     return sendFile(c, file, "image/jpeg", { "Cache-Control": "private, max-age=86400" });
   });
 
-  /** Queues chapters: `chapters`, a `volume`, or `from` a chapter onwards (`count` chapters). */
+  /**
+   * Queues chapters: `chapters`, a `volume`, or `from` a chapter onwards (`count` chapters).
+   * Chapters whose cached text is incomplete are queued only with `partial`
+   * (the user confirmed); otherwise they come back in `incomplete`.
+   */
   app.post("/api/books/:id/generate", async (c) => {
     const book = d.books.get(c.req.param("id"));
     if (!book) return c.json({ error: "书籍不存在" }, 404);
     if (!d.tts.profile()) return c.json({ error: "请先在设置中配置 Gemini 或 Fish Audio 密钥", code: "config" }, 400);
     const body = await c.req
-      .json<{ chapters?: string[]; volume?: number; from?: string; count?: number; all?: boolean }>()
+      .json<{ chapters?: string[]; volume?: number; from?: string; count?: number; all?: boolean; partial?: boolean }>()
       .catch(() => ({}) as Record<string, never>);
     const catalog = bookCatalog(book);
     const all = (catalog?.volumes ?? []).flatMap((v, vi) =>
@@ -329,13 +333,20 @@ export function createApp(d: AppDeps): Hono {
     const profile = d.tts.profile()!;
     const profileId = d.tts.profileId(profile);
     const ready = new Map(d.library.chapterAudio(book.id).map((r) => [r.chapter_id, r.profile === profileId]));
+    const cached = d.source.cachedChapters(book.id);
     let queued = 0;
+    const incomplete: { chapterId: string; title: string }[] = [];
     for (const ch of pick) {
       if (ready.get(ch.id)) continue;
-      d.jobs.enqueueChapter(book.id, ch.id, ch.title, "manual");
+      const partial = !!cached.get(ch.id)?.incomplete;
+      if (partial && !body.partial) {
+        incomplete.push({ chapterId: ch.id, title: ch.title });
+        continue;
+      }
+      d.jobs.enqueueChapter(book.id, ch.id, ch.title, "manual", partial);
       queued++;
     }
-    return c.json({ queued });
+    return c.json({ queued, incomplete } satisfies GenerateResult);
   });
 
   // One chapter's cached text: fetched from the site again when next read. Its audio stays.
@@ -476,7 +487,8 @@ export function createApp(d: AppDeps): Hono {
         bookCatalog(book)
           ?.volumes.flatMap((v) => v.chapters)
           .find((ch) => ch.chapterId === chapterId)?.title ?? "";
-      d.jobs.enqueueChapter(book.id, chapterId, title, "manual");
+      // Made before from this text: again from it, even if it is incomplete.
+      d.jobs.enqueueChapter(book.id, chapterId, title, "manual", true);
     }
     return c.json({ ok: true });
   });

@@ -35,7 +35,7 @@ export function createServices(config: Config, version: string, options: Service
   const library = new Library(db, settings, ffmpeg, tts, config.libraryDir, config.dataDir);
   const books = new Books(db, settings, source, client, library, tts, ffmpeg);
   const jobs = new Jobs(db, source, tts, library, ffmpeg);
-  const planner = new Planner(books, jobs, tts, library);
+  const planner = new Planner(books, jobs, tts, library, source);
   books.onRecovered((id, recovered) => jobs.recoverChapters(id, recovered));
   source.onPageCached((id) => books.reconcile(id));
   // Upgrade existing libraries before the planner sees their reading positions.

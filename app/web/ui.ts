@@ -88,6 +88,8 @@ export interface MenuItem {
   href?: string;
   run?: () => unknown;
   disabled?: boolean;
+  /** Starts a new group (a line above it). */
+  divider?: boolean;
 }
 
 /** Opens a small menu under `button` on click. */
@@ -115,6 +117,7 @@ export function menu(button: HTMLButtonElement, items: () => MenuItem[]): void {
           close();
           void it.run?.();
         });
+        if (it.divider) el.classList.add("divider");
         return el;
       }),
     );

@@ -78,6 +78,8 @@ const MIGRATIONS = [
   // numbers (installs that ran it are at this version already). Incomplete
   // pages are fetched again when opened anyway.
   `select 1;`,
+  // A chapter job that may voice a chapter the site sent only part of (the user confirmed it).
+  `alter table jobs add column partial integer not null default 0;`,
 ];
 
 export type Row = Record<string, SQLInputValue>;

@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import type { Books } from "./books";
 import { linkedChapters } from "./books";
 import type { Jobs } from "./jobs";
+import type { SiteSource } from "./site/source";
 import type { Tts } from "./tts";
 import { bookCatalog, type BookRow, type Library } from "./library";
 
@@ -11,7 +12,9 @@ const CATALOG_MAX_AGE = 12 * 3600_000;
 /**
  * Keeps audio ready ahead of the reader: for each followed book, the chapter
  * being read and the next `ahead` chapters are queued when their audio is
- * missing or was made with another voice.
+ * missing or was made with another voice. A chapter whose cached text is
+ * incomplete (the site sent only part of it) is left alone: generating it is
+ * the user's choice (they are asked first).
  */
 export class Planner {
   private timer?: ReturnType<typeof setInterval>;
@@ -21,6 +24,7 @@ export class Planner {
     private readonly jobs: Jobs,
     private readonly tts: Tts,
     private readonly library: Library,
+    private readonly source: SiteSource,
   ) {}
 
   start(intervalMs = 10 * 60_000): void {
@@ -69,11 +73,12 @@ export class Planner {
     if (start < 0) return [];
     const window = chapters.slice(start, start + 1 + book.ahead);
     const audio = new Map(this.library.chapterAudio(bookId).map((r) => [r.chapter_id, r]));
+    const cached = this.source.cachedChapters(bookId);
     const queued: string[] = [];
     for (const c of window) {
       const row = audio.get(c.chapterId);
       const ready = row?.profile === profileId && (!row.file || existsSync(this.library.abs(row.file)));
-      if (ready) continue;
+      if (ready || cached.get(c.chapterId)?.incomplete) continue;
       this.jobs.enqueueChapter(bookId, c.chapterId, c.title, "follow");
       queued.push(c.chapterId);
     }

@@ -1,5 +1,5 @@
 import { h } from "../../../src/utils/dom";
-import type { BookDetail, BookVoice, BookVoices, ChapterInfo, VolumeInfo } from "../../shared/api";
+import type { BookDetail, BookVoice, BookVoices, ChapterInfo, GenerateResult, VolumeInfo } from "../../shared/api";
 import type { Settings } from "../../../src/reader/ProgressStore";
 import { api } from "../api";
 import { segmentSheet } from "../segments";
@@ -83,8 +83,18 @@ export function bookPage({ id }: Record<string, string>): Page {
 
   const generate = (button: HTMLButtonElement | null, payload: object, what: string) =>
     act(button, async () => {
-      const r = await api.post<{ queued: number }>(`/api/books/${id}/generate`, payload);
-      toast(r.queued ? `已加入 ${r.queued} 章到生成队列` : `${what}的语音都已生成`);
+      const r = await api.post<GenerateResult>(`/api/books/${id}/generate`, payload);
+      let queued = r.queued;
+      // Chapters the site sent only part of: voiced only when the user says so.
+      if (r.incomplete.length && confirm(incompletePrompt(r.incomplete))) {
+        const more = await api.post<GenerateResult>(`/api/books/${id}/generate`, {
+          chapters: r.incomplete.map((c) => c.chapterId),
+          partial: true,
+        });
+        queued += more.queued;
+      }
+      if (queued) toast(`已加入 ${queued} 章到生成队列`);
+      else if (!r.incomplete.length) toast(`${what}的语音都已生成`);
       refresh();
     });
 
@@ -255,7 +265,7 @@ export function bookPage({ id }: Record<string, string>): Page {
           "div",
           { class: "grow" },
           h("div", { class: "label" }, saved.length ? `本机已保存 ${saved.length} 章 · ${formatBytes(bytes)}` : "本机未保存章节"),
-          h("div", { class: "hint" }, "保存原文、插图和当前声音已生成的语音；连不上服务器时照常阅读和朗读。也可在章节或整卷的「下载」菜单里保存。章节的下载按钮上：实心勾＝已存（含全部语音），空心圈＝已存原文、语音不全，圆环＝正在保存。进度也在“任务”页"),
+          h("div", { class: "hint" }, "保存原文、插图和当前声音已生成的语音；连不上服务器时照常阅读和朗读。也可在章节的「⋯」或整卷的「下载」菜单里保存。章节的「⋯」按钮上：实心勾＝已存（含全部语音），空心圈＝已存原文、语音不全，圆环＝正在保存。进度也在“任务”页"),
         ),
       ),
       h("div", { class: "actions" }, nextBtn, delBtn),
@@ -421,19 +431,18 @@ export function bookPage({ id }: Record<string, string>): Page {
       player = undefined;
       sheet = segmentSheet(book, c);
     });
-    const dl = downloadButton(c.chapterId);
+    // One menu: downloads, saving on this device, then deleting on the server.
+    const more = moreButton(c.chapterId);
     const audio = c.audio === "done" && !c.silent;
-    menu(dl, () => [
+    menu(more, () => [
       audio
-        ? { label: "语音（MP3）", hint: c.duration ? formatDuration(c.duration) : "", href: `/api/books/${id}/chapters/${c.chapterId}/audio?download` }
-        : { label: "语音（MP3）", hint: c.silent ? "仅插图" : "尚未生成", disabled: true },
-      { label: "原文（TXT）", run: () => saveText(dl, `/api/books/${id}/chapters/${c.chapterId}/text`) },
-      ...(offlineSupported ? offlineItems(book, c) : []),
+        ? { label: "下载语音（MP3）", hint: c.duration ? formatDuration(c.duration) : "", href: `/api/books/${id}/chapters/${c.chapterId}/audio?download` }
+        : { label: "下载语音（MP3）", hint: c.silent ? "仅插图" : "尚未生成", disabled: true },
+      { label: "下载原文（TXT）", run: () => saveText(more, `/api/books/${id}/chapters/${c.chapterId}/text`) },
+      ...(offlineSupported ? offlineItems(book, c).map((it, i) => (i ? it : { ...it, divider: true })) : []),
+      ...cacheItems(c).map((it, i) => (i ? it : { ...it, divider: true })),
     ]);
-    // Its own button, so deleting is not hidden among the downloads.
-    const more = h("button", { class: "state", type: "button", title: "删除本章正文缓存或音频", "aria-label": "更多" }, icon("more"));
-    menu(more, () => cacheItems(c));
-    return h("li", { class: cls }, name, segBtn, dl, more, stateButton(book, c));
+    return h("li", { class: cls }, name, segBtn, more, stateButton(book, c));
   }
 
   /** Delete this chapter's cached text or its audio on the server (never both at once). */
@@ -486,9 +495,9 @@ export function bookPage({ id }: Record<string, string>): Page {
     ];
   }
 
-  /** The chapter's download button, which also shows whether it is saved on this device (or being saved). */
-  function downloadButton(chapterId: string): HTMLButtonElement {
-    const btn = h("button", { class: "state dl", type: "button", "aria-label": "下载" });
+  /** The chapter's menu button (downloads, delete), which also shows whether it is saved on this device (or being saved). */
+  function moreButton(chapterId: string): HTMLButtonElement {
+    const btn = h("button", { class: "state dl", type: "button", "aria-label": "更多" });
     const busy = offlineSupported ? savingState(id, chapterId) : undefined;
     const saved = offlineSupported ? savedChapters(id)[chapterId] : undefined;
     if (busy && "fraction" in busy) {
@@ -497,7 +506,7 @@ export function bookPage({ id }: Record<string, string>): Page {
       btn.title = `正在保存到本机 ${Math.round(busy.fraction * 100)}%`;
       return btn;
     }
-    btn.append(icon("download"));
+    btn.append(icon("more"));
     if (busy) {
       btn.append(h("span", { class: "mark queued" }));
       btn.title = "等待保存到本机";
@@ -506,7 +515,7 @@ export function bookPage({ id }: Record<string, string>): Page {
       btn.append(full ? h("span", { class: "mark ok" }, icon("tick")) : h("span", { class: "mark partial" }));
       btn.title = `已存本机（${formatBytes(saved.bytes)}，${offlineAudio(saved)}）`;
     } else {
-      btn.title = "下载";
+      btn.title = "下载、删除缓存或音频";
     }
     return btn;
   }
@@ -646,4 +655,11 @@ function ring(fraction: number): string {
 
 function offlineAudio(saved: SavedChapter): string {
   return saved.total ? `语音 ${saved.segments}/${saved.total} 段` : "无语音";
+}
+
+/** Asks before voicing chapters whose text is incomplete. */
+export function incompletePrompt(chapters: { title: string }[]): string {
+  const names = chapters.slice(0, 5).map((c) => `《${c.title}》`).join("、");
+  const which = chapters.length > 5 ? `${names} 等 ${chapters.length} 章` : names;
+  return `${which}的正文不完整（网站只返回了部分）。仍要用现有正文生成语音吗？\n\n生成后若网站补全了正文，需要删除本章音频再重新生成。`;
 }
