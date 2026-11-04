@@ -297,7 +297,7 @@ export function settingsPage(): Page {
       fetch: "无法访问网站",
       parse: "页面结构无法解析",
     };
-    const partialText = (n?: number) => (n ? `只返回了开头约 ${n} 字，其余需网站脚本加载，未保存` : "");
+    const partialText = (n?: number) => (n ? `只返回了开头约 ${n} 字，未当作完整正文保存` : "");
     const showRecent = async () => {
       const { failures } = await api.get<{ failures: SiteFailure[] }>("/api/site/diagnostics");
       recent.textContent = failures.length

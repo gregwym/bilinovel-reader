@@ -417,7 +417,7 @@ export function parseBilinovelDocument(doc: Document, url: URL, options: ParseOp
       );
     }
     // A visible notice next to text: the site sent only the start of the page
-    // (its scripts load the rest). Keep what came, marked incomplete. A notice
+    // (e.g. without its `night` cookie, see siteCookies.ts). Keep what came, marked incomplete. A notice
     // the reader cannot see (hidden, noscript) is only a fallback.
     incomplete = notices.some((n) => readableLength(n, new Set()) > 0 && !hiddenWithin(n, content));
     for (const n of notices) n.parentNode?.removeChild(n);

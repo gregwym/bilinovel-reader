@@ -1,4 +1,4 @@
-import type { Catalog, ChapterNav, PageContent, SiteAdapter } from "../types";
+import type { Catalog, PageContent, SiteAdapter } from "../types";
 import { ContentUnavailableError, FetchError } from "../types";
 import { RequestQueue } from "../../utils/RequestQueue";
 import { log } from "../../utils/log";
@@ -8,7 +8,8 @@ import { findChapterLogScript, findContent, markComputedHidden, parseBilinovelDo
 import { defaultFrameHost, loadInFrame, type FrameHost, type LoadedFrame } from "./frameLoader";
 import { SUPPORTED_HOSTS, buildPageUrl, isChapterUrl } from "./url";
 import { catalogUrl, hasCatalog, parseCatalogDocument } from "./catalog";
-import { navFromPage, reconcileCatalogReport, type PlaceholderReport } from "./reconcileCatalog";
+import { reconcileCatalog } from "./reconcileCatalog";
+import { ensureNightCookie } from "./siteCookies";
 
 const TEMPLATE_CACHE_KEY = "biliReader.chapterlogTemplate";
 
@@ -29,10 +30,8 @@ export class BilinovelAdapter implements SiteAdapter {
 
   /** Recent page loads, for the "copy diagnostics" button. */
   private readonly diagnostics: Record<string, unknown>[] = [];
-  /** Chapter navigation seen on loaded pages (and error pages): evidence for catalog placeholders. */
-  private readonly navs = new Map<string, ChapterNav>();
+  private readonly firstPages = new Map<string, PageContent>();
   private readonly catalogs = new Map<string, Catalog>();
-  private readonly placeholderReports = new Map<string, PlaceholderReport[]>();
 
   constructor(
     private readonly queue: RequestQueue = new RequestQueue(),
@@ -53,23 +52,7 @@ export class BilinovelAdapter implements SiteAdapter {
   }
 
   getDiagnostics(): Record<string, unknown>[] {
-    const placeholders = [...this.placeholderReports].flatMap(([bookId, report]) =>
-      report.filter((r) => r.status !== "recovered").map((r) => ({ method: "placeholder", bookId, ...r })),
-    );
-    return [...this.diagnostics, ...placeholders];
-  }
-
-  private reconcile(bookId: string): void {
-    const catalog = this.catalogs.get(bookId);
-    if (!catalog) return;
-    const { report } = reconcileCatalogReport(catalog, [], this.navs.values());
-    this.placeholderReports.set(bookId, report);
-  }
-
-  private remember(nav: ChapterNav | undefined, key: string): void {
-    if (!nav) return;
-    this.navs.set(key, nav);
-    this.reconcile(nav.bookId);
+    return [...this.diagnostics];
   }
 
   private record(entry: Record<string, unknown>): void {
@@ -152,8 +135,8 @@ export class BilinovelAdapter implements SiteAdapter {
     const u = new URL(url);
     const parse = async (doc: Document) => {
       const catalog = parseCatalogDocument(doc, u, bookId);
+      reconcileCatalog(catalog, this.firstPages.values());
       this.catalogs.set(bookId, catalog);
-      this.reconcile(bookId);
       this.record({ url, method: "catalog", chapters: catalog.volumes.reduce((n, v) => n + v.chapters.length, 0) });
       return catalog;
     };
@@ -180,6 +163,8 @@ export class BilinovelAdapter implements SiteAdapter {
    * scripts (the challenge may need the user) and read the rendered page.
    */
   private loadStatic(url: string): Promise<PageContent> {
+    // Without the site's `night` cookie only the start of the page comes (see siteCookies.ts).
+    if (ensureNightCookie()) this.record({ url, method: "cookie", set: "night" });
     return this.withFrame(url, false, (doc, win) => this.parseDocument(doc, new URL(url), win));
   }
 
@@ -205,7 +190,7 @@ export class BilinovelAdapter implements SiteAdapter {
       }
     }
     if (!partial.incomplete) return partial;
-    // Only the start came: the site's scripts may load the rest. Otherwise show what came.
+    // Only the start came: try once with the site's scripts. Otherwise show what came.
     log.info("incomplete page; loading with scripts", url);
     this.record({ url, method: "fallback", reason: "incomplete" });
     try {
@@ -217,10 +202,9 @@ export class BilinovelAdapter implements SiteAdapter {
     return partial;
   }
 
-  /** Keeps what the site's "content failed to load" page showed (never as content). */
+  /** Notes what the site's "content failed to load" page showed (never as content). */
   private unavailable(err: ContentUnavailableError): void {
     this.record({ url: err.url, method: "unavailable", excerpt: err.excerpt, nav: err.nav });
-    if (err.nav) this.remember(err.nav, `${err.nav.bookId}:${err.nav.chapterId}:error`);
   }
 
   private async withFrame<T>(
@@ -246,10 +230,12 @@ export class BilinovelAdapter implements SiteAdapter {
   }
 
   private logged(page: PageContent): PageContent {
-    // Keep only lightweight evidence (title and chapter links), not the text of every visited page.
-    const key = `${page.bookId}:${page.chapterId}`;
-    if (page.pageIndex === 0) this.navs.delete(`${key}:error`);
-    this.remember(navFromPage(page), `${key}:${page.pageIndex}`);
+    if (page.pageIndex === 0) {
+      // Keep only lightweight evidence, not the full text of every visited chapter.
+      this.firstPages.set(`${page.bookId}:${page.chapterId}`, { ...page, paragraphs: page.paragraphs.slice(0, 1) });
+      const catalog = this.catalogs.get(page.bookId);
+      if (catalog) reconcileCatalog(catalog, this.firstPages.values());
+    }
     log.debug("parsed", page.url, {
       chapter: page.chapterTitle,
       paragraphs: page.paragraphs.length,

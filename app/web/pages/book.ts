@@ -28,13 +28,6 @@ const READER_SETTINGS_KEY = "biliReader.settings";
 const PROVIDER_LABEL: Record<string, string> = { gemini: "Gemini", fish: "Fish Audio" };
 
 /** A book: reading, its chapters' audio, generation and export. */
-/** Why the catalog has no link for an entry (details in the tooltip). */
-const UNLINKED: Record<string, string> = {
-  "no-evidence": "目录只有占位符，尚无相邻章节的导航可确认",
-  conflict: "导航证据互相矛盾，未自动链接",
-  ambiguous: "有多个章节符合，未自动链接",
-};
-
 export function bookPage({ id }: Record<string, string>): Page {
   const el = h("div", {}, topbar("", "/"));
   const body = h("div");
@@ -404,12 +397,7 @@ export function bookPage({ id }: Record<string, string>): Page {
   function chapterRow(book: BookDetail, c: ChapterInfo): HTMLElement {
     const current = !!c.chapterId && c.chapterId === book.position?.chapterId;
     const cls = ["chapter-row", current ? "current" : "", c.chapterId ? "" : "disabled"].join(" ").trim();
-    if (!c.chapterId) {
-      const why = c.unlinked && UNLINKED[c.unlinked.status];
-      const sub = h("div", { class: "sub" }, why ? `暂无链接 · ${why}` : "暂无链接");
-      if (c.unlinked?.notes.length) sub.title = c.unlinked.notes.join("\n");
-      return h("li", { class: cls }, h("div", { class: "name" }, c.title, sub));
-    }
+    if (!c.chapterId) return h("li", { class: cls }, h("div", { class: "name" }, c.title, h("div", { class: "sub" }, "暂无链接")));
     const sub: string[] = [];
     if (current) sub.push("正在读");
     if (c.audio === "done" && c.silent) sub.push("仅插图，无语音");
@@ -441,9 +429,11 @@ export function bookPage({ id }: Record<string, string>): Page {
         : { label: "语音（MP3）", hint: c.silent ? "仅插图" : "尚未生成", disabled: true },
       { label: "原文（TXT）", run: () => saveText(dl, `/api/books/${id}/chapters/${c.chapterId}/text`) },
       ...(offlineSupported ? offlineItems(book, c) : []),
-      ...cacheItems(c),
     ]);
-    return h("li", { class: cls }, name, segBtn, dl, stateButton(book, c));
+    // Its own button, so deleting is not hidden among the downloads.
+    const more = h("button", { class: "state", type: "button", title: "删除本章正文缓存或音频", "aria-label": "更多" }, icon("more"));
+    menu(more, () => cacheItems(c));
+    return h("li", { class: cls }, name, segBtn, dl, more, stateButton(book, c));
   }
 
   /** Delete this chapter's cached text or its audio on the server (never both at once). */

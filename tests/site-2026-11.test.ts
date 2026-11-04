@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { parseBilinovelDocument } from "../src/adapters/bilinovel/parser";
 import { DEFAULT_SHUFFLE_TEMPLATE, parseChapterLogScript } from "../src/adapters/bilinovel/deobfuscate";
-import { readGuardScript } from "../app/server/site/client";
+import { ensureNightCookie, hasNightCookie, nightValue, withNightCookie } from "../src/adapters/bilinovel/siteCookies";
 import { ORIGIN, fixture, loadFixture, parseHtml } from "./helpers";
 
 /**
  * Book 5370, chapter 288458 page 1 as the site served it on 2026-11-04 (see
- * tests/fixtures/README.md): without the reading ticket only the first 11
+ * tests/fixtures/README.md): without the `night` cookie only the first 11
  * paragraphs come, the last one cut off and running into the notice; with it,
  * all 122 (shuffled after the 20th by chapterlog.js).
  */
@@ -14,7 +14,7 @@ const url = new URL(`${ORIGIN}/novel/5370/288458.html`);
 const template = parseChapterLogScript(fixture("chapterlog-2026-11.js"));
 const placeholder = (n: number) => `第${n}段占位正文，按网站渲染后的顺序编号。`;
 
-describe("chapter pages since the reading ticket (2026-11)", () => {
+describe("chapter pages without and with the night cookie (2026-11)", () => {
   it("reads the shuffle constants from the new obfuscated chapterlog.js (they changed)", () => {
     expect(template).toEqual({ ...DEFAULT_SHUFFLE_TEMPLATE, seedMultiplier: 126, seedOffset: 232 });
   });
@@ -46,14 +46,35 @@ describe("chapter pages since the reading ticket (2026-11)", () => {
     const page = parseBilinovelDocument(doc, url);
     expect(page.incomplete).toBe(true);
     expect(page.paragraphs.map((p) => p.text)).toEqual(["前面的正文前面的正文前面的正文。", "这一段的开头后面还有字。"]);
+  });});
+
+describe("the site's night cookie", () => {
+  it("is found in a Cookie header or document.cookie", () => {
+    expect(hasNightCookie("night=0")).toBe(true);
+    expect(hasNightCookie("a=1; night=1")).toBe(true);
+    expect(hasNightCookie("midnight=1; knight=2")).toBe(false);
+    expect(hasNightCookie("")).toBe(false);
   });
 
-  it("reads the guard script without running it", () => {
-    expect(readGuardScript(fixture("search-guard-2026-11.js"))).toEqual({
-      cookies: { jieqiSearchJs: "100000.test-js-value" },
-      maxAge: 3600,
-      redeem: "/search.html?search_guard=redeem&r=",
-    });
-    expect(readGuardScript("nothing here")).toEqual({ cookies: {}, maxAge: undefined, redeem: undefined });
+  it("is added to a Cookie header only when missing", () => {
+    expect(withNightCookie("")).toBe("night=0");
+    expect(withNightCookie("cf_clearance=x")).toBe("cf_clearance=x; night=0");
+    expect(withNightCookie("cf_clearance=x; night=1")).toBe("cf_clearance=x; night=1");
+  });
+
+  it("takes the value the site's darkmode.js would pick", () => {
+    expect(nightValue(new Date(2026, 10, 4, 12))).toBe("0");
+    expect(nightValue(new Date(2026, 10, 4, 19, 59))).toBe("0");
+    expect(nightValue(new Date(2026, 10, 4, 20))).toBe("1");
+    expect(nightValue(new Date(2026, 10, 4, 5, 59))).toBe("1");
+    expect(nightValue(new Date(2026, 10, 4, 6))).toBe("0");
+  });
+
+  it("is set in the browser when missing, never changed", () => {
+    document.cookie = "night=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
+    expect(ensureNightCookie(document, new Date(2026, 10, 4, 22))).toBe(true);
+    expect(document.cookie).toMatch(/(^|; )night=1/);
+    expect(ensureNightCookie(document, new Date(2026, 10, 4, 12))).toBe(false);
+    expect(document.cookie).toMatch(/(^|; )night=1/);
   });
 });
