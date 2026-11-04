@@ -46,6 +46,44 @@ const BLOCKED_KEYWORDS = [
   "请使用手机阅读",
 ];
 
+/** Readable characters beyond the notice that make a page real content. */
+const MIN_REAL_TEXT = 20;
+/** A notice element is short; a longer one holds chapter text too, so only its text node goes. */
+const MAX_NOTICE_LENGTH = 80;
+const INERT = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"]);
+
+/** The nodes inside `content` that show the site's "failed to load" text. */
+function blockedNotices(content: Element): Node[] {
+  const found = new Set<Node>();
+  const walk = (node: Node) => {
+    for (const child of Array.from(node.childNodes)) {
+      if (child.nodeType === 3) {
+        const text = child.nodeValue ?? "";
+        if (!BLOCKED_KEYWORDS.some((k) => text.includes(k))) continue;
+        const parent = child.parentElement;
+        const short = !!parent && parent !== content && (parent.textContent ?? "").trim().length <= MAX_NOTICE_LENGTH;
+        found.add(short ? parent : child);
+      } else if (child.nodeType === 1) {
+        walk(child);
+      }
+    }
+  };
+  walk(content);
+  return [...found];
+}
+
+/** Visible, non-whitespace characters of `node`, leaving out `skip`. */
+function readableLength(node: Node, skip: Set<Node>): number {
+  if (skip.has(node)) return 0;
+  if (node.nodeType === 3) return (node.nodeValue ?? "").replace(/\s+/g, "").length;
+  if (node.nodeType !== 1) return 0;
+  const el = node as Element;
+  if (INERT.has(el.tagName.toUpperCase()) || isHidden(el)) return 0;
+  let n = 0;
+  for (const child of Array.from(el.childNodes)) n += readableLength(child, skip);
+  return n;
+}
+
 const ANTI_SCRAPE_TAG = /^[a-z]\d{4}$/i;
 
 export interface ParseOptions {
@@ -316,12 +354,19 @@ export function parseBilinovelDocument(doc: Document, url: URL, options: ParseOp
 
   const rawText = content.textContent ?? "";
   if (BLOCKED_KEYWORDS.filter((k) => rawText.includes(k)).length >= 2) {
-    throw new ContentUnavailableError(
-      "The site returned a 'content failed to load' page instead of the chapter",
-      href,
-      pageNav(doc, url, rp, { bookId, chapterId, pageIndex }),
-      rawText.replace(/\s+/g, " ").trim().slice(0, 200),
-    );
+    const notices = blockedNotices(content);
+    // Pages can carry the notice (hidden, or for when their scripts fail) next to
+    // the real chapter: only a page with nothing else readable is an error page.
+    if (readableLength(content, new Set(notices)) < MIN_REAL_TEXT) {
+      const shown = notices.map((n) => n.textContent ?? "").join(" ") || rawText;
+      throw new ContentUnavailableError(
+        "The site returned a 'content failed to load' page instead of the chapter",
+        href,
+        pageNav(doc, url, rp, { bookId, chapterId, pageIndex }),
+        shown.replace(/\s+/g, " ").trim().slice(0, 200),
+      );
+    }
+    for (const n of notices) n.parentNode?.removeChild(n);
   }
 
   for (const sel of PRE_RESTORE_JUNK) content.querySelectorAll(sel).forEach((el) => el.remove());

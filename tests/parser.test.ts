@@ -165,6 +165,21 @@ describe("malformed and hostile input", () => {
     expect(e.excerpt).toContain("內容加載失敗");
   });
 
+  it.each([
+    ["a hidden notice", "<p style='display:none'>內容加載失敗！請刷新或更換瀏覽器</p>"],
+    ["a notice for when scripts fail", "<div class='err'>內容加載失敗！請刷新或更換瀏覽器</div>"],
+    ["a bare notice text", "內容加載失敗！請刷新或更換瀏覽器"],
+  ])("keeps a real chapter that also carries %s", (_, notice) => {
+    const doc = parseHtml(`<h1 id='atitle'>探求知识</h1><div id='acontent'>
+      <p>在老师告知会举行考试的隔天早上。从这一天起，即将展开考试期间或是作为准备期间的一星期。</p>
+      <p>我只管早上起床后去上学、认真上课。</p>${notice}</div>`);
+    const page = parseBilinovelDocument(doc, url("/novel/5370/288458.html"));
+    expect(page.paragraphs.map((p) => p.text)).toEqual([
+      "在老师告知会举行考试的隔天早上。从这一天起，即将展开考试期间或是作为准备期间的一星期。",
+      "我只管早上起床后去上学、认真上课。",
+    ]);
+  });
+
   it("throws ParseError for empty content", () => {
     const doc = parseHtml("<h1 id='atitle'>t</h1><div id='acontent'><p> </p><div class='ad'>ad</div></div>");
     expect(() => parseBilinovelDocument(doc, url("/novel/5369/180204.html"))).toThrow(/empty/);
