@@ -185,8 +185,9 @@ export class BilinovelAdapter implements SiteAdapter {
 
   private async loadPage(url: string): Promise<PageContent> {
     const u = new URL(url);
+    let partial: PageContent;
     try {
-      return await this.loadStatic(url);
+      partial = await this.loadStatic(url);
     } catch (err) {
       const challenge = err instanceof FetchError && err.challenge;
       const unavailable = err instanceof ContentUnavailableError;
@@ -203,6 +204,17 @@ export class BilinovelAdapter implements SiteAdapter {
         throw again;
       }
     }
+    if (!partial.incomplete) return partial;
+    // Only the start came: the site's scripts may load the rest. Otherwise show what came.
+    log.info("incomplete page; loading with scripts", url);
+    this.record({ url, method: "fallback", reason: "incomplete" });
+    try {
+      const page = await this.withFrame(url, true, async (doc) => this.logged(this.parseRendered(doc, u, "rendered")));
+      if (!page.incomplete) return page;
+    } catch {
+      /* keep what came */
+    }
+    return partial;
   }
 
   /** Keeps what the site's "content failed to load" page showed (never as content). */

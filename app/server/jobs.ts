@@ -1,14 +1,14 @@
 import { existsSync } from "node:fs";
 import { mkdir, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
-import { ContentUnavailableError, FetchError, type CatalogChapter, type PageContent } from "../../src/adapters/types";
+import { ContentUnavailableError, FetchError, type CatalogChapter } from "../../src/adapters/types";
 import { SpeechEngineError } from "../../src/speech/SpeechEngine";
 import type { JobInfo, JobKind, JobReason, JobStatus, JobsOverview, PageProvider, ProviderBlock } from "../shared/api";
 import type { Db } from "./db";
 import type { Ffmpeg } from "./audio/ffmpeg";
-import type { SiteSource } from "./site/source";
+import { incompleteError, type SiteSource } from "./site/source";
 import { BLOCKING_CODES, describeError, type Tts } from "./tts";
-import { bookCatalog, findChapter, type ChapterAudioRow, type ChapterPart, type Library } from "./library";
+import { bookCatalog, type ChapterAudioRow, type ChapterPart, type Library } from "./library";
 
 interface JobRow {
   id: number;
@@ -34,9 +34,6 @@ export const PRIORITY: Record<JobReason, number> = { manual: 10, follow: 50 };
 export const READER_PRIORITY = 100;
 const MAX_ATTEMPTS = 5;
 const PAUSED_KEY = "server.jobsPaused";
-/** When 0.10.20 could first have cached incomplete pages (see the db migration that drops them). */
-export const PARTIAL_PAGES_SINCE = 1793765400000; // 2026-11-04T04:10:00Z
-const PARTIAL_AUDIO_REPAIRED = "repair.partialAudio";
 
 /** Something only the user can fix (a key, a bot check): jobs for it wait until settings change. */
 export type BlockKey = PageProvider | "site";
@@ -402,6 +399,9 @@ export class Jobs {
       this.update(job.id, { message: `获取正文（第 ${n} 页）…` }),
     );
     this.checkCancelled(job.id);
+    // Never voice a chapter the site sent only part of: wait and ask again.
+    const partial = pages.find((p) => p.incomplete);
+    if (partial) throw incompleteError(partial);
     const parts = this.tts.parts(profile.provider, pages);
     if (!parts.length) {
       this.library.markSilent(book.id, job.target, profileId);
@@ -429,52 +429,6 @@ export class Jobs {
     if (!(await this.ffmpeg.check())) throw new Error("未找到 ffmpeg，无法合成章节文件");
     await this.library.assemble(book, job.target, segments, profileId);
     this.update(job.id, { message: null });
-  }
-
-  // -------------------------------------------------------------------------
-  // Repair
-
-  /**
-   * 0.10.20 (from PARTIAL_PAGES_SINCE) cached pages the site sent only the
-   * start of, and chapter audio may have been made from them; 0.10.21 dropped
-   * those pages, not the audio. A chapter file made since then is kept only
-   * when every page of its chapter is still cached from before it was made
-   * (pages 0..n in order, the last not continuing the chapter): then it was
-   * made from those complete pages. Otherwise it is removed and queued
-   * again. Its segments are kept: they are keyed by their text, so the parts
-   * that read the same are not requested again. Runs once; returns the
-   * chapters queued.
-   */
-  async repairPartialAudio(): Promise<string[]> {
-    if (this.db.getKv(PARTIAL_AUDIO_REPAIRED)) return [];
-    const rows = this.db.all<ChapterAudioRow>(
-      "select * from chapter_audio where file != '' and updated_at >= ? order by book_id, chapter_id",
-      PARTIAL_PAGES_SINCE,
-    );
-    const queued: string[] = [];
-    for (const row of rows) {
-      const pages = this.db
-        .all<{ page_index: number; data: string }>(
-          "select page_index, data from pages where book_id = ? and chapter_id = ? and fetched_at <= ? order by page_index",
-          row.book_id,
-          row.chapter_id,
-          row.updated_at,
-        )
-        .map((p) => ({ index: p.page_index, page: JSON.parse(p.data) as PageContent }));
-      const complete =
-        pages.length > 0 &&
-        pages.every((p, i) => p.index === i) &&
-        pages[pages.length - 1].page.nextType !== "same-chapter-page";
-      if (complete) continue;
-      await this.library.deleteChapter(row.book_id, row.chapter_id, true);
-      const book = this.library.book(row.book_id);
-      const place = book && findChapter(bookCatalog(book), row.chapter_id);
-      if (place) this.enqueueChapter(row.book_id, row.chapter_id, place.chapterTitle, "manual");
-      queued.push(`${row.book_id}/${row.chapter_id}`);
-    }
-    this.db.setKv(PARTIAL_AUDIO_REPAIRED, String(this.now()));
-    if (queued.length) console.warn(`[library] Remade chapter audio possibly made from incomplete pages: ${queued.join(", ")}`);
-    return queued;
   }
 
   // -------------------------------------------------------------------------

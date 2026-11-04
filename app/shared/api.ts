@@ -88,6 +88,10 @@ export interface ChapterInfo {
   silent?: boolean;
   /** Why a catalog entry without a link could not be linked from the cached pages. */
   unlinked?: { status: "no-evidence" | "conflict" | "ambiguous"; notes: string[] };
+  /** Site pages of this chapter cached on the server. */
+  pages?: number;
+  /** One of them is only the start the site sent (see PageContent.incomplete). */
+  incomplete?: boolean;
 }
 
 /** A chapter's speech segments in one voice (each is one request). */

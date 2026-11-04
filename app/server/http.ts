@@ -338,6 +338,12 @@ export function createApp(d: AppDeps): Hono {
     return c.json({ queued });
   });
 
+  // One chapter's cached text: fetched from the site again when next read. Its audio stays.
+  app.delete("/api/books/:id/chapters/:chapter/pages", (c) => {
+    const pages = d.source.forgetChapter(c.req.param("id"), c.req.param("chapter"));
+    return c.json({ ok: true, pages });
+  });
+
   app.delete("/api/books/:id/audio", async (c) => {
     const id = c.req.param("id");
     const chapterId = c.req.query("chapter");

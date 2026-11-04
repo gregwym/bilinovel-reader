@@ -125,6 +125,24 @@ describe("userscript: the site's 'content failed to load' page", () => {
     const diag = adapter.getDiagnostics();
     expect(diag.some((d) => d.method === "unavailable" && String(d.excerpt).includes("內容加載失敗"))).toBe(true);
   });
+
+  const partialPage = (rest: string) => errorPage.replace("<p>內容加載失敗", `<p>在老师告知会举行考试的隔天早上，从这一天起即将展开考试期间。</p>${rest}<p>內容加載失敗`);
+  it.each([
+    ["uses the rendered page when the site's scripts load the rest", `<p>其余正文。</p>`, false],
+    ["shows the start, marked incomplete, when the scripts don't help either", "", true],
+  ])("an incomplete page: %s", async (_, rendered, incomplete) => {
+    const calls: string[] = [];
+    const loader: Loader = async (url, _host, o) => {
+      calls.push(o?.scripts ? "scripted" : "static");
+      const html = o?.scripts && rendered ? errorPage.replace("<p>內容加載失敗！請刷新或更換瀏覽器</p>", `<p>开头。</p>${rendered}`) : partialPage("");
+      return { doc: new DOMParser().parseFromString(html, "text/html"), win: window, dispose() {} };
+    };
+    const adapter = new BilinovelAdapter(queue(), host, loader);
+    const page = await adapter.fetchPage(`${ORIGIN}/novel/5369/180205.html`);
+    expect(calls).toEqual(["static", "scripted"]);
+    expect(!!page.incomplete).toBe(incomplete);
+    expect(page.paragraphs.length).toBeGreaterThan(0);
+  });
 });
 
 /**

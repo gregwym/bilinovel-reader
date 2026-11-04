@@ -68,6 +68,18 @@ interface PageRow {
 
 const NAV_KEY = (bookId: string, chapterId: string) => `site.nav:${bookId}:${chapterId}`;
 
+/** How an incomplete page is reported (diagnostics, generated audio). */
+export function incompleteError(page: PageContent): ContentUnavailableError {
+  const text = page.paragraphs.map((p) => p.text ?? "").join("");
+  return new ContentUnavailableError(
+    "网站只返回了这一页的开头部分（其余显示「内容加载失败」），暂不生成语音，稍后重试",
+    page.url,
+    undefined,
+    `${text.slice(-120)}……（內容加載失敗）`,
+    text.replace(/\s+/g, "").length,
+  );
+}
+
 export function failureOf(err: unknown, url: string): Omit<SiteFailure, "at"> {
   if (err instanceof ContentUnavailableError) {
     return { url, kind: "unavailable", message: err.message, nav: err.nav, excerpt: err.excerpt, partial: err.partial };
@@ -155,7 +167,9 @@ export class SiteSource {
     const start = Date.now();
     try {
       const page = await this.load(url, 0);
-      return { ok: true, url, ms: Date.now() - start, title: page.chapterTitle, paragraphs: page.paragraphs.length };
+      const probe: PageProbe = { ok: true, url, ms: Date.now() - start, title: page.chapterTitle, paragraphs: page.paragraphs.length };
+      if (page.incomplete) Object.assign(probe, { partial: incompleteError(page).partial, excerpt: incompleteError(page).excerpt });
+      return probe;
     } catch (err) {
       const f = failureOf(err, url);
       return { ok: false, url, ms: Date.now() - start, kind: f.kind, error: f.message, status: f.status, nav: f.nav, excerpt: f.excerpt, partial: f.partial };
@@ -171,6 +185,21 @@ export class SiteSource {
     }
   }
 
+  /** Forgets a chapter's cached pages (they are fetched again when read); returns how many. */
+  forgetChapter(bookId: string, chapterId: string): number {
+    return this.db.run("delete from pages where book_id = ? and chapter_id = ?", bookId, chapterId).changes;
+  }
+
+  /** Per chapter: cached pages, and whether one of them is incomplete. */
+  cachedChapters(bookId: string): Map<string, { pages: number; incomplete: boolean }> {
+    const rows = this.db.all<{ chapter_id: string; n: number; incomplete: number | null }>(
+      `select chapter_id, count(*) as n, max(coalesce(json_extract(data, '$.incomplete'), 0)) as incomplete
+       from pages where book_id = ? group by chapter_id`,
+      bookId,
+    );
+    return new Map(rows.map((r) => [r.chapter_id, { pages: r.n, incomplete: !!r.incomplete }]));
+  }
+
   cachedPage(bookId: string, chapterId: string, pageIndex: number): PageContent | undefined {
     const row = this.db.get<PageRow>(
       "select data from pages where book_id = ? and chapter_id = ? and page_index = ?",
@@ -183,10 +212,14 @@ export class SiteSource {
 
   /** A chapter page: from the database, or fetched and stored. */
   page(bookId: string, chapterId: string, pageIndex: number, refresh = false): Promise<PageContent> {
-    if (!refresh) {
-      const cached = this.cachedPage(bookId, chapterId, pageIndex);
-      if (cached) return Promise.resolve(cached);
-    }
+    const cached = refresh ? undefined : this.cachedPage(bookId, chapterId, pageIndex);
+    if (cached && !cached.incomplete) return Promise.resolve(cached);
+    // An incomplete page is asked for again; what was kept stays when that fails.
+    if (cached) return this.fetch(bookId, chapterId, pageIndex).catch(() => cached);
+    return this.fetch(bookId, chapterId, pageIndex);
+  }
+
+  private fetch(bookId: string, chapterId: string, pageIndex: number): Promise<PageContent> {
     const id = `${bookId}/${chapterId}/${pageIndex}`;
     let p = this.pending.get(id);
     if (!p) {
@@ -213,6 +246,7 @@ export class SiteSource {
       this.fail(err, url);
       throw err;
     }
+    if (page.incomplete) this.fail(incompleteError(page), url);
     this.db.run(
       `insert into pages (book_id, chapter_id, page_index, data, fetched_at) values (?, ?, ?, ?, ?)
        on conflict (book_id, chapter_id, page_index) do update set data = excluded.data, fetched_at = excluded.fetched_at`,
