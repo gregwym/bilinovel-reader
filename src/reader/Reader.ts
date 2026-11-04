@@ -174,6 +174,12 @@ function describeError(err: unknown): { message: string; detail: string } {
   if (err instanceof FetchError) {
     return { message: "网络请求失败。", detail: `${err.message} · ${err.url}` };
   }
+  if (err instanceof ContentUnavailableError && err.partial) {
+    return {
+      message: "网站只返回了这一章的开头部分（其余显示「内容加载失败」），为免保存不完整的正文，未使用。这是网站的限制，不是阅读器故障，请稍后重试。",
+      detail: [err.url, err.excerpt && `网站显示：${err.excerpt}`].filter(Boolean).join(" · "),
+    };
+  }
   if (err instanceof ContentUnavailableError) {
     return {
       message: "网站没有返回这一章的正文（页面显示「内容加载失败」）。这是网站的限制或内容暂不可用，不是阅读器故障，请稍后重试。",

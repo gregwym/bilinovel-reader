@@ -61,10 +61,11 @@ export class LibraryAdapter implements SiteAdapter {
       status?: number;
       nav?: ChapterNav;
       excerpt?: string;
+      partial?: number;
     };
     if (!res.ok) {
       if (res.status === 401) location.href = `/login?next=${encodeURIComponent(location.pathname)}`;
-      if (data.code === "unavailable") throw new ContentUnavailableError(data.error ?? "网站没有返回正文", url, data.nav, data.excerpt);
+      if (data.code === "unavailable") throw new ContentUnavailableError(data.error ?? "网站没有返回正文", url, data.nav, data.excerpt, data.partial);
       if (data.code === "parse") throw new ParseError(data.error ?? "无法解析页面", url);
       throw new FetchError(data.error ?? `HTTP ${res.status}`, url, data.status ?? res.status, data.code === "challenge");
     }

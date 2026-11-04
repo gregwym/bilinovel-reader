@@ -70,7 +70,7 @@ const NAV_KEY = (bookId: string, chapterId: string) => `site.nav:${bookId}:${cha
 
 export function failureOf(err: unknown, url: string): Omit<SiteFailure, "at"> {
   if (err instanceof ContentUnavailableError) {
-    return { url, kind: "unavailable", message: err.message, nav: err.nav, excerpt: err.excerpt };
+    return { url, kind: "unavailable", message: err.message, nav: err.nav, excerpt: err.excerpt, partial: err.partial };
   }
   if (err instanceof FetchError) {
     return { url, kind: err.challenge ? "challenge" : "fetch", message: err.message, status: err.status };
@@ -158,7 +158,7 @@ export class SiteSource {
       return { ok: true, url, ms: Date.now() - start, title: page.chapterTitle, paragraphs: page.paragraphs.length };
     } catch (err) {
       const f = failureOf(err, url);
-      return { ok: false, url, ms: Date.now() - start, kind: f.kind, error: f.message, status: f.status, nav: f.nav, excerpt: f.excerpt };
+      return { ok: false, url, ms: Date.now() - start, kind: f.kind, error: f.message, status: f.status, nav: f.nav, excerpt: f.excerpt, partial: f.partial };
     }
   }
 

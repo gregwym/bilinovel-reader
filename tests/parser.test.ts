@@ -165,14 +165,40 @@ describe("malformed and hostile input", () => {
     expect(e.excerpt).toContain("內容加載失敗");
   });
 
+  const start = `<p>在老师告知会举行考试的隔天早上。从这一天起，即将展开考试期间或是作为准备期间的一星期。</p>
+      <p>我只管早上起床后去上学、认真上课。</p>`;
+  it.each([
+    ["a visible notice for the rest", "<p>內容加載失敗！請刷新或更換瀏覽器</p>"],
+    ["a bare notice text", "內容加載失敗！請刷新或更換瀏覽器"],
+    ["a notice wrapped around later text", "<div>內容加載失敗！<span>請刷新或更換瀏覽器</span></div>"],
+  ])("rejects a page with only the start of the chapter and %s", (_, notice) => {
+    const doc = parseHtml(`<h1 id='atitle'>探求知识</h1><div id='acontent'>${start}${notice}</div>`);
+    let err: unknown;
+    try {
+      parseBilinovelDocument(doc, url("/novel/5370/288458.html"));
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ContentUnavailableError);
+    const e = err as ContentUnavailableError;
+    expect(e.partial).toBeGreaterThan(40);
+    expect(e.excerpt).toContain("內容加載失敗");
+    expect(e.nav?.title).toBe("探求知识");
+  });
+
+  it("does not call the bare error page partial", () => {
+    const doc = parseHtml("<h1 id='atitle'>t</h1><div id='acontent'><p>內容加載失敗！請刷新或更換瀏覽器</p></div>");
+    expect(() => parseBilinovelDocument(doc, url("/novel/5369/180204.html"))).toThrow(
+      expect.objectContaining({ partial: undefined }),
+    );
+  });
+
   it.each([
     ["a hidden notice", "<p style='display:none'>內容加載失敗！請刷新或更換瀏覽器</p>"],
-    ["a notice for when scripts fail", "<div class='err'>內容加載失敗！請刷新或更換瀏覽器</div>"],
-    ["a bare notice text", "內容加載失敗！請刷新或更換瀏覽器"],
+    ["a notice hidden by the page's CSS", "<style>.err{display:none}</style><p class='err'>內容加載失敗！請刷新或更換瀏覽器</p>"],
+    ["a noscript notice", "<noscript>內容加載失敗！請刷新或更換瀏覽器</noscript>"],
   ])("keeps a real chapter that also carries %s", (_, notice) => {
-    const doc = parseHtml(`<h1 id='atitle'>探求知识</h1><div id='acontent'>
-      <p>在老师告知会举行考试的隔天早上。从这一天起，即将展开考试期间或是作为准备期间的一星期。</p>
-      <p>我只管早上起床后去上学、认真上课。</p>${notice}</div>`);
+    const doc = parseHtml(`<h1 id='atitle'>探求知识</h1><div id='acontent'>${start}${notice}</div>`);
     const page = parseBilinovelDocument(doc, url("/novel/5370/288458.html"));
     expect(page.paragraphs.map((p) => p.text)).toEqual([
       "在老师告知会举行考试的隔天早上。从这一天起，即将展开考试期间或是作为准备期间的一星期。",

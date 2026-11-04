@@ -297,6 +297,7 @@ export function settingsPage(): Page {
       fetch: "无法访问网站",
       parse: "页面结构无法解析",
     };
+    const partialText = (n?: number) => (n ? `只返回了开头约 ${n} 字，其余需网站脚本加载，未保存` : "");
     const showRecent = async () => {
       const { failures } = await api.get<{ failures: SiteFailure[] }>("/api/site/diagnostics");
       recent.textContent = failures.length
@@ -304,7 +305,7 @@ export function settingsPage(): Page {
           failures
             .slice(0, 10)
             .map((f) => `${new Date(f.at).toLocaleString()} ${KIND[f.kind]}\n  ${f.url}${f.status ? ` · HTTP ${f.status}` : ""}` +
-              (f.excerpt ? `\n  网站显示：${f.excerpt.slice(0, 80)}` : "") + (navText(f.nav) ? `\n  页面导航：${navText(f.nav)}` : ""))
+              (f.partial ? `\n  ${partialText(f.partial)}` : "") + (f.excerpt ? `\n  网站显示：${f.excerpt.slice(0, 80)}` : "") + (navText(f.nav) ? `\n  页面导航：${navText(f.nav)}` : ""))
             .join("\n")
         : "最近没有失败的页面";
       if (!url.value && failures[0]) url.value = new URL(failures[0].url).pathname;
@@ -317,7 +318,7 @@ export function settingsPage(): Page {
         out.style.color = r.ok ? "var(--ok)" : "var(--danger)";
         out.textContent = r.ok
           ? `✓ 正文正常（${r.ms} ms）：「${r.title}」${r.paragraphs} 段`
-          : [`✗ ${KIND[r.kind ?? "fetch"]}（${r.ms} ms）`, r.error, r.excerpt && `网站显示：${r.excerpt}`, navText(r.nav) && `页面导航：${navText(r.nav)}`]
+          : [`✗ ${KIND[r.kind ?? "fetch"]}（${r.ms} ms）`, r.error, partialText(r.partial), r.excerpt && `网站显示：${r.excerpt}`, navText(r.nav) && `页面导航：${navText(r.nav)}`]
               .filter(Boolean)
               .join("\n");
         await showRecent();
