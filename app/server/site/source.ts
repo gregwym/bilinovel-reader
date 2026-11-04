@@ -232,10 +232,41 @@ export class SiteSource {
   }
 
   private async load(url: string, retries?: number): Promise<PageContent> {
-    const html = await this.client.html(url, retries);
+    const res = await this.client.document(url, retries);
+    const page = await this.parsePage(res.html, url);
+    return page.incomplete ? this.withTicket(url, res.url, page, retries) : page;
+  }
+
+  private async parsePage(html: string, url: string): Promise<PageContent> {
     const scriptUrl = this.parse(html, url, (doc) => findChapterLogScript(doc, new URL(url)));
     const shuffle = scriptUrl ? await this.template(scriptUrl) : undefined;
     return this.parse(html, url, (doc) => parseBilinovelDocument(doc, new URL(url), { shuffle }));
+  }
+
+  /**
+   * The site sent only the start of the page: asks again with its reading
+   * ticket (see SiteClient.fetchTicket), at the URL that answered, since a
+   * cookie does not follow a redirect to another origin. Only a complete page
+   * replaces `partial`; any failure keeps it.
+   */
+  private async withTicket(url: string, answered: string, partial: PageContent, retries?: number): Promise<PageContent> {
+    const origin = new URL(answered).origin;
+    const again = async () => this.parsePage(await this.client.html(answered, retries), url);
+    try {
+      if (!this.client.hasTicket(origin)) await this.client.fetchTicket(origin);
+      // The first request already carried the ticket we hold: asking again changes nothing.
+      else if (new URL(url).origin === origin) return partial;
+      // Otherwise it could not carry it (redirected from another origin).
+      const page = await again();
+      if (!page.incomplete) {
+        console.info(`[site] complete with the site's reading ticket: ${url}`);
+        return page;
+      }
+      console.warn(`[site] still incomplete with the site's reading ticket: ${url}`);
+    } catch (err) {
+      console.warn(`[site] reading ticket failed for ${url}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return partial;
   }
 
   private async fetchPage(url: string): Promise<PageContent> {

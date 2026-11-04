@@ -48,7 +48,7 @@ const BLOCKED_KEYWORDS = [
 
 /** Readable characters beyond the notice that make a page real content. */
 const MIN_REAL_TEXT = 20;
-/** A notice element is short; a longer one holds chapter text too, so only its text node goes. */
+/** A hidden notice element is short; a longer one holds other text too, so only its text node goes. */
 const MAX_NOTICE_LENGTH = 80;
 const INERT = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"]);
 
@@ -62,7 +62,10 @@ function blockedNotices(content: Element): Node[] {
         if (!BLOCKED_KEYWORDS.some((k) => text.includes(k))) continue;
         const parent = child.parentElement;
         const short = !!parent && parent !== content && (parent.textContent ?? "").trim().length <= MAX_NOTICE_LENGTH;
-        found.add(short ? parent : child);
+        if (hiddenWithin(child, content)) found.add(short ? parent : child);
+        // A visible notice: its element goes only when it holds nothing else.
+        else if (parent && parent !== content && outsideNotice(parent.textContent ?? "") <= MAX_NOTICE_EXTRA) found.add(parent);
+        else found.add(isolateNotice(child as Text));
       } else if (child.nodeType === 1) {
         walk(child);
       }
@@ -70,6 +73,46 @@ function blockedNotices(content: Element): Node[] {
   };
   walk(content);
   return [...found];
+}
+
+/** Characters besides the notice (e.g. 「抱歉，」) an element showing it may hold. */
+const MAX_NOTICE_EXTRA = 4;
+const NOTICE_OPEN = /[（(【[]\s*$/;
+const NOTICE_CLOSE = /^[\s！!。.，,、]*[）)】\]]?\s*/;
+
+/**
+ * Splits the notice off a text node that also holds chapter text, e.g. the
+ * last paragraph of a page the site cut short: 「…我这么心想……（內容加載失敗！
+ * 請刷新或更換瀏覽器）」. Returns the node holding only the notice; the text
+ * around it stays.
+ */
+function isolateNotice(node: Text): Text {
+  const text = node.nodeValue ?? "";
+  const [start, end] = noticeSpan(text);
+  if (end < text.length) node.splitText(end);
+  return start > 0 ? node.splitText(start) : node;
+}
+
+/** Where the notice is in `text` (from its first keyword to its last, with brackets and punctuation). */
+function noticeSpan(text: string): [number, number] {
+  let start = text.length;
+  let end = 0;
+  for (const k of BLOCKED_KEYWORDS) {
+    for (let i = text.indexOf(k); i >= 0; i = text.indexOf(k, i + k.length)) {
+      start = Math.min(start, i);
+      end = Math.max(end, i + k.length);
+    }
+  }
+  if (end <= start) return [text.length, text.length];
+  start -= NOTICE_OPEN.exec(text.slice(0, start))?.[0].length ?? 0;
+  end += NOTICE_CLOSE.exec(text.slice(end))?.[0].length ?? 0;
+  return [start, end];
+}
+
+/** Non-whitespace characters of `text` outside its notice. */
+function outsideNotice(text: string): number {
+  const [start, end] = noticeSpan(text);
+  return (text.slice(0, start) + text.slice(end)).replace(/\s+/g, "").length;
 }
 
 /** Is `node` inside a hidden or inert element of `content`? */

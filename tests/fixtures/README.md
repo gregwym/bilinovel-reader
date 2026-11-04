@@ -17,3 +17,20 @@ python3 tests/fixtures/generate.py
 When the site changes, prefer saving real pages from Safari (Develop menu →
 Show Page Source, i.e. the server HTML *before* scripts run), replace the book
 text with placeholders, and add them here with matching tests.
+
+## Real pages (2026-11)
+
+Saved on 2026-11-04 from book 5370, chapter 288458 (page 1), mobile user agent,
+server HTML before scripts. Chapter text is replaced with placeholders numbered
+in the order the browser renders them (the shuffle depends only on the chapter
+id and paragraph count, so the order check still holds); Cloudflare and tracker
+snippets are removed.
+
+- `incomplete-2026-11.html`: without the reading ticket (`jieqiSearchTicket`):
+  the first 11 paragraphs, the last one cut off and running into
+  「（內容加載失敗！請刷新或更換瀏覽器）」 without a closing `</p>`.
+- `complete-2026-11.html`: the same page with the ticket: 122 paragraphs and a
+  section mark, shuffled after the 20th.
+- `chapterlog-2026-11.js`: `/themes/zhmb/js/chapterlog.js?v1006c1.82` as served
+  (obfuscated; new constants). The old `/scripts/chapterlog.js` now answers 404.
+- `search-guard-2026-11.js`: `/search.html?search_guard=js`, cookie value replaced.
