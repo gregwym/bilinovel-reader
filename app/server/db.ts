@@ -73,10 +73,11 @@ const MIGRATIONS = [
   `alter table segments add column bounds_v integer not null default 0;`,
   // A segment inside its chapter's library file: the audio offset there (null: its own file).
   `alter table segments add column start integer;`,
-  // 0.10.20 (from 2026-11-04 04:10 UTC) kept pages the site sent only the start
-  // of, next to its "內容加載失敗" notice. They cannot be told apart, so pages
-  // fetched since then are fetched again when next read.
-  `delete from pages where fetched_at >= 1793765400000;`,
+  // 0.10.21–0.10.23 deleted pages cached after 2026-11-04 04:10 UTC here. No
+  // migration deletes data: kept as a no-op so later migrations keep their
+  // numbers (installs that ran it are at this version already). Incomplete
+  // pages are fetched again when opened anyway.
+  `select 1;`,
 ];
 
 export type Row = Record<string, SQLInputValue>;

@@ -6,7 +6,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../../app/server/config";
 import { createServices } from "../../app/server/services";
 import { createApp } from "../../app/server/http";
-import { bookCatalog } from "../../app/server/library";
 import { PROGRESS_KEY } from "../../app/server/books";
 import type { BookDetail, PageProbe, SiteFailure } from "../../app/shared/api";
 import { ContentUnavailableError, type Catalog, type PageContent } from "../../src/adapters/types";
@@ -71,9 +70,6 @@ function setup(site: { catalog?: string; page?: string } = {}) {
   });
   return { s, open, requests, snapshot, app: createApp(s) };
 }
-const middle = (s: ReturnType<typeof createServices>) => bookCatalog(s.books.get("10")!)!.volumes[0].chapters[1];
-const detailRow = async (app: ReturnType<typeof createApp>) =>
-  ((await (await app.request("/api/books/10")).json()) as BookDetail).volumes[0].chapters[1];
 
 afterEach(() => {
   for (const s of opened.splice(0)) {
@@ -99,53 +95,6 @@ describe("a chapter the site serves as 'content failed to load'", () => {
 
     const { failures } = (await (await app.request("/api/site/diagnostics")).json()) as { failures: SiteFailure[] };
     expect(failures[0]).toMatchObject({ kind: "unavailable", url: u("321"), nav: { title: "探求知识", prevChapterId: "100" } });
-  });
-
-  it("explains the missing link before, then links it from the previous chapter's last page and the error page's title", async () => {
-    const { s, app, snapshot } = setup();
-    expect(middle(s).chapterId).toBeUndefined();
-    const row = await detailRow(app);
-    expect(row.unlinked?.status).toBe("no-evidence");
-    expect(row.unlinked?.notes.join()).toContain("前一章 100 的「下一章」→ 321");
-
-    const before = snapshot();
-    await app.request("/api/page?book=10&chapter=321&page=0");
-    expect(middle(s)).toEqual({ title: "探求知识", chapterId: "321", url: u("321") });
-    expect((await detailRow(app)).unlinked).toBeUndefined();
-    // Cached pages, audio and the reading position are untouched.
-    expect(snapshot()).toEqual(before);
-  });
-
-  it("keeps the recovered link through catalog refreshes and restarts, and lets a real upstream link win", async () => {
-    const { s, open, app, snapshot } = setup();
-    await app.request("/api/page?book=10&chapter=321&page=0");
-    const before = snapshot();
-    await s.books.refresh("10");
-    expect(middle(s).chapterId).toBe("321");
-    s.db.run("update books set catalog_at = 0 where id = '10'");
-    const fresh = (await (await app.request("/api/catalog/10")).json()) as Catalog;
-    expect(fresh.volumes[0].chapters[1].chapterId).toBe("321");
-    expect(middle(open()).chapterId).toBe("321");
-    expect(snapshot()).toEqual(before);
-  });
-
-  it("uses the site's own link once the catalog has one", async () => {
-    const { s, app } = setup({ catalog: catalogHtml(`<li><a href="/novel/10/777.html">探求知识</a></li>`) });
-    await app.request("/api/page?book=10&chapter=321&page=0");
-    await s.books.refresh("10");
-    expect(bookCatalog(s.books.get("10")!)!.volumes[0].chapters.map((c) => c.chapterId)).toEqual(["100", "777", "999"]);
-  });
-
-  it.each([
-    ["the error page shows another title", errorHtml("别的章节")],
-    ["the error page's previous chapter is another one", errorHtml("探求知识", "/novel/10/555.html")],
-  ])("stays unlinked when %s", async (_, page) => {
-    const { s, app, snapshot } = setup({ page });
-    const before = snapshot();
-    await app.request("/api/page?book=10&chapter=321&page=0");
-    expect(middle(s).chapterId).toBeUndefined();
-    expect((await detailRow(app)).unlinked?.status).toBe("conflict");
-    expect(snapshot()).toEqual(before);
   });
 
   it("shows a page the site sent only the start of, marked incomplete, asks again when opened, and never voices it", async () => {

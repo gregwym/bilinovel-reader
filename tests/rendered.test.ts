@@ -102,26 +102,15 @@ describe("userscript: the site's 'content failed to load' page", () => {
   const errorPage = `<script>var ReadParams={url_previous:'/novel/5369/180204_3.html',url_next:'/novel/5369/180206.html',
     articleid:'5369',chapterid:'180205',chaptername:'插图'};</script><h1 id="atitle">插图</h1>
     <div id="acontent"><p>內容加載失敗！請刷新或更換瀏覽器</p></div>`;
-  const catalogHtml = `<div id="volumes"><h2>卷</h2><ul>
-    <li><a href="/novel/5369/180204.html">第四章 分页的章节</a></li>
-    <li class="jsChapter"><a href="javascript:cid(1)">插图</a></li>
-    <li><a href="/novel/5369/180206.html">第五章</a></li></ul></div>`;
-
-  it("retries with the site's scripts, reports it as unavailable, and uses its navigation only as catalog evidence", async () => {
+  it("retries with the site's scripts and reports it as unavailable", async () => {
     const calls: string[] = [];
     const loader: Loader = async (url, _host, o) => {
       calls.push(`${o?.scripts ? "scripted" : "static"} ${new URL(url).pathname}`);
-      const html = url.endsWith("/catalog") ? catalogHtml : errorPage;
-      return { doc: new DOMParser().parseFromString(html, "text/html"), win: window, dispose() {} };
+      return { doc: new DOMParser().parseFromString(errorPage, "text/html"), win: window, dispose() {} };
     };
     const adapter = new BilinovelAdapter(queue(), host, loader);
-    const catalog = await adapter.fetchCatalog("5369");
-    // The previous chapter's last page links "next chapter" to 180205.
-    await adapter.parseRenderedDocument(loadFixture("next-chapter.html"), new URL(`${ORIGIN}/novel/5369/180204_3.html`));
-    expect(catalog.volumes[0].chapters[1].chapterId).toBeUndefined();
     await expect(adapter.fetchPage(`${ORIGIN}/novel/5369/180205.html`)).rejects.toBeInstanceOf(ContentUnavailableError);
-    expect(calls.filter((c) => c.endsWith("180205.html"))).toEqual(["static /novel/5369/180205.html", "scripted /novel/5369/180205.html"]);
-    expect(catalog.volumes[0].chapters[1].chapterId).toBe("180205");
+    expect(calls).toEqual(["static /novel/5369/180205.html", "scripted /novel/5369/180205.html"]);
     const diag = adapter.getDiagnostics();
     expect(diag.some((d) => d.method === "unavailable" && String(d.excerpt).includes("內容加載失敗"))).toBe(true);
   });
@@ -142,6 +131,36 @@ describe("userscript: the site's 'content failed to load' page", () => {
     expect(calls).toEqual(["static", "scripted"]);
     expect(!!page.incomplete).toBe(incomplete);
     expect(page.paragraphs.length).toBeGreaterThan(0);
+  });
+});
+
+describe("userscript: the site's night cookie", () => {
+  const clear = () => (document.cookie = "night=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/");
+  beforeEach(clear);
+  const page = `<script>var ReadParams={url_next:'/novel/5369/180206.html',articleid:'5369',chapterid:'180205'};</script>
+    <h1 id="atitle">t</h1><div id="acontent"><p>正文正文正文正文正文正文正文正文正文正文。</p></div>`;
+
+  it("sets it the way the site does before loading a page when it is missing, and says so", async () => {
+    const seen: string[] = [];
+    const loader: Loader = async () => {
+      seen.push(document.cookie);
+      return { doc: new DOMParser().parseFromString(page, "text/html"), win: window, dispose() {} };
+    };
+    const adapter = new BilinovelAdapter(queue(), host, loader);
+    await adapter.fetchPage(`${ORIGIN}/novel/5369/180205.html`);
+    expect(seen[0]).toMatch(/(^|; )night=[01]/);
+    expect(adapter.getDiagnostics().some((d) => d.method === "cookie" && d.set === "night")).toBe(true);
+    await adapter.fetchPage(`${ORIGIN}/novel/5369/180205.html`);
+    expect(adapter.getDiagnostics().filter((d) => d.method === "cookie")).toHaveLength(1);
+  });
+
+  it("leaves the reader's own setting alone", async () => {
+    document.cookie = "night=1; path=/";
+    const loader: Loader = async () => ({ doc: new DOMParser().parseFromString(page, "text/html"), win: window, dispose() {} });
+    const adapter = new BilinovelAdapter(queue(), host, loader);
+    await adapter.fetchPage(`${ORIGIN}/novel/5369/180205.html`);
+    expect(document.cookie).toMatch(/(^|; )night=1/);
+    expect(adapter.getDiagnostics().some((d) => d.method === "cookie")).toBe(false);
   });
 });
 

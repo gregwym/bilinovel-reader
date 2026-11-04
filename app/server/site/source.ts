@@ -1,9 +1,9 @@
 import { JSDOM } from "jsdom";
-import { ContentUnavailableError, FetchError, ParseError, type Catalog, type ChapterNav, type PageContent } from "../../../src/adapters/types";
+import { ContentUnavailableError, FetchError, ParseError, type Catalog, type PageContent } from "../../../src/adapters/types";
 import { decodeText, parseChapterLogScript, type ShuffleTemplate } from "../../../src/adapters/bilinovel/deobfuscate";
 import { findChapterLogScript, parseBilinovelDocument } from "../../../src/adapters/bilinovel/parser";
 import { catalogUrl, parseCatalogDocument } from "../../../src/adapters/bilinovel/catalog";
-import { placeholderNeighbours, reconcileCatalogReport, type PlaceholderReport } from "../../../src/adapters/bilinovel/reconcileCatalog";
+import { reconcileCatalog } from "../../../src/adapters/bilinovel/reconcileCatalog";
 import { buildPageUrl, parseChapterUrl, resolveHref } from "../../../src/adapters/bilinovel/url";
 import type { PageProbe, SiteFailure } from "../../shared/api";
 import type { Db } from "../db";
@@ -66,8 +66,6 @@ interface PageRow {
   data: string;
 }
 
-const NAV_KEY = (bookId: string, chapterId: string) => `site.nav:${bookId}:${chapterId}`;
-
 /** How an incomplete page is reported (diagnostics, generated audio). */
 export function incompleteError(page: PageContent): ContentUnavailableError {
   const text = page.paragraphs.map((p) => p.text ?? "").join("");
@@ -118,26 +116,9 @@ export class SiteSource {
 
   /** Reuses existing content without network requests or guessing IDs. */
   reconcileCatalog(catalog: Catalog) {
-    return this.reconcileReport(catalog).recovered;
-  }
-
-  /**
-   * Recovers placeholder links from stored evidence (first pages, the pages of
-   * the chapters next to each placeholder, and what error pages showed) and
-   * says why each remaining placeholder has no link. No network requests.
-   */
-  reconcileReport(catalog: Catalog): { recovered: Catalog["volumes"][number]["chapters"]; report: PlaceholderReport[] } {
-    if (!catalog.volumes.some((v) => v.chapters.some((c) => !c.chapterId))) return { recovered: [], report: [] };
-    const near = placeholderNeighbours(catalog);
-    const pages = this.db.all<PageRow>(
-      `select data from pages where book_id = ? and (page_index = 0 or chapter_id in (select value from json_each(?)))`,
-      catalog.bookId,
-      JSON.stringify(near),
-    );
-    const navs = this.db
-      .all<{ value: string }>("select value from kv where key like ?", `site.nav:${catalog.bookId}:%`)
-      .map((r) => JSON.parse(r.value) as ChapterNav);
-    return reconcileCatalogReport(catalog, pages.map((r) => JSON.parse(r.data) as PageContent), navs);
+    if (!catalog.volumes.some((v) => v.chapters.some((c) => !c.chapterId))) return [];
+    const pages = this.db.all<PageRow>("select data from pages where book_id = ? and page_index = 0", catalog.bookId);
+    return reconcileCatalog(catalog, pages.map((r) => JSON.parse(r.data) as PageContent));
   }
 
   /** Recent pages the site did not deliver, newest first. */
@@ -150,16 +131,6 @@ export class SiteSource {
     console.warn(`[site] ${failure.kind} ${url}: ${failure.message}${failure.excerpt ? ` — 「${failure.excerpt.slice(0, 60)}」` : ""}`);
     this.failures.push(failure);
     if (this.failures.length > 30) this.failures.shift();
-    const nav = err instanceof ContentUnavailableError ? err.nav : undefined;
-    // The error page's navigation is evidence for the catalog, never content.
-    if (nav && (nav.title || nav.prevChapterId || nav.nextChapterId)) {
-      const key = NAV_KEY(nav.bookId, nav.chapterId);
-      const saved = this.db.getJson<ChapterNav>(key);
-      if (JSON.stringify(saved) !== JSON.stringify(nav)) {
-        this.db.setJson(key, nav);
-        this.pageListeners.forEach((fn) => fn(nav.bookId));
-      }
-    }
   }
 
   /** Loads one chapter page and reports what the site sent, without storing it. */
@@ -232,41 +203,10 @@ export class SiteSource {
   }
 
   private async load(url: string, retries?: number): Promise<PageContent> {
-    const res = await this.client.document(url, retries);
-    const page = await this.parsePage(res.html, url);
-    return page.incomplete ? this.withTicket(url, res.url, page, retries) : page;
-  }
-
-  private async parsePage(html: string, url: string): Promise<PageContent> {
+    const html = await this.client.html(url, retries);
     const scriptUrl = this.parse(html, url, (doc) => findChapterLogScript(doc, new URL(url)));
     const shuffle = scriptUrl ? await this.template(scriptUrl) : undefined;
     return this.parse(html, url, (doc) => parseBilinovelDocument(doc, new URL(url), { shuffle }));
-  }
-
-  /**
-   * The site sent only the start of the page: asks again with its reading
-   * ticket (see SiteClient.fetchTicket), at the URL that answered, since a
-   * cookie does not follow a redirect to another origin. Only a complete page
-   * replaces `partial`; any failure keeps it.
-   */
-  private async withTicket(url: string, answered: string, partial: PageContent, retries?: number): Promise<PageContent> {
-    const origin = new URL(answered).origin;
-    const again = async () => this.parsePage(await this.client.html(answered, retries), url);
-    try {
-      if (!this.client.hasTicket(origin)) await this.client.fetchTicket(origin);
-      // The first request already carried the ticket we hold: asking again changes nothing.
-      else if (new URL(url).origin === origin) return partial;
-      // Otherwise it could not carry it (redirected from another origin).
-      const page = await again();
-      if (!page.incomplete) {
-        console.info(`[site] complete with the site's reading ticket: ${url}`);
-        return page;
-      }
-      console.warn(`[site] still incomplete with the site's reading ticket: ${url}`);
-    } catch (err) {
-      console.warn(`[site] reading ticket failed for ${url}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    return partial;
   }
 
   private async fetchPage(url: string): Promise<PageContent> {
@@ -287,8 +227,6 @@ export class SiteSource {
       JSON.stringify(page),
       Date.now(),
     );
-    // The real page supersedes what an earlier error page showed.
-    if (page.pageIndex === 0) this.db.setJson(NAV_KEY(page.bookId, page.chapterId), undefined);
     this.pageListeners.forEach((fn) => fn(page.bookId));
     return page;
   }

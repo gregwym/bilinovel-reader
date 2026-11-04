@@ -86,8 +86,6 @@ export interface ChapterInfo {
   jobId?: number;
   /** Nothing to read aloud (illustrations only). */
   silent?: boolean;
-  /** Why a catalog entry without a link could not be linked from the cached pages. */
-  unlinked?: { status: "no-evidence" | "conflict" | "ambiguous"; notes: string[] };
   /** Site pages of this chapter cached on the server. */
   pages?: number;
   /** One of them is only the start the site sent (see PageContent.incomplete). */
