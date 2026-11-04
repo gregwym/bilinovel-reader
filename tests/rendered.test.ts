@@ -132,7 +132,7 @@ describe("userscript: the site's 'content failed to load' page", () => {
     ["shows the start, marked incomplete, when the scripts don't help either", "", true],
   ])("an incomplete page: %s", async (_, rendered, incomplete) => {
     const calls: string[] = [];
-    const loader: Loader = async (url, _host, o) => {
+    const loader: Loader = async (_url, _host, o) => {
       calls.push(o?.scripts ? "scripted" : "static");
       const html = o?.scripts && rendered ? errorPage.replace("<p>內容加載失敗！請刷新或更換瀏覽器</p>", `<p>开头。</p>${rendered}`) : partialPage("");
       return { doc: new DOMParser().parseFromString(html, "text/html"), win: window, dispose() {} };
