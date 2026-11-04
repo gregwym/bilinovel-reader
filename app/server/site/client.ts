@@ -37,6 +37,58 @@ export function networkError(err: unknown): string {
   return `${known[code] ?? "网络错误"}${code ? ` [${code}]` : ""}: ${detail}`;
 }
 
+/**
+ * The site's reading ticket. Since November 2026 the site sends only the
+ * start of each chapter page (followed by 「內容加載失敗！請刷新或更換瀏覽器」)
+ * unless the request carries the cookie `jieqiSearchTicket`. Browsers get it
+ * from the home and catalog pages, whose inline script loads
+ * `/search.html?search_guard=css` (sets `jieqiSearchCss`) and `…=js` (sets
+ * `jieqiSearchJs` from script, then requests `…=redeem`, which sets the
+ * ticket). Each cookie lasts an hour (`Max-Age=3600`).
+ */
+const TICKET = "jieqiSearchTicket";
+const GUARD_PATH = "/search.html?search_guard=";
+/** Renew a little before the site's expiry. */
+const TICKET_MARGIN_MS = 60_000;
+/** After a failed attempt, pages stay as they came for a while instead of asking the site again each time. */
+const TICKET_RETRY_MS = 10 * 60_000;
+
+/** `name=value` of each Set-Cookie header, and the shortest Max-Age among them. */
+function setCookies(res: Response, into: Record<string, string>): number | undefined {
+  let maxAge: number | undefined;
+  for (const line of res.headers.getSetCookie()) {
+    const [pair, ...attrs] = line.split(";");
+    const i = pair.indexOf("=");
+    if (i <= 0) continue;
+    into[pair.slice(0, i).trim()] = pair.slice(i + 1).trim();
+    for (const a of attrs) {
+      const m = /^\s*max-age\s*=\s*(\d+)/i.exec(a);
+      if (m) maxAge = Math.min(maxAge ?? Infinity, Number(m[1]));
+    }
+  }
+  return maxAge;
+}
+
+/**
+ * Reads what the guard script does without running it: the cookies it sets
+ * (`document.cookie="name=value; …"`) and the URL it requests next.
+ */
+export function readGuardScript(js: string): { cookies: Record<string, string>; maxAge?: number; redeem?: string } {
+  const cookies: Record<string, string> = {};
+  let maxAge: number | undefined;
+  for (const m of js.matchAll(/document\.cookie\s*=\s*"([^"]*)"/g)) {
+    const [pair, ...attrs] = m[1].split(";");
+    const i = pair.indexOf("=");
+    if (i > 0) cookies[pair.slice(0, i).trim()] = pair.slice(i + 1).trim();
+    for (const a of attrs) {
+      const age = /^\s*max-age\s*=\s*(\d+)/i.exec(a);
+      if (age) maxAge = Math.min(maxAge ?? Infinity, Number(age[1]));
+    }
+  }
+  const open = /\.open\(\s*"GET"\s*,\s*"([^"]+)"/.exec(js)?.[1]?.replace(/\\\//g, "/");
+  return { cookies, maxAge, redeem: open?.startsWith("/") ? open : undefined };
+}
+
 const RETRYABLE = new Set([408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524]);
 
 /**
@@ -50,6 +102,10 @@ export class SiteClient {
   private lastStart = -Infinity;
   private imageTail: Promise<unknown> = Promise.resolve();
   private solved?: { cookies: Record<string, string>; userAgent: string };
+  /** The reading ticket and its companion cookies, sent only to the origin that set them. */
+  private ticket?: { origin: string; cookies: Record<string, string>; expires: number };
+  private ticketPending?: Promise<void>;
+  private ticketFailed?: { origin: string; at: number; error: FetchError };
 
   constructor(
     private readonly settings: () => SiteSettings,
@@ -61,9 +117,16 @@ export class SiteClient {
   /** Forgets cookies obtained from FlareSolverr (e.g. after the settings changed). */
   reset(): void {
     this.solved = undefined;
+    this.ticket = undefined;
+    this.ticketFailed = undefined;
   }
 
-  private headers(accept: string, referer?: string): Record<string, string> {
+  /** Whether requests to `origin` currently carry the site's reading ticket. */
+  hasTicket(origin: string): boolean {
+    return !!this.ticket && this.ticket.origin === origin && this.ticket.expires > this.now();
+  }
+
+  private headers(accept: string, referer?: string, url?: string, extra?: Record<string, string>): Record<string, string> {
     const s = this.settings();
     const cookies = new Map<string, string>();
     for (const part of s.cookie.split(";")) {
@@ -71,6 +134,10 @@ export class SiteClient {
       if (i > 0) cookies.set(part.slice(0, i).trim(), part.slice(i + 1).trim());
     }
     for (const [k, v] of Object.entries(this.solved?.cookies ?? {})) cookies.set(k, v);
+    // Like a browser, the ticket goes only to the origin that set it.
+    const origin = url ? new URL(url).origin : undefined;
+    if (origin && this.hasTicket(origin)) for (const [k, v] of Object.entries(this.ticket!.cookies)) cookies.set(k, v);
+    for (const [k, v] of Object.entries(extra ?? {})) cookies.set(k, v);
     const headers: Record<string, string> = {
       "User-Agent": this.solved?.userAgent ?? s.userAgent,
       Accept: accept,
@@ -95,6 +162,11 @@ export class SiteClient {
 
   /** Fetches a page's HTML; throws FetchError (challenge = true when a bot check blocks it). */
   async html(url: string, retries = 2): Promise<string> {
+    return (await this.document(url, retries)).html;
+  }
+
+  /** Like `html()`, also giving the URL the site answered from after redirects. */
+  async document(url: string, retries = 2): Promise<{ html: string; url: string }> {
     for (let attempt = 0; ; attempt++) {
       try {
         return await this.lane(() => this.htmlOnce(url));
@@ -107,11 +179,11 @@ export class SiteClient {
     }
   }
 
-  private async htmlOnce(url: string): Promise<string> {
+  private async htmlOnce(url: string): Promise<{ html: string; url: string }> {
     let res: Response;
     try {
       res = await this.fetchImpl(url, {
-        headers: this.headers("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+        headers: this.headers("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", undefined, url),
         redirect: "follow",
         signal: AbortSignal.timeout(30_000),
       });
@@ -120,11 +192,63 @@ export class SiteClient {
     }
     const text = await res.text();
     if (looksLikeChallenge(text) || (res.status === 403 && /cloudflare/i.test(res.headers.get("server") ?? ""))) {
-      if (this.settings().flaresolverrUrl) return this.solve(url);
+      if (this.settings().flaresolverrUrl) return { html: await this.solve(url), url };
       throw new FetchError("Bot challenge page returned", url, res.status, true);
     }
     if (!res.ok) throw new FetchError(`HTTP ${res.status}`, url, res.status);
-    return text;
+    return { html: text, url: res.url || url };
+  }
+
+  /**
+   * Gets the reading ticket for `origin` the way the site's home page does
+   * (three small requests in the site's lane); concurrent callers share one
+   * attempt. Throws FetchError when the site hands out no ticket.
+   */
+  fetchTicket(origin: string): Promise<void> {
+    const failed = this.ticketFailed;
+    if (failed && failed.origin === origin && this.now() - failed.at < TICKET_RETRY_MS) return Promise.reject(failed.error);
+    if (!this.ticketPending) {
+      this.ticketPending = this.redeemTicket(origin)
+        .then(() => (this.ticketFailed = undefined))
+        .catch((err: unknown) => {
+          const error = err instanceof FetchError ? err : new FetchError(String(err), origin);
+          this.ticketFailed = { origin, at: this.now(), error };
+          throw error;
+        })
+        .finally(() => (this.ticketPending = undefined));
+    }
+    return this.ticketPending;
+  }
+
+  private async redeemTicket(origin: string): Promise<void> {
+    const cookies: Record<string, string> = {};
+    let maxAge = 3600;
+    const get = (path: string, accept: string) =>
+      this.lane(async () => {
+        const url = `${origin}${path}`;
+        let res: Response;
+        try {
+          res = await this.fetchImpl(url, {
+            headers: this.headers(accept, `${origin}/`, url, cookies),
+            redirect: "follow",
+            signal: AbortSignal.timeout(30_000),
+          });
+        } catch (err) {
+          throw new FetchError(networkError(err), url);
+        }
+        const text = await res.text();
+        if (looksLikeChallenge(text)) throw new FetchError("Bot challenge page returned", url, res.status, true);
+        if (!res.ok) throw new FetchError(`HTTP ${res.status}`, url, res.status);
+        maxAge = Math.min(maxAge, setCookies(res, cookies) ?? maxAge);
+        return text;
+      });
+    await get(`${GUARD_PATH}css`, "text/css,*/*;q=0.1");
+    const script = readGuardScript(await get(`${GUARD_PATH}js`, "*/*"));
+    Object.assign(cookies, script.cookies);
+    maxAge = Math.min(maxAge, script.maxAge ?? maxAge);
+    await get(`${script.redeem ?? `${GUARD_PATH}redeem&r=`}${this.now()}`, "*/*");
+    if (!cookies[TICKET]) throw new FetchError("网站没有发放阅读票据（jieqiSearchTicket）", `${origin}${GUARD_PATH}redeem`);
+    this.ticket = { origin, cookies, expires: this.now() + maxAge * 1000 - TICKET_MARGIN_MS };
   }
 
   /** Loads the page through FlareSolverr and keeps the clearance cookies for later requests. */
@@ -175,7 +299,7 @@ export class SiteClient {
       let res: Response;
       try {
         res = await this.fetchImpl(url, {
-          headers: this.headers("image/avif,image/webp,image/*,*/*;q=0.8", referer),
+          headers: this.headers("image/avif,image/webp,image/*,*/*;q=0.8", referer, url),
           signal: AbortSignal.timeout(30_000),
         });
       } catch (err) {
