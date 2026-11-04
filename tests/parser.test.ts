@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseBilinovelDocument, extractReadParams } from "../src/adapters/bilinovel/parser";
-import { ParseError } from "../src/adapters/types";
+import { ContentUnavailableError, ParseError } from "../src/adapters/types";
 import { ORIGIN, loadFixture, parseHtml } from "./helpers";
 
 const url = (path: string) => new URL(ORIGIN + path);
@@ -144,6 +144,25 @@ describe("malformed and hostile input", () => {
       "<h1 id='atitle'>t</h1><div id='acontent'><p>內容加載失敗，請重載或更換瀏覽器</p></div>",
     );
     expect(() => parseBilinovelDocument(doc, url("/novel/5369/180204.html"))).toThrow(/load/);
+  });
+
+  it("reports the 'load failed' page as unavailable content, keeping only its navigation", () => {
+    // HTTP 200 with the site's error text: no paragraphs, but the title and chapter links remain.
+    const doc = parseHtml(`<script>var ReadParams={url_previous:'/novel/5370/288334_8.html',url_next:'/novel/5370/288459.html',
+      articleid:'5370',chapterid:'288458',chaptername:'探求知识'};</script>
+      <h1 id='atitle'>探求知识</h1><div id='acontent'><p>內容加載失敗！請刷新或更換瀏覽器</p></div>
+      <div id='footlink'><a class='prevlink' href='/novel/5370/288334_8.html'>上一章</a><a class='nextlink' href='/novel/5370/288459.html'>下一章</a></div>`);
+    let err: unknown;
+    try {
+      parseBilinovelDocument(doc, url("/novel/5370/288458.html"));
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ContentUnavailableError);
+    expect(err).toBeInstanceOf(ParseError);
+    const e = err as ContentUnavailableError;
+    expect(e.nav).toEqual({ bookId: "5370", chapterId: "288458", title: "探求知识", prevChapterId: "288334", nextChapterId: "288459" });
+    expect(e.excerpt).toContain("內容加載失敗");
   });
 
   it("throws ParseError for empty content", () => {

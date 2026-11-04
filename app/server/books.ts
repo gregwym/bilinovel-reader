@@ -234,6 +234,7 @@ export class Books {
       this.db.run("delete from jobs where book_id = ? and status in ('queued', 'done', 'failed', 'cancelled')", id);
       this.db.run("update jobs set status = 'cancelled' where book_id = ? and status = 'running'", id);
       this.db.run("delete from pages where book_id = ?", id);
+      this.db.run("delete from kv where key like ?", `site.nav:${id}:%`);
       this.db.run("delete from books where id = ?", id);
     });
     await rm(this.library.coverFile(id), { force: true });
@@ -312,8 +313,14 @@ export class Books {
     );
     const chapterJobs = new Map(jobs.filter((j) => j.kind === "chapter").map((j) => [j.target, j]));
     const exportJobs = new Map(jobs.filter((j) => j.kind === "export").map((j) => [j.target, j]));
+    // Explains the remaining placeholders; run on a copy so showing the book changes nothing.
+    const unlinked = new Map(
+      (catalog ? this.source.reconcileReport(structuredClone(catalog)).report : [])
+        .filter((r) => r.status !== "recovered")
+        .map((r) => [`${r.volume}:${r.index}`, { status: r.status as "no-evidence" | "conflict" | "ambiguous", notes: r.notes }]),
+    );
     const volumes: VolumeInfo[] = (catalog?.volumes ?? []).map((v, vi) => {
-      const chapters: ChapterInfo[] = v.chapters.map((c) => {
+      const chapters: ChapterInfo[] = v.chapters.map((c, ci) => {
         const row = c.chapterId ? rows.get(c.chapterId) : undefined;
         const job = c.chapterId ? chapterJobs.get(c.chapterId) : undefined;
         let audio: ChapterAudioState = "none";
@@ -329,6 +336,7 @@ export class Books {
           bytes: row?.bytes || undefined,
           jobId: job?.id,
           silent: row ? !row.file : undefined,
+          unlinked: c.chapterId ? undefined : unlinked.get(`${vi}:${ci}`),
         };
       });
       const file = this.library.exportFile(book.id, vi);

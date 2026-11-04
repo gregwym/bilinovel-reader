@@ -99,6 +99,42 @@ export class ParseError extends Error {
   }
 }
 
+/**
+ * What a chapter page says about its place in the book, without its text:
+ * from a parsed page, or from a page the site served without content.
+ */
+export interface ChapterNav {
+  bookId: string;
+  chapterId: string;
+  /** The chapter's first page, when this is it. */
+  url?: string;
+  /** Chapter title, when the page shows it (first page or an error page). */
+  title?: string;
+  /** The chapter the site's "previous chapter" link points at. */
+  prevChapterId?: string;
+  /** The chapter the site's "next chapter" link points at. */
+  nextChapterId?: string;
+}
+
+/**
+ * The site answered (often HTTP 200) with its "內容加載失敗" page instead of
+ * the chapter: the content is not available to this client right now. Not a
+ * parser bug, so it carries what the page still showed for diagnostics.
+ */
+export class ContentUnavailableError extends ParseError {
+  constructor(
+    message: string,
+    url: string,
+    /** Title and navigation the error page still had. */
+    readonly nav?: ChapterNav,
+    /** Start of the text shown instead of the chapter. */
+    readonly excerpt?: string,
+  ) {
+    super(message, url);
+    this.name = "ContentUnavailableError";
+  }
+}
+
 /** Thrown when the network request failed (after retries). */
 export class FetchError extends Error {
   constructor(
