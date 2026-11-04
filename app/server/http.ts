@@ -67,6 +67,9 @@ const isProvider = (p: string): p is PageProvider => (PROVIDERS as string[]).inc
 export const UNAVAILABLE_MESSAGE =
   "网站没有返回这一章的正文（显示「内容加载失败」）。这是网站的限制或内容暂不可用，不是书库服务故障；可稍后重试，或在设置中更新 Cookie / 配置 FlareSolverr";
 
+export const PARTIAL_MESSAGE =
+  "网站只返回了这一章的开头部分（其余显示「内容加载失败」，需要网站脚本加载），为免保存不完整的正文，未使用。这是网站的限制，不是书库服务故障；可稍后重试，或在设置中更新 Cookie / 配置 FlareSolverr";
+
 function errorResponse(c: Context, err: unknown) {
   console.warn(`[library] ${c.req.method} ${c.req.path}:`, err instanceof Error ? `${err.name}: ${err.message}` : String(err));
   if (err instanceof SpeechEngineError) return c.json({ error: err.message, code: err.code }, 502);
@@ -87,10 +90,11 @@ function errorResponse(c: Context, err: unknown) {
     // The site answered but without the chapter: not the Reader failing, and not a proxy problem.
     return c.json(
       {
-        error: `${UNAVAILABLE_MESSAGE}：${err.url}`,
+        error: `${err.partial ? PARTIAL_MESSAGE : UNAVAILABLE_MESSAGE}：${err.url}`,
         code: "unavailable",
         nav: err.nav,
         excerpt: err.excerpt,
+        partial: err.partial,
       },
       503,
     );

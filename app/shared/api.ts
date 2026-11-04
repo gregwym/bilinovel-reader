@@ -217,6 +217,8 @@ export interface SiteFailure {
   /** What the error page still showed. */
   nav?: ChapterNav;
   excerpt?: string;
+  /** Readable characters sent before the notice: only part of the chapter came. */
+  partial?: number;
 }
 
 /** Result of loading one chapter page without storing it. */
@@ -231,5 +233,6 @@ export interface PageProbe {
   paragraphs?: number;
   nav?: ChapterNav;
   excerpt?: string;
+  partial?: number;
 }
 

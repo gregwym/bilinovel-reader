@@ -72,6 +72,14 @@ function blockedNotices(content: Element): Node[] {
   return [...found];
 }
 
+/** Is `node` inside a hidden or inert element of `content`? */
+function hiddenWithin(node: Node, content: Element): boolean {
+  for (let el = node.nodeType === 1 ? (node as Element) : node.parentElement; el && el !== content; el = el.parentElement) {
+    if (INERT.has(el.tagName.toUpperCase()) || isHidden(el)) return true;
+  }
+  return false;
+}
+
 /** Visible, non-whitespace characters of `node`, leaving out `skip`. */
 function readableLength(node: Node, skip: Set<Node>): number {
   if (skip.has(node)) return 0;
@@ -355,15 +363,23 @@ export function parseBilinovelDocument(doc: Document, url: URL, options: ParseOp
   const rawText = content.textContent ?? "";
   if (BLOCKED_KEYWORDS.filter((k) => rawText.includes(k)).length >= 2) {
     const notices = blockedNotices(content);
-    // Pages can carry the notice (hidden, or for when their scripts fail) next to
-    // the real chapter: only a page with nothing else readable is an error page.
-    if (readableLength(content, new Set(notices)) < MIN_REAL_TEXT) {
+    const readable = readableLength(content, new Set(notices));
+    // A visible notice next to text means the site sent only the start of the
+    // chapter (its scripts load the rest): never keep that as the chapter.
+    // Only a notice the reader cannot see (hidden, or in a script/noscript
+    // fallback) next to the chapter is dropped.
+    const visible = notices.some((n) => readableLength(n, new Set()) > 0 && !hiddenWithin(n, content));
+    if (readable < MIN_REAL_TEXT || visible) {
       const shown = notices.map((n) => n.textContent ?? "").join(" ") || rawText;
+      const partial = readable >= MIN_REAL_TEXT ? readable : undefined;
       throw new ContentUnavailableError(
-        "The site returned a 'content failed to load' page instead of the chapter",
+        partial
+          ? "The site sent only part of the chapter and a 'content failed to load' notice for the rest"
+          : "The site returned a 'content failed to load' page instead of the chapter",
         href,
         pageNav(doc, url, rp, { bookId, chapterId, pageIndex }),
         shown.replace(/\s+/g, " ").trim().slice(0, 200),
+        partial,
       );
     }
     for (const n of notices) n.parentNode?.removeChild(n);

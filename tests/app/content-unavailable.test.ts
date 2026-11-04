@@ -148,6 +148,21 @@ describe("a chapter the site serves as 'content failed to load'", () => {
     expect(snapshot()).toEqual(before);
   });
 
+  it("does not store a page the site sent only the start of", async () => {
+    const page = errorHtml().replace("<p>內容加載失敗", "<p>在老师告知会举行考试的隔天早上。从这一天起，即将展开考试期间。</p><p>內容加載失敗");
+    const { s, app } = setup({ page });
+    const res = await app.request("/api/page?book=10&chapter=321&page=0");
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { code: string; error: string; partial: number };
+    expect(body).toMatchObject({ code: "unavailable" });
+    expect(body.error).toContain("只返回了这一章的开头部分");
+    expect(body.partial).toBeGreaterThan(20);
+    expect(s.db.all("select * from pages where chapter_id = '321'")).toEqual([]);
+    const probe = (await (await app.request("/api/site/test-page", { method: "POST", body: JSON.stringify({ url: "/novel/10/321.html" }) })).json()) as PageProbe;
+    expect(probe).toMatchObject({ ok: false, kind: "unavailable" });
+    expect(probe.partial).toBe(body.partial);
+  });
+
   it("tests a chapter page without storing it", async () => {
     const { s, app } = setup();
     const res = await app.request("/api/site/test-page", { method: "POST", body: JSON.stringify({ url: "/novel/10/321.html" }) });

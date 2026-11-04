@@ -129,6 +129,11 @@ export class ContentUnavailableError extends ParseError {
     readonly nav?: ChapterNav,
     /** Start of the text shown instead of the chapter. */
     readonly excerpt?: string,
+    /**
+     * Readable characters the page had besides the notice: the site sent only
+     * the start of the chapter and its scripts load the rest.
+     */
+    readonly partial?: number,
   ) {
     super(message, url);
     this.name = "ContentUnavailableError";
