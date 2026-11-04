@@ -30,6 +30,12 @@ export interface PageContent {
   pageCount?: number;
   /** The site's "previous" link (previous page, or the previous chapter). */
   prev?: PageRef;
+  /**
+   * The site sent only the start of this page, with its "內容加載失敗" notice
+   * where the rest should be (its scripts load the rest). Shown with a note;
+   * fetched again when opened, and not used for generated audio.
+   */
+  incomplete?: boolean;
 }
 
 /** A chapter page reference. */

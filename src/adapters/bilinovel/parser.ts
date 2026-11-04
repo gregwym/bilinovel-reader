@@ -361,27 +361,22 @@ export function parseBilinovelDocument(doc: Document, url: URL, options: ParseOp
   markStyleRuleHidden(doc);
 
   const rawText = content.textContent ?? "";
+  let incomplete = false;
   if (BLOCKED_KEYWORDS.filter((k) => rawText.includes(k)).length >= 2) {
     const notices = blockedNotices(content);
-    const readable = readableLength(content, new Set(notices));
-    // A visible notice next to text means the site sent only the start of the
-    // chapter (its scripts load the rest): never keep that as the chapter.
-    // Only a notice the reader cannot see (hidden, or in a script/noscript
-    // fallback) next to the chapter is dropped.
-    const visible = notices.some((n) => readableLength(n, new Set()) > 0 && !hiddenWithin(n, content));
-    if (readable < MIN_REAL_TEXT || visible) {
+    if (readableLength(content, new Set(notices)) < MIN_REAL_TEXT) {
       const shown = notices.map((n) => n.textContent ?? "").join(" ") || rawText;
-      const partial = readable >= MIN_REAL_TEXT ? readable : undefined;
       throw new ContentUnavailableError(
-        partial
-          ? "The site sent only part of the chapter and a 'content failed to load' notice for the rest"
-          : "The site returned a 'content failed to load' page instead of the chapter",
+        "The site returned a 'content failed to load' page instead of the chapter",
         href,
         pageNav(doc, url, rp, { bookId, chapterId, pageIndex }),
         shown.replace(/\s+/g, " ").trim().slice(0, 200),
-        partial,
       );
     }
+    // A visible notice next to text: the site sent only the start of the page
+    // (its scripts load the rest). Keep what came, marked incomplete. A notice
+    // the reader cannot see (hidden, noscript) is only a fallback.
+    incomplete = notices.some((n) => readableLength(n, new Set()) > 0 && !hiddenWithin(n, content));
     for (const n of notices) n.parentNode?.removeChild(n);
   }
 
@@ -439,5 +434,6 @@ export function parseBilinovelDocument(doc: Document, url: URL, options: ParseOp
     chapterUrl: buildPageUrl(url.origin, bookId, chapterId, 0),
     pageCount: pageCountFromTitle(rawTitle) ?? (nextType === "same-chapter-page" ? undefined : pageIndex + 1),
     prev: findPrev(doc, url, rp, bookId),
+    ...(incomplete ? { incomplete: true } : {}),
   };
 }

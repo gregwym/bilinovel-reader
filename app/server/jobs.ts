@@ -6,7 +6,7 @@ import { SpeechEngineError } from "../../src/speech/SpeechEngine";
 import type { JobInfo, JobKind, JobReason, JobStatus, JobsOverview, PageProvider, ProviderBlock } from "../shared/api";
 import type { Db } from "./db";
 import type { Ffmpeg } from "./audio/ffmpeg";
-import type { SiteSource } from "./site/source";
+import { incompleteError, type SiteSource } from "./site/source";
 import { BLOCKING_CODES, describeError, type Tts } from "./tts";
 import { bookCatalog, type ChapterAudioRow, type ChapterPart, type Library } from "./library";
 
@@ -399,6 +399,9 @@ export class Jobs {
       this.update(job.id, { message: `获取正文（第 ${n} 页）…` }),
     );
     this.checkCancelled(job.id);
+    // Never voice a chapter the site sent only part of: wait and ask again.
+    const partial = pages.find((p) => p.incomplete);
+    if (partial) throw incompleteError(partial);
     const parts = this.tts.parts(profile.provider, pages);
     if (!parts.length) {
       this.library.markSilent(book.id, job.target, profileId);

@@ -432,6 +432,12 @@ export class ReaderView {
     this.realignAnchor();
   }
 
+  /** A note after the chapter's loaded text (not a paragraph: never read aloud or selected). */
+  appendNotice(chapterId: string, text: string): void {
+    const section = this.contentEl.querySelector<HTMLElement>(`section[data-chapter-id="${CSS.escape(chapterId)}"]`);
+    section?.append(h("div", { class: "br-incomplete", role: "note" }, text));
+  }
+
   private renderImage(p: Paragraph): HTMLElement {
     const img = h("img", { src: p.imageUrl, loading: "lazy", decoding: "async", alt: "插图" });
     const fig = h("figure", { class: "br-img", "data-id": p.id }, img);

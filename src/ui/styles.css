@@ -535,6 +535,16 @@ svg {
   color: inherit;
 }
 
+.br-incomplete {
+  margin: 0.4em 0 1em;
+  padding: 8px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  font-size: 0.85em;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
 .br-note {
   padding: 8px 0 4px;
   font-size: 12px;

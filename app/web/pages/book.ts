@@ -416,6 +416,7 @@ export function bookPage({ id }: Record<string, string>): Page {
     else if (c.duration) sub.push(formatDuration(c.duration));
     if (c.audio === "stale") sub.push("声音已更换，需重新生成");
     if ((c.audio === "running" || c.audio === "queued" || c.audio === "failed") && c.message) sub.push(c.message);
+    if (c.incomplete) sub.push("正文不完整（网站只返回了部分）");
     const name = h(
       "div",
       { class: "name" },
@@ -440,8 +441,39 @@ export function bookPage({ id }: Record<string, string>): Page {
         : { label: "语音（MP3）", hint: c.silent ? "仅插图" : "尚未生成", disabled: true },
       { label: "原文（TXT）", run: () => saveText(dl, `/api/books/${id}/chapters/${c.chapterId}/text`) },
       ...(offlineSupported ? offlineItems(book, c) : []),
+      ...cacheItems(c),
     ]);
     return h("li", { class: cls }, name, segBtn, dl, stateButton(book, c));
+  }
+
+  /** Delete this chapter's cached text or its audio on the server (never both at once). */
+  function cacheItems(c: ChapterInfo): MenuItem[] {
+    const chapterId = c.chapterId!;
+    const hasAudio = c.audio === "done" || c.audio === "stale";
+    return [
+      {
+        label: "删除正文缓存",
+        hint: c.pages ? `${c.pages} 页${c.incomplete ? " · 不完整" : ""}` : "未缓存",
+        disabled: !c.pages,
+        run: async () => {
+          if (!confirm(`删除《${c.title}》缓存的正文（${c.pages} 页）？下次阅读或生成时会重新从网站获取；音频不受影响。`)) return;
+          await api.del(`/api/books/${id}/chapters/${chapterId}/pages`);
+          toast("已删除正文缓存");
+          refresh();
+        },
+      },
+      {
+        label: "删除本章音频",
+        hint: hasAudio ? (c.bytes ? formatBytes(c.bytes) : c.silent ? "仅插图" : "") : "尚未生成",
+        disabled: !hasAudio,
+        run: async () => {
+          if (!confirm(`删除《${c.title}》已生成的章节音频？缓存的语音片段保留，重新生成时内容相同的部分不会再次请求。正文缓存不受影响。`)) return;
+          await api.del(`/api/books/${id}/audio?chapter=${encodeURIComponent(chapterId)}`);
+          toast("已删除本章音频");
+          refresh();
+        },
+      },
+    ];
   }
 
   /** Save a chapter on this device (again, to take newly generated audio), or delete it. */

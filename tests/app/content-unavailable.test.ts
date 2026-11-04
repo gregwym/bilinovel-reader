@@ -9,7 +9,7 @@ import { createApp } from "../../app/server/http";
 import { bookCatalog } from "../../app/server/library";
 import { PROGRESS_KEY } from "../../app/server/books";
 import type { BookDetail, PageProbe, SiteFailure } from "../../app/shared/api";
-import type { Catalog, PageContent } from "../../src/adapters/types";
+import { ContentUnavailableError, type Catalog, type PageContent } from "../../src/adapters/types";
 
 /**
  * Book 5370 as seen on 2026-11-03: 了解对方 (here 100) is cached and has audio,
@@ -148,19 +148,48 @@ describe("a chapter the site serves as 'content failed to load'", () => {
     expect(snapshot()).toEqual(before);
   });
 
-  it("does not store a page the site sent only the start of", async () => {
+  it("shows a page the site sent only the start of, marked incomplete, asks again when opened, and never voices it", async () => {
     const page = errorHtml().replace("<p>內容加載失敗", "<p>在老师告知会举行考试的隔天早上。从这一天起，即将展开考试期间。</p><p>內容加載失敗");
-    const { s, app } = setup({ page });
+    const { s, app, requests } = setup({ page });
     const res = await app.request("/api/page?book=10&chapter=321&page=0");
-    expect(res.status).toBe(503);
-    const body = (await res.json()) as { code: string; error: string; partial: number };
-    expect(body).toMatchObject({ code: "unavailable" });
-    expect(body.error).toContain("只返回了这一章的开头部分");
-    expect(body.partial).toBeGreaterThan(20);
-    expect(s.db.all("select * from pages where chapter_id = '321'")).toEqual([]);
+    expect(res.status).toBe(200);
+    const got = (await res.json()) as PageContent;
+    expect(got.incomplete).toBe(true);
+    expect(got.paragraphs.map((p) => p.text)).toEqual(["在老师告知会举行考试的隔天早上。从这一天起，即将展开考试期间。"]);
+    // Kept, and asked for again when opened (what was kept stays if that fails).
+    expect(s.source.cachedPage("10", "321", 0)?.incomplete).toBe(true);
+    const before = requests.filter((r) => r.includes("/321")).length;
+    await app.request("/api/page?book=10&chapter=321&page=0");
+    expect(requests.filter((r) => r.includes("/321")).length).toBe(before + 1);
+    // The book page says so; diagnostics too.
+    const row = ((await (await app.request("/api/books/10")).json()) as BookDetail).volumes[0].chapters[1];
+    expect(row).toMatchObject({ chapterId: "321", pages: 1, incomplete: true });
+    const { failures } = (await (await app.request("/api/site/diagnostics")).json()) as { failures: SiteFailure[] };
+    expect(failures[0]).toMatchObject({ kind: "unavailable", url: u("321") });
+    expect(failures[0].partial).toBeGreaterThan(20);
     const probe = (await (await app.request("/api/site/test-page", { method: "POST", body: JSON.stringify({ url: "/novel/10/321.html" }) })).json()) as PageProbe;
-    expect(probe).toMatchObject({ ok: false, kind: "unavailable" });
-    expect(probe.partial).toBe(body.partial);
+    expect(probe).toMatchObject({ ok: true, paragraphs: 1 });
+    expect(probe.partial).toBeGreaterThan(20);
+    // Background audio waits for the whole chapter instead of voicing the start.
+    const jobId = s.jobs.enqueueChapter("10", "321", "探求知识", "manual");
+    s.db.run("update jobs set status = 'running' where id = ?", jobId);
+    const job = s.db.get("select * from jobs where id = ?", jobId);
+    const jobs = s.jobs as unknown as { runChapter(job: unknown): Promise<void> };
+    const err = await jobs.runChapter(job).then(() => undefined, (e: unknown) => e);
+    expect(err).toBeInstanceOf(ContentUnavailableError);
+    expect(s.library.chapterAudio("10").map((r) => r.chapter_id)).toEqual(["100"]);
+  });
+
+  it("deletes one chapter's cached text or its audio on request, and nothing else", async () => {
+    const { s, app } = setup();
+    const progress = s.db.getKv(PROGRESS_KEY);
+    expect((await (await app.request("/api/books/10/chapters/100/pages", { method: "DELETE" })).json())).toMatchObject({ pages: 2 });
+    expect(s.db.all("select * from pages where chapter_id = '100'")).toEqual([]);
+    // Its audio and the reading position stay.
+    expect(s.library.chapterAudio("10").map((r) => r.chapter_id)).toEqual(["100"]);
+    expect(s.db.getKv(PROGRESS_KEY)).toBe(progress);
+    await app.request("/api/books/10/audio?chapter=100", { method: "DELETE" });
+    expect(s.library.chapterAudio("10")).toEqual([]);
   });
 
   it("tests a chapter page without storing it", async () => {

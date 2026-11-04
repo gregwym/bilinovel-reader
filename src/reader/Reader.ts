@@ -76,6 +76,10 @@ import {
   type TtsEngine,
 } from "./ProgressStore";
 
+/** Shown after a page the site sent only the start of. */
+export const INCOMPLETE_NOTICE =
+  "⚠ 网站只返回了这一页的开头部分，其余显示「内容加载失败」。这是网站的限制，不是阅读器故障；重新打开本章会再次获取。";
+
 /** Prefetch the next site page when this few paragraphs remain loaded ahead of the cursor. */
 const PREFETCH_REMAINING = 8;
 /** Rolling buffer: chapters kept in memory/DOM. */
@@ -584,6 +588,7 @@ export class Reader implements PlaybackSource {
     if (res.kind === "duplicate") return;
     if (res.kind === "new-chapter") this.view.appendChapter(res.chapter.chapterId, res.chapter.title, res.added);
     else this.view.appendParagraphs(res.chapter.chapterId, res.added);
+    if (page.incomplete) this.view.appendNotice(res.chapter.chapterId, INCOMPLETE_NOTICE);
     if (this.buffer.chapters.length === 1 && res.kind === "new-chapter") {
       this.view.setTitles(this.buffer.bookTitle, res.chapter.title);
     }

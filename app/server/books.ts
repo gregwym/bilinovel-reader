@@ -319,6 +319,7 @@ export class Books {
         .filter((r) => r.status !== "recovered")
         .map((r) => [`${r.volume}:${r.index}`, { status: r.status as "no-evidence" | "conflict" | "ambiguous", notes: r.notes }]),
     );
+    const cachedText = this.source.cachedChapters(book.id);
     const volumes: VolumeInfo[] = (catalog?.volumes ?? []).map((v, vi) => {
       const chapters: ChapterInfo[] = v.chapters.map((c, ci) => {
         const row = c.chapterId ? rows.get(c.chapterId) : undefined;
@@ -337,6 +338,8 @@ export class Books {
           jobId: job?.id,
           silent: row ? !row.file : undefined,
           unlinked: c.chapterId ? undefined : unlinked.get(`${vi}:${ci}`),
+          pages: c.chapterId ? cachedText.get(c.chapterId)?.pages : undefined,
+          incomplete: (c.chapterId && cachedText.get(c.chapterId)?.incomplete) || undefined,
         };
       });
       const file = this.library.exportFile(book.id, vi);
