@@ -12,7 +12,7 @@
  *   <script src="/scripts/chapterlog.js?v…">  paragraph shuffle (see deobfuscate.ts)
  */
 
-import { ParseError, type PageContent, type PageRef, type Paragraph } from "../types";
+import { ContentUnavailableError, ParseError, type ChapterNav, type PageContent, type PageRef, type Paragraph } from "../types";
 import {
   DEFAULT_SHUFFLE_TEMPLATE,
   decodeText,
@@ -281,6 +281,21 @@ function findPrev(doc: Document, base: URL, rp: ReadParams, bookId: string): Pag
   return { url, chapterId: info.chapterId, pageIndex: info.pageIndex };
 }
 
+/** Title and chapter links of a page, read without its content (also from error pages). */
+function pageNav(doc: Document, url: URL, rp: ReadParams, current: { bookId: string; chapterId: string; pageIndex: number }): ChapterNav {
+  const nav: ChapterNav = { bookId: current.bookId, chapterId: current.chapterId };
+  const title =
+    stripPageSuffix(textOf(doc.querySelector("#atitle"))) || stripPageSuffix(decodeText(rp.chaptername ?? ""));
+  if (title && current.pageIndex === 0) nav.title = title;
+  const prev = findPrev(doc, url, rp, current.bookId);
+  if (prev && prev.chapterId !== current.chapterId) nav.prevChapterId = prev.chapterId;
+  const { nextUrl, linkText } = findNext(doc, url, rp);
+  const next = classifyNext({ current, nextUrl, linkText });
+  const info = next.nextType === "next-chapter" && next.nextUrl ? parseChapterUrl(next.nextUrl) : null;
+  if (info) nav.nextChapterId = info.chapterId;
+  return nav;
+}
+
 /**
  * Parses a Bilinovel chapter page. `doc` is modified (junk removed, paragraphs
  * reordered) so pass a disposable document, not the live page.
@@ -301,7 +316,12 @@ export function parseBilinovelDocument(doc: Document, url: URL, options: ParseOp
 
   const rawText = content.textContent ?? "";
   if (BLOCKED_KEYWORDS.filter((k) => rawText.includes(k)).length >= 2) {
-    throw new ParseError("The site returned a 'content failed to load' page instead of the chapter", href);
+    throw new ContentUnavailableError(
+      "The site returned a 'content failed to load' page instead of the chapter",
+      href,
+      pageNav(doc, url, rp, { bookId, chapterId, pageIndex }),
+      rawText.replace(/\s+/g, " ").trim().slice(0, 200),
+    );
   }
 
   for (const sel of PRE_RESTORE_JUNK) content.querySelectorAll(sel).forEach((el) => el.remove());

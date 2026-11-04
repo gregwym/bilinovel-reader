@@ -3,7 +3,7 @@ import { DEFAULT_SETTINGS, type Settings } from "../../../src/reader/ProgressSto
 import { GEMINI_PRESET_MODELS, GEMINI_VOICES } from "../../../src/speech/GeminiSpeechEngine";
 import { FISH_MODELS } from "../../../src/speech/FishSpeechEngine";
 import type { AzureVoice } from "../../../src/speech/AzureSpeechEngine";
-import type { AppInfo, LibraryStats, PageProvider, RescanResult, ServerSettings, ServerSettingsUpdate } from "../../shared/api";
+import type { AppInfo, LibraryStats, PageProbe, PageProvider, RescanResult, ServerSettings, ServerSettingsUpdate, SiteFailure } from "../../shared/api";
 import { api } from "../api";
 import { offlineSupported, removeSaved, savedBooks, usage } from "../offline";
 import { act, formatBytes, stepper, toast, topbar, type Page } from "../ui";
@@ -280,6 +280,57 @@ export function settingsPage(): Page {
       h("label", { class: "field" }, h("span", {}, "FlareSolverr 地址（可选，自动通过人机验证）"), fs),
       h("div", { class: "actions" }, save, test),
       result,
+      pageTest(),
+    );
+  }
+
+  /** Loads one chapter page the way the server does, and lists recent pages the site did not deliver. */
+  function pageTest(): HTMLElement {
+    const url = h("input", { class: "input mono", placeholder: "/novel/5370/288458.html" });
+    const out = h("div", { class: "hint mono", style: "margin-top:10px;white-space:pre-wrap" });
+    const recent = h("div", { class: "hint mono", style: "margin-top:10px;white-space:pre-wrap" });
+    const navText = (n?: PageProbe["nav"]) =>
+      n ? [n.title && `标题「${n.title}」`, n.prevChapterId && `上一章 ${n.prevChapterId}`, n.nextChapterId && `下一章 ${n.nextChapterId}`].filter(Boolean).join("，") : "";
+    const KIND: Record<SiteFailure["kind"], string> = {
+      unavailable: "网站返回「内容加载失败」页（站点限制或内容暂不可用，非书库故障）",
+      challenge: "遇到人机验证",
+      fetch: "无法访问网站",
+      parse: "页面结构无法解析",
+    };
+    const showRecent = async () => {
+      const { failures } = await api.get<{ failures: SiteFailure[] }>("/api/site/diagnostics");
+      recent.textContent = failures.length
+        ? "最近失败的页面：\n" +
+          failures
+            .slice(0, 10)
+            .map((f) => `${new Date(f.at).toLocaleString()} ${KIND[f.kind]}\n  ${f.url}${f.status ? ` · HTTP ${f.status}` : ""}` +
+              (f.excerpt ? `\n  网站显示：${f.excerpt.slice(0, 80)}` : "") + (navText(f.nav) ? `\n  页面导航：${navText(f.nav)}` : ""))
+            .join("\n")
+        : "最近没有失败的页面";
+      if (!url.value && failures[0]) url.value = new URL(failures[0].url).pathname;
+    };
+    const run = h("button", { class: "btn" }, "测试章节页");
+    run.addEventListener("click", () =>
+      void act(run, async () => {
+        out.textContent = "加载中…";
+        const r = await api.post<PageProbe>("/api/site/test-page", { url: url.value });
+        out.style.color = r.ok ? "var(--ok)" : "var(--danger)";
+        out.textContent = r.ok
+          ? `✓ 正文正常（${r.ms} ms）：「${r.title}」${r.paragraphs} 段`
+          : [`✗ ${KIND[r.kind ?? "fetch"]}（${r.ms} ms）`, r.error, r.excerpt && `网站显示：${r.excerpt}`, navText(r.nav) && `页面导航：${navText(r.nav)}`]
+              .filter(Boolean)
+              .join("\n");
+        await showRecent();
+      }),
+    );
+    void showRecent().catch(() => undefined);
+    return h(
+      "div",
+      { style: "margin-top:16px" },
+      h("label", { class: "field" }, h("span", {}, "测试章节页（不保存，查看网站实际返回的内容）"), url),
+      h("div", { class: "actions" }, run),
+      out,
+      recent,
     );
   }
 

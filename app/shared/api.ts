@@ -2,7 +2,7 @@
  * Types exchanged between the library server and its web app.
  */
 
-import type { Catalog } from "../../src/adapters/types";
+import type { Catalog, ChapterNav } from "../../src/adapters/types";
 
 export type PageProvider = "gemini" | "fish";
 
@@ -86,6 +86,8 @@ export interface ChapterInfo {
   jobId?: number;
   /** Nothing to read aloud (illustrations only). */
   silent?: boolean;
+  /** Why a catalog entry without a link could not be linked from the cached pages. */
+  unlinked?: { status: "no-evidence" | "conflict" | "ambiguous"; notes: string[] };
 }
 
 /** A chapter's speech segments in one voice (each is one request). */
@@ -203,3 +205,31 @@ export interface AppInfo {
 }
 
 export type { Catalog };
+
+/** A page the site did not deliver, kept for the settings page's diagnostics (not content). */
+export interface SiteFailure {
+  at: number;
+  url: string;
+  /** unavailable: the site's "content failed to load" page; challenge: bot check; fetch: HTTP/network; parse: unexpected page. */
+  kind: "unavailable" | "challenge" | "fetch" | "parse";
+  message: string;
+  status?: number;
+  /** What the error page still showed. */
+  nav?: ChapterNav;
+  excerpt?: string;
+}
+
+/** Result of loading one chapter page without storing it. */
+export interface PageProbe {
+  ok: boolean;
+  url: string;
+  ms: number;
+  kind?: SiteFailure["kind"];
+  error?: string;
+  status?: number;
+  title?: string;
+  paragraphs?: number;
+  nav?: ChapterNav;
+  excerpt?: string;
+}
+

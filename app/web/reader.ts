@@ -1,4 +1,4 @@
-import { FetchError, ParseError, type Catalog, type PageContent, type SiteAdapter } from "../../src/adapters/types";
+import { ContentUnavailableError, FetchError, ParseError, type Catalog, type ChapterNav, type PageContent, type SiteAdapter } from "../../src/adapters/types";
 import { parseChapterUrl, buildPageUrl } from "../../src/adapters/bilinovel/url";
 import { Reader, type PageConfigs, type ReaderHost } from "../../src/reader/Reader";
 import { ProgressStore, SettingsStore, type KeyValueStore, type PageProvider } from "../../src/reader/ProgressStore";
@@ -55,9 +55,16 @@ export class LibraryAdapter implements SiteAdapter {
     const res = await fetch(`/api/page?book=${info.bookId}&chapter=${info.chapterId}&page=${info.pageIndex}`).catch(() => {
       throw new FetchError("无法连接服务器", url);
     });
-    const data = (await res.json().catch(() => ({}))) as PageContent & { error?: string; code?: string; status?: number };
+    const data = (await res.json().catch(() => ({}))) as PageContent & {
+      error?: string;
+      code?: string;
+      status?: number;
+      nav?: ChapterNav;
+      excerpt?: string;
+    };
     if (!res.ok) {
       if (res.status === 401) location.href = `/login?next=${encodeURIComponent(location.pathname)}`;
+      if (data.code === "unavailable") throw new ContentUnavailableError(data.error ?? "网站没有返回正文", url, data.nav, data.excerpt);
       if (data.code === "parse") throw new ParseError(data.error ?? "无法解析页面", url);
       throw new FetchError(data.error ?? `HTTP ${res.status}`, url, data.status ?? res.status, data.code === "challenge");
     }

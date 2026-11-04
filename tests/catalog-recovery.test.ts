@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { reconcileCatalog } from "../src/adapters/bilinovel/reconcileCatalog";
-import type { Catalog, PageContent } from "../src/adapters/types";
+import { reconcileCatalog, reconcileCatalogReport } from "../src/adapters/bilinovel/reconcileCatalog";
+import type { Catalog, ChapterNav, PageContent } from "../src/adapters/types";
 
 const url = (id: string, book = "10") => `https://www.bilinovel.com/novel/${book}/${id}.html`;
 function catalog(): Catalog {
@@ -45,5 +45,69 @@ describe("catalog placeholder recovery", () => {
     c.volumes.push({ title: "二", chapters: [{ title: "前", chapterId: "500" }, { title: "下次见" }] });
     expect(reconcileCatalog(c, [page()])).toHaveLength(1);
     expect(c.volumes[1].chapters[1].chapterId).toBeUndefined();
+  });
+});
+
+describe("catalog placeholder recovery from neighbouring chapters", () => {
+  // 了解对方 (100, 2 pages) → 探求知识 (placeholder) → 山村的勇气 (999), as in book 5370.
+  const before = (next = "321"): PageContent => page({ chapterId: "100", chapterTitle: "前", pageIndex: 1,
+    url: "https://www.bilinovel.com/novel/10/100_2.html", prev: { url: url("100"), chapterId: "100", pageIndex: 0 },
+    nextType: "next-chapter", nextUrl: url(next) });
+  const after = (prev = "321"): PageContent => page({ chapterId: "999", chapterTitle: "后", url: url("999"),
+    prev: { url: url(prev), chapterId: prev, pageIndex: 0 }, nextType: "end", nextUrl: undefined });
+  const errorNav = (o: Partial<ChapterNav> = {}): ChapterNav =>
+    ({ bookId: "10", chapterId: "321", title: "下次见", prevChapterId: "100", nextChapterId: "999", ...o });
+  const status = (c: Catalog, pages: PageContent[], navs: ChapterNav[] = []) => reconcileCatalogReport(c, pages, navs).report[0];
+
+  it("links when both neighbours point at the same chapter, without that chapter's page", () => {
+    const c = catalog();
+    expect(status(c, [before(), after()])).toMatchObject({ status: "recovered", chapterId: "321" });
+    expect(c.volumes[0].chapters[1]).toEqual({ title: "下次见", chapterId: "321", url: url("321") });
+  });
+
+  it("links from the previous chapter's last page plus the title the error page still showed", () => {
+    const c = catalog();
+    expect(status(c, [before()], [errorNav({ nextChapterId: undefined })])).toMatchObject({ status: "recovered", chapterId: "321" });
+  });
+
+  it("does not trust a single link: the catalog may skip a chapter", () => {
+    for (const pages of [[before()], [after()]]) {
+      const c = catalog();
+      const r = status(c, pages);
+      expect(r.status).toBe("no-evidence");
+      expect(r.notes.join()).toContain("单向导航");
+      expect(c.volumes[0].chapters[1].chapterId).toBeUndefined();
+    }
+  });
+
+  it.each([
+    ["neighbours disagree", [before("321"), after("322")], []],
+    ["previous chapter skips the placeholder", [before("999")], [errorNav()]],
+    ["error page has another title", [before()], [errorNav({ title: "别的章节" })]],
+    ["error page links elsewhere", [before()], [errorNav({ prevChapterId: "555" })]],
+    ["previous chapter's pages disagree", [before("321"), { ...before("322"), pageIndex: 2, url: "https://www.bilinovel.com/novel/10/100_3.html" }], [errorNav()]],
+  ] as [string, PageContent[], ChapterNav[]][])("leaves it unlinked when evidence conflicts: %s", (_, pages, navs) => {
+    const c = catalog();
+    const r = status(c, pages, navs);
+    expect(["conflict", "ambiguous"]).toContain(r.status);
+    expect(c.volumes[0].chapters[1].chapterId).toBeUndefined();
+  });
+
+  it("never reads cid() or interpolates ID gaps", () => {
+    const c = catalog();
+    c.volumes[0].chapters[2].chapterId = "101";
+    expect(reconcileCatalog(c, [])).toEqual([]);
+    expect(c.volumes[0].chapters[1].chapterId).toBeUndefined();
+  });
+
+  it("recovers consecutive placeholders one after another when each step is proven", () => {
+    const c: Catalog = { bookId: "10", volumes: [{ title: "一", chapters: [
+      { title: "前", chapterId: "100", url: url("100") }, { title: "甲" }, { title: "乙" }, { title: "后", chapterId: "999", url: url("999") },
+    ] }] };
+    const navs: ChapterNav[] = [
+      { bookId: "10", chapterId: "201", title: "甲", prevChapterId: "100", nextChapterId: "202" },
+      { bookId: "10", chapterId: "202", title: "乙", prevChapterId: "201", nextChapterId: "999" },
+    ];
+    expect(reconcileCatalog(c, [], navs).map((ch) => ch.chapterId)).toEqual(["201", "202"]);
   });
 });

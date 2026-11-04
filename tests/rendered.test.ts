@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach } from "vitest";
 import { BilinovelAdapter } from "../src/adapters/bilinovel";
 import { parseChapterLogScript } from "../src/adapters/bilinovel/deobfuscate";
 import { isInvisible, parseBilinovelDocument } from "../src/adapters/bilinovel/parser";
-import { FetchError, type FrameHost } from "../src/adapters/types";
+import { ContentUnavailableError, FetchError, type FrameHost } from "../src/adapters/types";
 import { RequestQueue } from "../src/utils/RequestQueue";
 import { ORIGIN, fixture, loadFixture } from "./helpers";
 
@@ -95,6 +95,35 @@ describe("userscript catalog recovery", () => {
     }
     expect(catalog.volumes[0].chapters[1].chapterId).toBe("180210");
     expect(catalog.volumes[0].chapters[1].url).toBe(`${ORIGIN}/novel/5369/180210.html`);
+  });
+});
+
+describe("userscript: the site's 'content failed to load' page", () => {
+  const errorPage = `<script>var ReadParams={url_previous:'/novel/5369/180204_3.html',url_next:'/novel/5369/180206.html',
+    articleid:'5369',chapterid:'180205',chaptername:'插图'};</script><h1 id="atitle">插图</h1>
+    <div id="acontent"><p>內容加載失敗！請刷新或更換瀏覽器</p></div>`;
+  const catalogHtml = `<div id="volumes"><h2>卷</h2><ul>
+    <li><a href="/novel/5369/180204.html">第四章 分页的章节</a></li>
+    <li class="jsChapter"><a href="javascript:cid(1)">插图</a></li>
+    <li><a href="/novel/5369/180206.html">第五章</a></li></ul></div>`;
+
+  it("retries with the site's scripts, reports it as unavailable, and uses its navigation only as catalog evidence", async () => {
+    const calls: string[] = [];
+    const loader: Loader = async (url, _host, o) => {
+      calls.push(`${o?.scripts ? "scripted" : "static"} ${new URL(url).pathname}`);
+      const html = url.endsWith("/catalog") ? catalogHtml : errorPage;
+      return { doc: new DOMParser().parseFromString(html, "text/html"), win: window, dispose() {} };
+    };
+    const adapter = new BilinovelAdapter(queue(), host, loader);
+    const catalog = await adapter.fetchCatalog("5369");
+    // The previous chapter's last page links "next chapter" to 180205.
+    await adapter.parseRenderedDocument(loadFixture("next-chapter.html"), new URL(`${ORIGIN}/novel/5369/180204_3.html`));
+    expect(catalog.volumes[0].chapters[1].chapterId).toBeUndefined();
+    await expect(adapter.fetchPage(`${ORIGIN}/novel/5369/180205.html`)).rejects.toBeInstanceOf(ContentUnavailableError);
+    expect(calls.filter((c) => c.endsWith("180205.html"))).toEqual(["static /novel/5369/180205.html", "scripted /novel/5369/180205.html"]);
+    expect(catalog.volumes[0].chapters[1].chapterId).toBe("180205");
+    const diag = adapter.getDiagnostics();
+    expect(diag.some((d) => d.method === "unavailable" && String(d.excerpt).includes("內容加載失敗"))).toBe(true);
   });
 });
 

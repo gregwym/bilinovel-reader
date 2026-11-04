@@ -1,10 +1,11 @@
 import { JSDOM } from "jsdom";
-import { ParseError, type Catalog, type PageContent } from "../../../src/adapters/types";
+import { ContentUnavailableError, FetchError, ParseError, type Catalog, type ChapterNav, type PageContent } from "../../../src/adapters/types";
 import { decodeText, parseChapterLogScript, type ShuffleTemplate } from "../../../src/adapters/bilinovel/deobfuscate";
 import { findChapterLogScript, parseBilinovelDocument } from "../../../src/adapters/bilinovel/parser";
 import { catalogUrl, parseCatalogDocument } from "../../../src/adapters/bilinovel/catalog";
-import { reconcileCatalog } from "../../../src/adapters/bilinovel/reconcileCatalog";
+import { placeholderNeighbours, reconcileCatalogReport, type PlaceholderReport } from "../../../src/adapters/bilinovel/reconcileCatalog";
 import { buildPageUrl, parseChapterUrl, resolveHref } from "../../../src/adapters/bilinovel/url";
+import type { PageProbe, SiteFailure } from "../../shared/api";
 import type { Db } from "../db";
 import type { SiteClient } from "./client";
 
@@ -65,6 +66,18 @@ interface PageRow {
   data: string;
 }
 
+const NAV_KEY = (bookId: string, chapterId: string) => `site.nav:${bookId}:${chapterId}`;
+
+export function failureOf(err: unknown, url: string): Omit<SiteFailure, "at"> {
+  if (err instanceof ContentUnavailableError) {
+    return { url, kind: "unavailable", message: err.message, nav: err.nav, excerpt: err.excerpt };
+  }
+  if (err instanceof FetchError) {
+    return { url, kind: err.challenge ? "challenge" : "fetch", message: err.message, status: err.status };
+  }
+  return { url, kind: "parse", message: err instanceof Error ? err.message : String(err) };
+}
+
 /**
  * Book content from the site, parsed with the userscript's parsers (over
  * jsdom) and kept in the database: a page is fetched once, whoever needs it
@@ -75,6 +88,7 @@ export class SiteSource {
   private readonly catalogs = new Map<string, { at: number; catalog: Promise<SiteCatalog> }>();
   private readonly pending = new Map<string, Promise<PageContent>>();
   private readonly pageListeners: ((bookId: string) => void)[] = [];
+  private readonly failures: SiteFailure[] = [];
 
   constructor(
     private readonly db: Db,
@@ -92,9 +106,60 @@ export class SiteSource {
 
   /** Reuses existing content without network requests or guessing IDs. */
   reconcileCatalog(catalog: Catalog) {
-    if (!catalog.volumes.some((v) => v.chapters.some((c) => !c.chapterId))) return [];
-    const pages = this.db.all<PageRow>("select data from pages where book_id = ? and page_index = 0", catalog.bookId);
-    return reconcileCatalog(catalog, pages.map((r) => JSON.parse(r.data) as PageContent));
+    return this.reconcileReport(catalog).recovered;
+  }
+
+  /**
+   * Recovers placeholder links from stored evidence (first pages, the pages of
+   * the chapters next to each placeholder, and what error pages showed) and
+   * says why each remaining placeholder has no link. No network requests.
+   */
+  reconcileReport(catalog: Catalog): { recovered: Catalog["volumes"][number]["chapters"]; report: PlaceholderReport[] } {
+    if (!catalog.volumes.some((v) => v.chapters.some((c) => !c.chapterId))) return { recovered: [], report: [] };
+    const near = placeholderNeighbours(catalog);
+    const pages = this.db.all<PageRow>(
+      `select data from pages where book_id = ? and (page_index = 0 or chapter_id in (select value from json_each(?)))`,
+      catalog.bookId,
+      JSON.stringify(near),
+    );
+    const navs = this.db
+      .all<{ value: string }>("select value from kv where key like ?", `site.nav:${catalog.bookId}:%`)
+      .map((r) => JSON.parse(r.value) as ChapterNav);
+    return reconcileCatalogReport(catalog, pages.map((r) => JSON.parse(r.data) as PageContent), navs);
+  }
+
+  /** Recent pages the site did not deliver, newest first. */
+  recentFailures(): SiteFailure[] {
+    return [...this.failures].reverse();
+  }
+
+  private fail(err: unknown, url: string): void {
+    const failure = { at: Date.now(), ...failureOf(err, url) };
+    console.warn(`[site] ${failure.kind} ${url}: ${failure.message}${failure.excerpt ? ` — 「${failure.excerpt.slice(0, 60)}」` : ""}`);
+    this.failures.push(failure);
+    if (this.failures.length > 30) this.failures.shift();
+    const nav = err instanceof ContentUnavailableError ? err.nav : undefined;
+    // The error page's navigation is evidence for the catalog, never content.
+    if (nav && (nav.title || nav.prevChapterId || nav.nextChapterId)) {
+      const key = NAV_KEY(nav.bookId, nav.chapterId);
+      const saved = this.db.getJson<ChapterNav>(key);
+      if (JSON.stringify(saved) !== JSON.stringify(nav)) {
+        this.db.setJson(key, nav);
+        this.pageListeners.forEach((fn) => fn(nav.bookId));
+      }
+    }
+  }
+
+  /** Loads one chapter page and reports what the site sent, without storing it. */
+  async probePage(url: string): Promise<PageProbe> {
+    const start = Date.now();
+    try {
+      const page = await this.load(url, 0);
+      return { ok: true, url, ms: Date.now() - start, title: page.chapterTitle, paragraphs: page.paragraphs.length };
+    } catch (err) {
+      const f = failureOf(err, url);
+      return { ok: false, url, ms: Date.now() - start, kind: f.kind, error: f.message, status: f.status, nav: f.nav, excerpt: f.excerpt };
+    }
   }
 
   private parse<T>(html: string, url: string, fn: (doc: Document) => T): T {
@@ -133,11 +198,21 @@ export class SiteSource {
     return p;
   }
 
-  private async fetchPage(url: string): Promise<PageContent> {
-    const html = await this.client.html(url);
+  private async load(url: string, retries?: number): Promise<PageContent> {
+    const html = await this.client.html(url, retries);
     const scriptUrl = this.parse(html, url, (doc) => findChapterLogScript(doc, new URL(url)));
     const shuffle = scriptUrl ? await this.template(scriptUrl) : undefined;
-    const page = this.parse(html, url, (doc) => parseBilinovelDocument(doc, new URL(url), { shuffle }));
+    return this.parse(html, url, (doc) => parseBilinovelDocument(doc, new URL(url), { shuffle }));
+  }
+
+  private async fetchPage(url: string): Promise<PageContent> {
+    let page: PageContent;
+    try {
+      page = await this.load(url);
+    } catch (err) {
+      this.fail(err, url);
+      throw err;
+    }
     this.db.run(
       `insert into pages (book_id, chapter_id, page_index, data, fetched_at) values (?, ?, ?, ?, ?)
        on conflict (book_id, chapter_id, page_index) do update set data = excluded.data, fetched_at = excluded.fetched_at`,
@@ -147,6 +222,8 @@ export class SiteSource {
       JSON.stringify(page),
       Date.now(),
     );
+    // The real page supersedes what an earlier error page showed.
+    if (page.pageIndex === 0) this.db.setJson(NAV_KEY(page.bookId, page.chapterId), undefined);
     this.pageListeners.forEach((fn) => fn(page.bookId));
     return page;
   }

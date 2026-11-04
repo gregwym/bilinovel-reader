@@ -5,7 +5,8 @@ import { extname, join, normalize, sep } from "node:path";
 import { Readable } from "node:stream";
 import { Hono, type Context } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
-import { FetchError, ParseError, type PageContent } from "../../src/adapters/types";
+import { ContentUnavailableError, FetchError, ParseError, type PageContent } from "../../src/adapters/types";
+import { parseChapterUrl } from "../../src/adapters/bilinovel/url";
 import { SpeechEngineError } from "../../src/speech/SpeechEngine";
 import { GEMINI_VOICES } from "../../src/speech/GeminiSpeechEngine";
 import { listFishVoices } from "../../src/speech/FishSpeechEngine";
@@ -63,6 +64,9 @@ const VOICE_PREVIEW_TEXT = "她轻轻推开窗，晚风带着桂花的香气吹�
 const isProvider = (p: string): p is PageProvider => (PROVIDERS as string[]).includes(p);
 
 /** Status and message for an error from the site, a service or the library (also logged). */
+export const UNAVAILABLE_MESSAGE =
+  "网站没有返回这一章的正文（显示「内容加载失败」）。这是网站的限制或内容暂不可用，不是书库服务故障；可稍后重试，或在设置中更新 Cookie / 配置 FlareSolverr";
+
 function errorResponse(c: Context, err: unknown) {
   console.warn(`[library] ${c.req.method} ${c.req.path}:`, err instanceof Error ? `${err.name}: ${err.message}` : String(err));
   if (err instanceof SpeechEngineError) return c.json({ error: err.message, code: err.code }, 502);
@@ -77,6 +81,18 @@ function errorResponse(c: Context, err: unknown) {
         status: err.status,
       },
       502,
+    );
+  }
+  if (err instanceof ContentUnavailableError) {
+    // The site answered but without the chapter: not the Reader failing, and not a proxy problem.
+    return c.json(
+      {
+        error: `${UNAVAILABLE_MESSAGE}：${err.url}`,
+        code: "unavailable",
+        nav: err.nav,
+        excerpt: err.excerpt,
+      },
+      503,
     );
   }
   if (err instanceof ParseError) return c.json({ error: `无法解析页面：${err.message}`, code: "parse" }, 502);
@@ -694,6 +710,22 @@ export function createApp(d: AppDeps): Hono {
 
   /** Connection test: one request to the site's home page. */
   app.post("/api/site/test", async (c) => c.json(await d.client.probe(`${d.settings.get().siteOrigin}/`)));
+
+  /** Loads one chapter page the way the server does and says what came back (nothing is stored). */
+  app.post("/api/site/test-page", async (c) => {
+    const { url } = await c.req.json<{ url?: unknown }>().catch(() => ({ url: undefined }));
+    let info: ReturnType<typeof parseChapterUrl> = null;
+    try {
+      if (typeof url === "string") info = parseChapterUrl(new URL(url, d.settings.get().siteOrigin));
+    } catch {
+      /* not a URL */
+    }
+    if (!info) return c.json({ error: "请填写章节页面地址，例如 /novel/5370/288458.html" }, 400);
+    return c.json(await d.source.probePage(d.source.pageUrl(info.bookId, info.chapterId, info.pageIndex)));
+  });
+
+  /** Recent pages the site did not deliver (newest first). */
+  app.get("/api/site/diagnostics", (c) => c.json({ failures: d.source.recentFailures() }));
 
   app.get("/api/library/stats", async (c) => c.json(await d.library.stats()));
   app.post("/api/library/rescan", async (c) => {

@@ -1,5 +1,5 @@
-import type { Catalog, PageContent, SiteAdapter } from "../types";
-import { FetchError } from "../types";
+import type { Catalog, ChapterNav, PageContent, SiteAdapter } from "../types";
+import { ContentUnavailableError, FetchError } from "../types";
 import { RequestQueue } from "../../utils/RequestQueue";
 import { log } from "../../utils/log";
 import { bodyText, httpRequest } from "../../utils/http";
@@ -8,7 +8,7 @@ import { findChapterLogScript, findContent, markComputedHidden, parseBilinovelDo
 import { defaultFrameHost, loadInFrame, type FrameHost, type LoadedFrame } from "./frameLoader";
 import { SUPPORTED_HOSTS, buildPageUrl, isChapterUrl } from "./url";
 import { catalogUrl, hasCatalog, parseCatalogDocument } from "./catalog";
-import { reconcileCatalog } from "./reconcileCatalog";
+import { navFromPage, reconcileCatalogReport, type PlaceholderReport } from "./reconcileCatalog";
 
 const TEMPLATE_CACHE_KEY = "biliReader.chapterlogTemplate";
 
@@ -29,8 +29,10 @@ export class BilinovelAdapter implements SiteAdapter {
 
   /** Recent page loads, for the "copy diagnostics" button. */
   private readonly diagnostics: Record<string, unknown>[] = [];
-  private readonly firstPages = new Map<string, PageContent>();
+  /** Chapter navigation seen on loaded pages (and error pages): evidence for catalog placeholders. */
+  private readonly navs = new Map<string, ChapterNav>();
   private readonly catalogs = new Map<string, Catalog>();
+  private readonly placeholderReports = new Map<string, PlaceholderReport[]>();
 
   constructor(
     private readonly queue: RequestQueue = new RequestQueue(),
@@ -51,7 +53,23 @@ export class BilinovelAdapter implements SiteAdapter {
   }
 
   getDiagnostics(): Record<string, unknown>[] {
-    return [...this.diagnostics];
+    const placeholders = [...this.placeholderReports].flatMap(([bookId, report]) =>
+      report.filter((r) => r.status !== "recovered").map((r) => ({ method: "placeholder", bookId, ...r })),
+    );
+    return [...this.diagnostics, ...placeholders];
+  }
+
+  private reconcile(bookId: string): void {
+    const catalog = this.catalogs.get(bookId);
+    if (!catalog) return;
+    const { report } = reconcileCatalogReport(catalog, [], this.navs.values());
+    this.placeholderReports.set(bookId, report);
+  }
+
+  private remember(nav: ChapterNav | undefined, key: string): void {
+    if (!nav) return;
+    this.navs.set(key, nav);
+    this.reconcile(nav.bookId);
   }
 
   private record(entry: Record<string, unknown>): void {
@@ -134,8 +152,8 @@ export class BilinovelAdapter implements SiteAdapter {
     const u = new URL(url);
     const parse = async (doc: Document) => {
       const catalog = parseCatalogDocument(doc, u, bookId);
-      reconcileCatalog(catalog, this.firstPages.values());
       this.catalogs.set(bookId, catalog);
+      this.reconcile(bookId);
       this.record({ url, method: "catalog", chapters: catalog.volumes.reduce((n, v) => n + v.chapters.length, 0) });
       return catalog;
     };
@@ -171,11 +189,26 @@ export class BilinovelAdapter implements SiteAdapter {
       return await this.loadStatic(url);
     } catch (err) {
       const challenge = err instanceof FetchError && err.challenge;
-      if (!challenge && !(err instanceof TemplateUnavailableError)) throw err;
-      log.info(challenge ? "challenge; loading with scripts" : "shuffle constants unknown; loading with scripts", url);
-      this.record({ url, method: "fallback", reason: challenge ? "challenge" : "no-template" });
-      return this.withFrame(url, true, async (doc) => this.logged(this.parseRendered(doc, u, "rendered")));
+      const unavailable = err instanceof ContentUnavailableError;
+      if (unavailable) this.unavailable(err);
+      if (!challenge && !unavailable && !(err instanceof TemplateUnavailableError)) throw err;
+      const reason = challenge ? "challenge" : unavailable ? "unavailable" : "no-template";
+      log.info(`${reason}; loading with scripts`, url);
+      this.record({ url, method: "fallback", reason });
+      try {
+        // The site's own scripts may still load the text the server HTML lacked.
+        return await this.withFrame(url, true, async (doc) => this.logged(this.parseRendered(doc, u, "rendered")));
+      } catch (again) {
+        if (again instanceof ContentUnavailableError) this.unavailable(again);
+        throw again;
+      }
     }
+  }
+
+  /** Keeps what the site's "content failed to load" page showed (never as content). */
+  private unavailable(err: ContentUnavailableError): void {
+    this.record({ url: err.url, method: "unavailable", excerpt: err.excerpt, nav: err.nav });
+    if (err.nav) this.remember(err.nav, `${err.nav.bookId}:${err.nav.chapterId}:error`);
   }
 
   private async withFrame<T>(
@@ -201,12 +234,10 @@ export class BilinovelAdapter implements SiteAdapter {
   }
 
   private logged(page: PageContent): PageContent {
-    if (page.pageIndex === 0) {
-      // Keep only lightweight evidence, not the full text of every visited chapter.
-      this.firstPages.set(`${page.bookId}:${page.chapterId}`, { ...page, paragraphs: page.paragraphs.slice(0, 1) });
-      const catalog = this.catalogs.get(page.bookId);
-      if (catalog) reconcileCatalog(catalog, this.firstPages.values());
-    }
+    // Keep only lightweight evidence (title and chapter links), not the text of every visited page.
+    const key = `${page.bookId}:${page.chapterId}`;
+    if (page.pageIndex === 0) this.navs.delete(`${key}:error`);
+    this.remember(navFromPage(page), `${key}:${page.pageIndex}`);
     log.debug("parsed", page.url, {
       chapter: page.chapterTitle,
       paragraphs: page.paragraphs.length,

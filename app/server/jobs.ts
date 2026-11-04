@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
-import { FetchError, type CatalogChapter } from "../../src/adapters/types";
+import { ContentUnavailableError, FetchError, type CatalogChapter } from "../../src/adapters/types";
 import { SpeechEngineError } from "../../src/speech/SpeechEngine";
 import type { JobInfo, JobKind, JobReason, JobStatus, JobsOverview, PageProvider, ProviderBlock } from "../shared/api";
 import type { Db } from "./db";
@@ -370,7 +370,8 @@ export class Jobs {
     }
     const message = err instanceof Error ? err.message : String(err);
     console.warn(`[jobs] #${job.id} failed`, message);
-    if (attempts < MAX_ATTEMPTS && (err instanceof FetchError || /ENOSPC|EBUSY|EAGAIN/.test(message))) {
+    // The site's "content failed to load" page may go away: retry later like a network error.
+    if (attempts < MAX_ATTEMPTS && (err instanceof FetchError || err instanceof ContentUnavailableError || /ENOSPC|EBUSY|EAGAIN/.test(message))) {
       this.update(job.id, { status: "queued", attempts, message, not_before: this.now() + 60_000 * 2 ** attempts });
       return;
     }

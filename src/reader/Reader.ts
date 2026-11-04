@@ -1,5 +1,6 @@
 import {
   FetchError,
+  ContentUnavailableError,
   ParseError,
   type Catalog,
   type CatalogChapter,
@@ -172,6 +173,12 @@ function describeError(err: unknown): { message: string; detail: string } {
   }
   if (err instanceof FetchError) {
     return { message: "网络请求失败。", detail: `${err.message} · ${err.url}` };
+  }
+  if (err instanceof ContentUnavailableError) {
+    return {
+      message: "网站没有返回这一章的正文（页面显示「内容加载失败」）。这是网站的限制或内容暂不可用，不是阅读器故障，请稍后重试。",
+      detail: [err.url, err.excerpt && `网站显示：${err.excerpt}`].filter(Boolean).join(" · "),
+    };
   }
   if (err instanceof ParseError) {
     return { message: "无法解析此 Bilinovel 页面。", detail: `${err.message} · ${err.url}` };
