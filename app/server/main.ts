@@ -9,7 +9,11 @@ const config = loadConfig();
 const services = createServices(config, typeof __VERSION__ === "string" ? __VERSION__ : "dev");
 const app = createApp(services);
 
-services.jobs.start();
+// Before jobs start: chapter audio made from 0.10.20's incomplete pages is queued again.
+void services.jobs
+  .repairPartialAudio()
+  .catch((err) => console.warn("[library] Could not check chapter audio made from incomplete pages:", err))
+  .finally(() => services.jobs.start());
 services.planner.start();
 void services.ffmpeg.check().then((ok) => {
   if (!ok) console.warn("[library] ffmpeg not found: chapters cannot be assembled (install ffmpeg or set FFMPEG_PATH)");

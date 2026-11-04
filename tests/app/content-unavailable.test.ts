@@ -163,6 +163,25 @@ describe("a chapter the site serves as 'content failed to load'", () => {
     expect(probe.partial).toBe(body.partial);
   });
 
+  it("remakes chapter audio made since 0.10.20 unless its complete pages were cached before it", async () => {
+    const { s } = setup();
+    const profile = s.tts.profileId(s.tts.profile()!);
+    const audio = (chapter: string, at: number) =>
+      s.db.run("insert or replace into chapter_audio values ('10', ?, ?, ?, 1, 1, ?)", chapter, profile, `书/${chapter}.mp3`, at);
+    const now = Date.parse("2026-11-04T05:00:00Z");
+    audio("100", now); // pages 0 and 1 cached at t=1, the last one ends the chapter: complete
+    audio("999", now); // only the start of the chapter is cached
+    s.db.run("insert into pages values ('10', '999', 0, ?, 1)", JSON.stringify({ ...cached[0], chapterId: "999", url: u("999") }));
+    audio("321", 5); // made before 0.10.20
+    const queued = await s.jobs.repairPartialAudio();
+    expect(queued).toEqual(["10/999"]);
+    expect(s.library.chapterAudio("10").map((r) => r.chapter_id).sort()).toEqual(["100", "321"]);
+    expect(s.db.all("select target from jobs where kind = 'chapter'")).toEqual([{ target: "999" }]);
+    // Once only.
+    audio("999", now);
+    expect(await s.jobs.repairPartialAudio()).toEqual([]);
+  });
+
   it("tests a chapter page without storing it", async () => {
     const { s, app } = setup();
     const res = await app.request("/api/site/test-page", { method: "POST", body: JSON.stringify({ url: "/novel/10/321.html" }) });

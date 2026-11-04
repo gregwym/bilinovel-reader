@@ -76,7 +76,7 @@ const MIGRATIONS = [
   // 0.10.20 (from 2026-11-04 04:10 UTC) kept pages the site sent only the start
   // of, next to its "內容加載失敗" notice. They cannot be told apart, so pages
   // fetched since then are fetched again when next read.
-  `delete from pages where fetched_at >= 1793765400000;`,
+  `delete from pages where fetched_at >= 1793765400000;`, // PARTIAL_PAGES_SINCE; chapter audio: Jobs.repairPartialAudio
 ];
 
 export type Row = Record<string, SQLInputValue>;
