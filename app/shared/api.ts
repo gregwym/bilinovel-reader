@@ -238,3 +238,10 @@ export interface PageProbe {
   partial?: number;
 }
 
+
+/** `POST /api/books/:id/generate`: chapters queued, and those left out because their text is incomplete. */
+export interface GenerateResult {
+  queued: number;
+  /** Not queued: the site sent only part of their text. Asked again with `partial: true` once the user confirms. */
+  incomplete: { chapterId: string; title: string }[];
+}

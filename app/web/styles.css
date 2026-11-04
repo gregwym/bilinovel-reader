@@ -1446,6 +1446,12 @@ textarea {
   background: var(--accent-soft);
 }
 
+.menu > .divider {
+  margin-top: 6px;
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 8px 8px;
+}
+
 .menu > button:disabled {
   color: var(--faint);
   cursor: default;

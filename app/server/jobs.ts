@@ -25,6 +25,8 @@ interface JobRow {
   error: string | null;
   attempts: number;
   not_before: number;
+  /** 1: the user confirmed voicing the chapter even if its text is incomplete. */
+  partial: number;
   created_at: number;
   updated_at: number;
 }
@@ -104,16 +106,21 @@ export class Jobs {
     );
   }
 
-  /** Queues a chapter (no-op when one is already queued; a manual request raises its priority). */
-  enqueueChapter(bookId: string, chapterId: string, title: string, reason: JobReason): number {
+  /**
+   * Queues a chapter (no-op when one is already queued; a manual request raises its priority).
+   * `partial`: the user confirmed voicing it even when the site sends only part of its text.
+   */
+  enqueueChapter(bookId: string, chapterId: string, title: string, reason: JobReason, partial = false): number {
     const existing = this.active(bookId, "chapter", chapterId);
     if (existing) {
       if (PRIORITY[reason] > existing.priority) {
         this.db.run("update jobs set priority = ?, reason = ? where id = ?", PRIORITY[reason], reason, existing.id);
       }
+      if (partial && !existing.partial) this.db.run("update jobs set partial = 1 where id = ?", existing.id);
       return existing.id;
     }
     const id = this.insert("chapter", bookId, chapterId, title, reason);
+    if (partial) this.db.run("update jobs set partial = 1 where id = ?", id);
     this.kick();
     return id;
   }
@@ -138,11 +145,13 @@ export class Jobs {
       return row?.profile === profileId && (!row.file || existsSync(this.library.abs(row.file)));
     };
     const recoveredIds = new Set(recovered.map((c) => c.chapterId));
+    // Never on its own for a chapter known to be incomplete (see Planner.plan).
+    const cached = this.source.cachedChapters(bookId);
     for (const volume of bookCatalog(book)?.volumes ?? []) {
       const other = volume.chapters.filter((c) => c.chapterId && !recoveredIds.has(c.chapterId));
       if (!other.length || !other.every((c) => ready(c.chapterId!))) continue;
       for (const chapter of volume.chapters) {
-        if (chapter.chapterId && recoveredIds.has(chapter.chapterId) && !ready(chapter.chapterId)) {
+        if (chapter.chapterId && recoveredIds.has(chapter.chapterId) && !ready(chapter.chapterId) && !cached.get(chapter.chapterId)?.incomplete) {
           this.enqueueChapter(bookId, chapter.chapterId, chapter.title, "manual");
         }
       }
@@ -399,9 +408,10 @@ export class Jobs {
       this.update(job.id, { message: `获取正文（第 ${n} 页）…` }),
     );
     this.checkCancelled(job.id);
-    // Never voice a chapter the site sent only part of: wait and ask again.
+    // Never voice a chapter the site sent only part of (wait and ask again),
+    // unless the user confirmed it.
     const partial = pages.find((p) => p.incomplete);
-    if (partial) throw incompleteError(partial);
+    if (partial && !job.partial) throw incompleteError(partial);
     const parts = this.tts.parts(profile.provider, pages);
     if (!parts.length) {
       this.library.markSilent(book.id, job.target, profileId);
