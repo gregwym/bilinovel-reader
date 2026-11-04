@@ -7,6 +7,7 @@ import { geminiBackend } from "../../src/speech/GeminiSpeechEngine";
 import { fishBackend } from "../../src/speech/FishSpeechEngine";
 import type { PageBackend, SegmentStore, StoredSegment } from "../../src/speech/PageSpeechEngine";
 import type { AzureVoice } from "../../src/speech/AzureSpeechEngine";
+import type { TimelineResult } from "../shared/api";
 import { api } from "./api";
 
 /**
@@ -206,6 +207,11 @@ export function startReader(version: string, siteOrigin: string): void {
     managedKeys: ["gemini", "fish"],
     pageEngine: { backend: serverBackend, store: serverStore },
     listVoices: (provider) => api.get<AzureVoice[]>(`/api/voices/${provider}`),
+    chapterTimeline: async (bookId, chapterId, provider, prefix) => {
+      const query = `provider=${provider}&prefix=${encodeURIComponent(prefix)}`;
+      const r = await api.get<TimelineResult>(`/api/books/${bookId}/chapters/${chapterId}/timeline?${query}`).catch(() => undefined);
+      return r?.timeline ?? undefined;
+    },
   };
   const reader = new Reader(new LibraryAdapter(), new ProgressStore(kv), new SettingsStore(kv), version, host);
   void reader.start();

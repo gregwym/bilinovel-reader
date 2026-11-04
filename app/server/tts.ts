@@ -32,7 +32,7 @@ import type { PageProvider, VoiceProfile } from "../shared/api";
 import type { Db } from "./db";
 import type { Settings } from "./config";
 import type { Ffmpeg } from "./audio/ffmpeg";
-import { id3Size, isFrameStart } from "./audio/mp3";
+import { audioSeconds, id3Size, isFrameStart } from "./audio/mp3";
 
 /** Where the reader keeps its settings (synced to the server's key-value store). */
 export const READER_SETTINGS_KEY = "biliReader.settings";
@@ -82,6 +82,8 @@ export class Tts {
     fish: { queue: [], busy: false, seq: 0 },
   };
   private readonly inflight = new Map<string, Promise<StoredAudio>>();
+  /** Playing time of stored segments, by where their audio is. */
+  private readonly durations = new Map<string, number>();
   /** Fish Audio voice names by id ("" while unknown), and when they were last looked up. */
   private readonly fishNames = new Map<string, string>();
   private fishNamesAt = 0;
@@ -211,13 +213,23 @@ export class Tts {
 
   /** Requests of a chapter, in the same parts the reader plays (see Reader.pagesFrom and PageSpeechEngine.plan). */
   parts(provider: PageProvider, pages: PageContent[]): string[][] {
+    return this.layout(provider, pages).map((p) => p.texts);
+  }
+
+  /** The segments' texts with the page each is part of and its first utterance's position in that page. */
+  layout(provider: PageProvider, pages: PageContent[]): { texts: string[]; pageIndex: number; first: number }[] {
     const max = this.backends[provider].maxChars;
     return pages.flatMap((page) => {
       const texts = page.paragraphs.flatMap((_, i) => {
         const text = spokenText(page.paragraphs, i, page.pageIndex, page.chapterTitle);
         return text ? splitIntoChunks(text, max) : [];
       });
-      return texts.length ? splitPage(texts, max) : [];
+      let first = 0;
+      return (texts.length ? splitPage(texts, max) : []).map((part) => {
+        const at = first;
+        first += part.length;
+        return { texts: part, pageIndex: page.pageIndex, first: at };
+      });
     });
   }
 
@@ -275,6 +287,16 @@ export class Tts {
     const known = this.db.getJson<Record<string, string>>(STYLES_KEY) ?? {};
     const h = hash(style);
     if (known[h] !== style) this.db.setJson(STYLES_KEY, { ...known, [h]: style });
+  }
+
+  /** How long a stored segment plays (read once from its audio, then remembered); undefined when unreadable. */
+  async seconds(s: StoredAudio): Promise<number | undefined> {
+    const id = `${s.file}|${s.start ?? ""}|${s.bytes}`;
+    const known = this.durations.get(id);
+    if (known !== undefined) return known;
+    const seconds = audioSeconds(await this.data(s).catch(() => new Uint8Array()));
+    if (seconds) this.durations.set(id, seconds);
+    return seconds;
   }
 
   /** A stored segment's audio. Throws when it can't be read (a chapter file changed or gone). */

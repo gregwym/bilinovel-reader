@@ -8,7 +8,7 @@ import { loadConfig } from "../../app/server/config";
 import { createServices } from "../../app/server/services";
 import { createApp } from "../../app/server/http";
 import { Ffmpeg } from "../../app/server/audio/ffmpeg";
-import type { BookDetail, BookSummary, BookVoices, ChapterSegments, JobsOverview } from "../../app/shared/api";
+import type { BookDetail, BookSummary, BookVoices, ChapterSegments, JobsOverview, TimelineResult } from "../../app/shared/api";
 import type { HttpRequest, HttpResponse } from "../../src/utils/http";
 import type { PageContent } from "../../src/adapters/types";
 import { spokenText } from "../../src/speech/spoken";
@@ -305,6 +305,25 @@ describe("library server", () => {
     // A chapter whose pages were never fetched: nothing yet, more to come.
     const none = await json<ChapterSegments>(call("/api/books/5369/chapters/180206/segments"));
     expect(none).toMatchObject({ complete: false, segments: [] });
+  });
+
+  it.skipIf(!hasFfmpeg)("gives a chapter's stored audio as one track, for the reader to show and seek", async () => {
+    const segs = await json<ChapterSegments>(call("/api/books/5369/chapters/180204/segments"));
+    const prefix = segs.segments[0].key.slice(0, segs.segments[0].key.lastIndexOf(":"));
+    const timeline = (chapter: string, p = prefix) =>
+      json<TimelineResult>(call(`/api/books/5369/chapters/${chapter}/timeline?provider=fish&prefix=${encodeURIComponent(p)}`));
+    const { timeline: t } = await timeline("180204");
+    expect(t?.chapterId).toBe("180204");
+    expect(t?.segments.map((s) => [s.key, s.pageIndex, s.first])).toEqual(segs.segments.map((s, i) => [s.key, i, 0]));
+    // Each segment's playing time, adding up to the chapter file's.
+    const row = services.library.chapterAudio("5369").find((r) => r.chapter_id === "180204")!;
+    const total = t!.segments.reduce((n, s) => n + s.seconds!, 0);
+    expect(t!.segments.every((s) => s.seconds! > 1)).toBe(true);
+    expect(Math.abs(total - row.duration!)).toBeLessThan(0.1);
+    // Not (all) stored in that voice, or no text yet: no track.
+    expect((await timeline("180204", "fish|other")).timeline).toBeNull();
+    expect((await timeline("180206")).timeline).toBeNull();
+    expect((await call("/api/books/5369/chapters/180204/timeline?provider=azure&prefix=x")).status).toBe(400);
   });
 
   it.skipIf(!hasFfmpeg)("previews a voice once, then from the cache", async () => {
