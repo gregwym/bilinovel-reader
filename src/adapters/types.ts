@@ -55,6 +55,8 @@ export interface CatalogChapter {
 export interface CatalogVolume {
   title: string;
   chapters: CatalogChapter[];
+  /** The volume's cover image, when the catalog shows one. */
+  cover?: string;
 }
 
 export interface Catalog {

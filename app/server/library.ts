@@ -1,4 +1,5 @@
-import { copyFile, mkdir, open, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { copyFile, mkdir, open, readFile, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join, sep } from "node:path";
 import type { Catalog, PageContent } from "../../src/adapters/types";
@@ -9,6 +10,7 @@ import type { Ffmpeg, Tags } from "./audio/ffmpeg";
 import { id3Tag, mp3Frames, sameFormat, type Mp3Format } from "./audio/mp3";
 import type { StoredAudio, Tts } from "./tts";
 import type { PageProvider } from "../shared/api";
+import type { Images } from "./images";
 
 /** A segment going into a chapter file. */
 export interface ChapterPart {
@@ -164,6 +166,7 @@ export class Library {
     private readonly settings: Settings,
     private readonly ffmpeg: Ffmpeg,
     private readonly tts: Tts,
+    private readonly images: Images,
     readonly dir: string,
     private readonly dataDir: string,
   ) {}
@@ -300,7 +303,7 @@ export class Library {
       for (const i of parts.keys()) await rm(`${tmp}.${i}.mp3`, { force: true });
     }
     if (joined) await this.tts.adopt(rel, joined.parts);
-    await this.placeCover(book.id, dirname(out));
+    await this.placeCover(book, dirname(out), place.volumeIndex);
     if (old?.file && old.file !== rel) await this.removeFile(old.file);
     const row: ChapterAudioRow = {
       book_id: book.id,
@@ -372,11 +375,97 @@ export class Library {
     }
   }
 
-  async placeCover(bookId: string, dir: string): Promise<void> {
-    const cover = this.coverFile(bookId);
+  /** A volume's cover in the data folder (JPEG), by its URL. */
+  volumeCoverFile(bookId: string, url: string): string {
+    return join(this.dataDir, "covers", bookId, `${createHash("sha1").update(url).digest("hex")}.jpg`);
+  }
+
+  /** A volume's own cover, if the catalog shows one and it has been fetched. */
+  volumeCover(book: BookRow, volumeIndex: number): string | undefined {
+    const url = bookCatalog(book)?.volumes[volumeIndex]?.cover;
+    const file = url && this.volumeCoverFile(book.id, url);
+    return file && existsSync(file) ? file : undefined;
+  }
+
+  /**
+   * Puts `cover.jpg` in a folder of chapter files: the volume's own cover in
+   * a volume's folder (replacing the book's once it is fetched), else the
+   * book's. A cover already there is not replaced by the book's (on a new
+   * install it may be the volume's, saved before).
+   */
+  async placeCover(book: BookRow, dir: string, volumeIndex?: number): Promise<void> {
     const target = join(dir, "cover.jpg");
+    const own = volumeIndex !== undefined && dir !== this.abs(this.bookDir(book)) ? this.volumeCover(book, volumeIndex) : undefined;
+    if (own) {
+      if (existsSync(target) && (await stat(target)).size === (await stat(own)).size) return;
+      await copyFile(own, target).catch(() => undefined);
+      return;
+    }
+    const cover = this.coverFile(book.id);
     if (!existsSync(cover) || existsSync(target)) return;
     await copyFile(cover, target).catch(() => undefined);
+  }
+
+  private readonly coverRuns = new Map<string, Promise<void>>();
+
+  /** Fetches the covers of a book's volumes not fetched yet, and puts them in the volumes' folders. */
+  updateCovers(bookId: string): Promise<void> {
+    const running = this.coverRuns.get(bookId);
+    if (running) return running;
+    const run = this.fetchCovers(bookId)
+      .catch((err: unknown) => console.warn("[library] volume covers", bookId, err instanceof Error ? err.message : String(err)))
+      .finally(() => this.coverRuns.delete(bookId));
+    this.coverRuns.set(bookId, run);
+    return run;
+  }
+
+  private async fetchCovers(bookId: string): Promise<void> {
+    const book = this.book(bookId);
+    const catalog = book && bookCatalog(book);
+    if (!book || !catalog?.volumes.some((v) => v.cover)) return;
+    // Folders of the book's chapter files, by volume.
+    const rows = this.db.all<{ chapter_id: string; file: string }>(
+      "select chapter_id, file from chapter_audio where book_id = ? and file != '' union select chapter_id, file from chapter_backup where book_id = ?",
+      bookId,
+      bookId,
+    );
+    const bookDir = this.abs(this.bookDir(book));
+    const folders = new Map<string, number>();
+    for (const r of rows) {
+      const place = findChapter(catalog, r.chapter_id);
+      const dir = dirname(this.abs(r.file));
+      if (place && existsSync(dir)) folders.set(dir, place.volumeIndex);
+    }
+    const bookCover = [join(bookDir, "cover.jpg"), this.coverFile(bookId)].find((f) => existsSync(f));
+    const bookCoverData = bookCover ? await readFile(bookCover) : undefined;
+    for (const [vi, v] of catalog.volumes.entries()) {
+      const file = v.cover && this.volumeCoverFile(bookId, v.cover);
+      if (!v.cover || !file || existsSync(file)) continue;
+      // Saved in the volume's folder before (a new install): no need to ask the site.
+      let saved: Buffer | undefined;
+      for (const [dir, i] of folders) {
+        const c = join(dir, "cover.jpg");
+        if (i !== vi || dir === bookDir || !existsSync(c)) continue;
+        const data = await readFile(c);
+        if (!bookCoverData?.equals(data)) saved = data;
+        break;
+      }
+      if (saved) {
+        await mkdir(dirname(file), { recursive: true });
+        await writeFile(file, saved);
+        continue;
+      }
+      try {
+        const img = await this.images.load(v.cover);
+        const jpeg = img.type === "image/jpeg" || !(await this.ffmpeg.check()) ? img.body : await this.ffmpeg.toJpeg(img.body).catch(() => img.body);
+        await mkdir(dirname(file), { recursive: true });
+        await writeFile(`${file}.part`, jpeg);
+        await rename(`${file}.part`, file);
+      } catch (err) {
+        console.warn(`[library] cover of ${bookId} ${v.title}:`, err instanceof Error ? err.message : String(err));
+      }
+    }
+    for (const [dir, vi] of folders) await this.placeCover(book, dir, vi);
   }
 
   /** Deletes a library file and the folders it leaves empty (with only a cover). */
@@ -480,7 +569,7 @@ export class Library {
       const to = this.abs(expected);
       await mkdir(dirname(to), { recursive: true });
       await this.moveInto(from, to);
-      await this.placeCover(book.id, dirname(to));
+      await this.placeCover(book, dirname(to), findChapter(bookCatalog(book), row.chapter_id)?.volumeIndex);
       await this.pruneDirs(dirname(from));
       this.db.run(
         "update chapter_audio set file = ? where book_id = ? and chapter_id = ?",

@@ -526,7 +526,7 @@ export class Jobs {
     const tmp = `${out}.tmp.m4b`;
     await mkdir(dirname(out), { recursive: true });
     this.update(job.id, { message: `编码 ${parts.length} 章…`, progress: 0.1 });
-    const cover = this.library.coverFile(book.id);
+    const cover = this.library.volumeCover(book, vi) ?? this.library.coverFile(book.id);
     try {
       await this.ffmpeg.m4b(
         parts.map((p) => p.file),
