@@ -328,7 +328,8 @@ export class Backup {
     const dir = await this.ensureFolder(book);
     const cover = this.library.coverFile(bookId);
     if (existsSync(cover)) {
-      const target = join(dir, "cover.jpg");
+      // At the top of the book's folder, where audiobook apps look for it.
+      const target = join(dir, "..", "cover.jpg");
       const size = existsSync(target) ? (await stat(target)).size : -1;
       if (size !== (await stat(cover)).size) await writeAtomic(target, await readFile(cover));
     }
@@ -545,7 +546,7 @@ export class Backup {
       );
       added = true;
     }
-    const cover = join(meta, "cover.jpg");
+    const cover = join(meta, "..", "cover.jpg");
     const target = this.library.coverFile(id);
     if (existsSync(cover) && !existsSync(target)) {
       mkdirSync(dirname(target), { recursive: true });

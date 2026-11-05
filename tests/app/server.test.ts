@@ -180,10 +180,10 @@ describe("library server", () => {
     expect(all.map((f) => f.slice(join(dir, "library").length + 1))).toEqual([
       "测试作者/测试轻小说/.bili-reader/book.json",
       "测试作者/测试轻小说/.bili-reader/chapters/180204.json",
-      "测试作者/测试轻小说/.bili-reader/cover.jpg",
       "测试作者/测试轻小说/01 第一卷 开始/004 第四章 分页的章节.md",
       "测试作者/测试轻小说/01 第一卷 开始/004 第四章 分页的章节.mp3",
       "测试作者/测试轻小说/01 第一卷 开始/cover.jpg",
+      "测试作者/测试轻小说/cover.jpg",
     ]);
     const files = all.filter((f) => f.endsWith(".mp3"));
     const audio = await call("/api/books/5369/chapters/180204/audio", { headers: { range: "bytes=0-99" } });
