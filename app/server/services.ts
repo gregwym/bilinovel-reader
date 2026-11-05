@@ -43,6 +43,7 @@ export function createServices(config: Config, version: string, options: Service
   if (restored.books) console.log(`[backup] restored ${restored.books} book(s) from the library`);
   const books = new Books(db, settings, source, client, library, tts, ffmpeg);
   const jobs = new Jobs(db, source, tts, library, ffmpeg);
+  jobs.setTextSaver((id, chapterId) => backup.saveChapter(id, chapterId));
   const planner = new Planner(books, jobs, tts, library, source);
   books.onRecovered((id, recovered) => jobs.recoverChapters(id, recovered));
   source.onPageCached((id, chapterId) => {

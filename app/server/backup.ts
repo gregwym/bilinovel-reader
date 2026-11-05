@@ -23,6 +23,15 @@ import type { SiteSource } from "./site/source";
  */
 
 export const BACKUP_DIR = ".bili-reader";
+
+/** Chapters of a book whose text is in the library: whether only part of it, and its size. */
+export function savedTexts(db: Db, bookId: string): Map<string, { incomplete: boolean; bytes: number }> {
+  const rows = db.all<{ chapter_id: string; incomplete: number; bytes: number }>(
+    "select chapter_id, incomplete, bytes from chapter_backup where book_id = ?",
+    bookId,
+  );
+  return new Map(rows.map((r) => [r.chapter_id, { incomplete: !!r.incomplete, bytes: r.bytes }]));
+}
 const FORMAT = 1;
 const PROGRESS_KEY = "biliReader.progress";
 /**

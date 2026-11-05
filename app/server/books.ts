@@ -6,6 +6,7 @@ import type {
   BookDetail,
   BookSummary,
   ChapterAudioState,
+  ChapterTextState,
   ChapterInfo,
   JobStatus,
   ReadingPosition,
@@ -19,6 +20,7 @@ import type { SiteClient } from "./site/client";
 import type { Tts } from "./tts";
 import { bookCatalog, type BookRow, type ChapterAudioRow, type Library } from "./library";
 import { existsSync, statSync } from "node:fs";
+import { savedTexts } from "./backup";
 
 export const PROGRESS_KEY = "biliReader.progress";
 
@@ -294,11 +296,18 @@ export class Books {
       "select count(*) as n from jobs where book_id = ? and status in ('queued', 'running')",
       book.id,
     )!.n;
+    const linked = new Set(chapters.map((c) => c.chapterId));
     let audioChapters = 0;
     let audioBytes = 0;
     for (const r of rows.values()) {
       audioBytes += r.bytes;
-      if (r.profile === current && chapters.some((c) => c.chapterId === r.chapter_id)) audioChapters++;
+      if (r.profile === current && linked.has(r.chapter_id)) audioChapters++;
+    }
+    let textChapters = 0;
+    let textBytes = 0;
+    for (const [chapterId, t] of savedTexts(this.db, book.id)) {
+      textBytes += t.bytes;
+      if (!t.incomplete && linked.has(chapterId)) textChapters++;
     }
     return {
       id: book.id,
@@ -315,6 +324,8 @@ export class Books {
       follow: !!book.follow,
       ahead: book.ahead,
       audioBytes,
+      textChapters,
+      textBytes,
       loading: this.syncs.has(book.id) || undefined,
       loadError: this.syncErrors.get(book.id),
     };
@@ -330,6 +341,8 @@ export class Books {
       Date.now() - 7 * 86400_000,
     );
     const chapterJobs = new Map(jobs.filter((j) => j.kind === "chapter").map((j) => [j.target, j]));
+    const textJobs = new Map(jobs.filter((j) => j.kind === "text").map((j) => [j.target, j]));
+    const texts = savedTexts(this.db, book.id);
     const exportJobs = new Map(jobs.filter((j) => j.kind === "export").map((j) => [j.target, j]));
     const cachedText = this.source.cachedChapters(book.id);
     const volumes: VolumeInfo[] = (catalog?.volumes ?? []).map((v, vi) => {
@@ -339,6 +352,10 @@ export class Books {
         let audio: ChapterAudioState = "none";
         if (row) audio = row.profile === current ? "done" : "stale";
         if (job && (job.status !== "failed" || audio !== "done")) audio = job.status as ChapterAudioState;
+        const saved = c.chapterId ? texts.get(c.chapterId) : undefined;
+        const textJob = c.chapterId ? textJobs.get(c.chapterId) : undefined;
+        let text: ChapterTextState = saved ? (saved.incomplete ? "partial" : "done") : "none";
+        if (textJob && (textJob.status !== "failed" || text !== "done")) text = textJob.status as ChapterTextState;
         return {
           chapterId: c.chapterId,
           title: c.title,
@@ -351,6 +368,10 @@ export class Books {
           silent: row ? !row.file : undefined,
           pages: c.chapterId ? cachedText.get(c.chapterId)?.pages : undefined,
           incomplete: (c.chapterId && cachedText.get(c.chapterId)?.incomplete) || undefined,
+          text,
+          textMessage: textJob?.message ?? undefined,
+          textJobId: textJob?.id,
+          textBytes: saved?.bytes || undefined,
         };
       });
       const file = this.library.exportFile(book.id, vi);
