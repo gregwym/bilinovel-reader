@@ -8,6 +8,8 @@ import { SiteSource } from "./site/source";
 import { Ffmpeg } from "./audio/ffmpeg";
 import { Tts } from "./tts";
 import { Library } from "./library";
+import { Backup } from "./backup";
+import { Images } from "./images";
 import { Books } from "./books";
 import { Jobs } from "./jobs";
 import { Planner } from "./planner";
@@ -32,24 +34,32 @@ export function createServices(config: Config, version: string, options: Service
   const source = new SiteSource(db, client, () => settings.get().siteOrigin);
   const ffmpeg = options.ffmpeg ?? new Ffmpeg(config.ffmpeg, config.ffprobe);
   const tts = new Tts(db, settings, ffmpeg, config.dataDir, config.libraryDir, options.request, options.sleep);
-  const library = new Library(db, settings, ffmpeg, tts, source, config.libraryDir, config.dataDir);
+  const library = new Library(db, settings, ffmpeg, tts, config.libraryDir, config.dataDir);
+  const images = new Images(db, client, config.dataDir, config.libraryDir, () => `${settings.get().siteOrigin}/`);
+  const backup = new Backup(db, library, source, images);
+  source.setBackup((b, c, i) => backup.page(b, c, i));
+  // A new install (or a lost database) reads back what the library holds.
+  const restored = backup.restore();
+  if (restored.books) console.log(`[backup] restored ${restored.books} book(s) from the library`);
   const books = new Books(db, settings, source, client, library, tts, ffmpeg);
   const jobs = new Jobs(db, source, tts, library, ffmpeg);
   const planner = new Planner(books, jobs, tts, library, source);
   books.onRecovered((id, recovered) => jobs.recoverChapters(id, recovered));
   source.onPageCached((id, chapterId) => {
     books.reconcile(id);
-    void library.saveText(id, chapterId);
+    void backup.saveChapter(id, chapterId);
   });
-  books.onCatalog((id) => void library.saveText(id));
+  books.onCatalog((id) => void backup.saveBook(id));
+  books.onRemoved((id) => backup.removeBook(id));
+  library.onChange((id, chapterId) => void backup.saveChapter(id, chapterId));
   // Upgrade existing libraries before the planner sees their reading positions.
   // This is idempotent and does not require fetching the catalog again.
   for (const book of books.list()) books.reconcile(book.id);
-  // Text of chapters cached before (or changed while the server was down) into the library.
-  void library.saveAllText();
+  // What was cached before (or changed while the server was down) into the library.
+  void backup.saveAll();
   settings.onChange(() => {
     client.reset();
     jobs.unblock();
   });
-  return { config, version, db, settings, client, source, ffmpeg, tts, library, books, jobs, planner };
+  return { config, version, db, settings, client, source, ffmpeg, tts, library, images, backup, books, jobs, planner };
 }

@@ -80,17 +80,30 @@ const MIGRATIONS = [
   `select 1;`,
   // A chapter job that may voice a chapter the site sent only part of (the user confirmed it).
   `alter table jobs add column partial integer not null default 0;`,
-  // A chapter's text in the library next to its audio (source_at: newest cached page it was written from).
+  // The library as a backup (see backup.ts): each chapter's text and data
+  // written there (hash: of its data file), and its illustrations.
   `
-  create table chapter_text (
+  create table chapter_backup (
     book_id text not null,
     chapter_id text not null,
     file text not null,
+    hash text not null,
     bytes integer not null,
-    source_at integer not null,
+    incomplete integer not null default 0,
+    images_missing integer not null default 0,
     updated_at integer not null,
     primary key (book_id, chapter_id)
   );
+  create table backup_images (
+    book_id text not null,
+    chapter_id text not null,
+    url text not null,
+    file text not null,
+    type text not null,
+    bytes integer not null,
+    primary key (book_id, chapter_id, url)
+  );
+  create index backup_images_url on backup_images (url);
   `,
 ];
 

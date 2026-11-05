@@ -114,6 +114,13 @@ export class SiteSource {
     this.pageListeners.push(fn);
   }
 
+  private backup?: (bookId: string, chapterId: string, pageIndex: number) => { fetchedAt: number; page: PageContent } | undefined;
+
+  /** Where a page comes from when neither the database nor the site has it (the library's backup). */
+  setBackup(fn: NonNullable<SiteSource["backup"]>): void {
+    this.backup = fn;
+  }
+
   /** Reuses existing content without network requests or guessing IDs. */
   reconcileCatalog(catalog: Catalog) {
     if (!catalog.volumes.some((v) => v.chapters.some((c) => !c.chapterId))) return [];
@@ -187,7 +194,20 @@ export class SiteSource {
     if (cached && !cached.incomplete) return Promise.resolve(cached);
     // An incomplete page is asked for again; what was kept stays when that fails.
     if (cached) return this.fetch(bookId, chapterId, pageIndex).catch(() => cached);
-    return this.fetch(bookId, chapterId, pageIndex);
+    return this.fetch(bookId, chapterId, pageIndex).catch((err: unknown) => {
+      const saved = this.backup?.(bookId, chapterId, pageIndex);
+      if (!saved) throw err;
+      this.db.run(
+        `insert into pages (book_id, chapter_id, page_index, data, fetched_at) values (?, ?, ?, ?, ?)
+         on conflict (book_id, chapter_id, page_index) do nothing`,
+        bookId,
+        chapterId,
+        pageIndex,
+        JSON.stringify(saved.page),
+        saved.fetchedAt,
+      );
+      return saved.page;
+    });
   }
 
   private fetch(bookId: string, chapterId: string, pageIndex: number): Promise<PageContent> {

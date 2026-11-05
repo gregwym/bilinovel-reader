@@ -352,7 +352,7 @@ export function settingsPage(): Page {
         chapterId: "56789",
       };
       const base = `${stats.libraryDir}/${template.value.replace(/\{(\w+)\}/g, (m, k: string) => sample[k] ?? m)}`;
-      preview.textContent = `例：${base}.mp3（正文 ${base.split("/").pop()}.txt 在同一文件夹）`;
+      preview.textContent = `例：${base}.mp3（正文 ${base.split("/").pop()}.md 和插图在同一文件夹）`;
     };
     template.addEventListener("input", showPreview);
     showPreview();

@@ -1,6 +1,5 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createReadStream, existsSync, statSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { extname, join, normalize, sep } from "node:path";
 import { Readable } from "node:stream";
 import { Hono, type Context } from "hono";
@@ -20,6 +19,8 @@ import type { SiteSource } from "./site/source";
 import type { Ffmpeg } from "./audio/ffmpeg";
 import { PROVIDERS, READER_SETTINGS_KEY, describeError, type Tts } from "./tts";
 import type { Library } from "./library";
+import { NotImageError, type Images } from "./images";
+import type { Backup } from "./backup";
 import { bookCatalog, chapterText, findChapter, safeName, textFileContent } from "./library";
 import { PROGRESS_KEY, type Books } from "./books";
 import { READER_PRIORITY, type Jobs } from "./jobs";
@@ -36,6 +37,8 @@ export interface AppDeps {
   ffmpeg: Ffmpeg;
   tts: Tts;
   library: Library;
+  images: Images;
+  backup: Backup;
   books: Books;
   jobs: Jobs;
   planner: Planner;
@@ -274,6 +277,7 @@ export function createApp(d: AppDeps): Hono {
     if (!d.books.get(id)) return c.json({ error: "书籍不存在" }, 404);
     const patch = await c.req.json<{ follow?: boolean; ahead?: number }>().catch(() => ({}));
     const book = d.books.update(id, patch);
+    d.backup.bookChanged(id);
     d.planner.plan(id);
     return c.json(d.books.detail(book));
   });
@@ -575,22 +579,14 @@ export function createApp(d: AppDeps): Hono {
       return c.body(null, 400);
     }
     if (!/^https?:$/.test(url.protocol) || privateHost(url.hostname)) return c.body(null, 403);
-    const digest = createHash("sha1").update(url.href).digest("hex");
-    const dir = join(config.dataDir, "images", digest.slice(0, 2));
-    const file = join(dir, digest);
     const cache = { "Cache-Control": "private, max-age=2592000, immutable" };
-    if (existsSync(file) && existsSync(`${file}.type`)) {
-      return sendFile(c, file, (await readFile(`${file}.type`, "utf8")).trim(), cache);
-    }
+    const found = await d.images.find(url.href);
+    if (found) return sendFile(c, found.file, found.type, cache);
     try {
-      const img = await d.client.binary(url.href, `${d.settings.get().siteOrigin}/`);
-      if (!/^image\//.test(img.type)) return c.body(null, 502);
-      await mkdir(dir, { recursive: true });
-      await writeFile(file, img.body);
-      await writeFile(`${file}.type`, img.type);
+      const img = await d.images.load(url.href);
       return c.body(new Uint8Array(img.body), 200, { "Content-Type": img.type, ...cache });
     } catch (err) {
-      return errorResponse(c, err);
+      return err instanceof NotImageError ? c.body(null, 502) : errorResponse(c, err);
     }
   });
 
@@ -717,11 +713,13 @@ export function createApp(d: AppDeps): Hono {
         if (before[bookId]?.updatedAt === p.updatedAt || !/^\d+$/.test(bookId)) continue;
         d.books.ensure(bookId, p.bookTitle);
         d.books.touch(bookId, p.updatedAt);
+        d.backup.bookChanged(bookId);
         d.planner.plan(bookId);
       }
       return c.json({ value: merged });
     }
     db.setKv(key, value);
+    if (key === READER_SETTINGS_KEY) d.backup.settingsChanged();
     // The voice may have changed: blocked jobs can try again, and followed books get the new voice.
     d.jobs.unblock();
     void d.planner.planAll(false);
@@ -773,10 +771,17 @@ export function createApp(d: AppDeps): Hono {
   app.get("/api/library/stats", async (c) => c.json(await d.library.stats()));
   app.post("/api/library/rescan", async (c) => {
     const result = await d.library.rescan();
+    // Audio and illustrations the library still has are indexed again; missing text and data are written again.
+    d.backup.restore();
+    result.texts = await d.backup.saveAll();
     void d.planner.planAll(false);
     return c.json(result);
   });
-  app.post("/api/library/relayout", async (c) => c.json(await d.library.relayout()));
+  app.post("/api/library/relayout", async (c) => {
+    const result = await d.library.relayout();
+    result.texts = await d.backup.saveAll();
+    return c.json(result);
+  });
   app.post("/api/library/clear-segments", async (c) => {
     await d.tts.clear();
     return c.json({ ok: true });

@@ -214,6 +214,7 @@ export class Books {
     this.saveCatalog(id, catalog, Date.now());
     if (!existsSync(this.library.coverFile(id))) {
       await this.fetchCover(id).catch((err) => console.warn("[library] cover", id, String(err)));
+      if (existsSync(this.library.coverFile(id))) this.catalogListeners.forEach((fn) => fn(id));
     }
     return this.get(id)!;
   }
@@ -238,7 +239,6 @@ export class Books {
 
   async remove(id: string): Promise<void> {
     await this.library.deleteBookAudio(id);
-    await this.library.deleteBookText(id);
     this.db.tx(() => {
       this.db.run("delete from jobs where book_id = ? and status in ('queued', 'done', 'failed', 'cancelled')", id);
       this.db.run("update jobs set status = 'cancelled' where book_id = ? and status = 'running'", id);
@@ -248,6 +248,14 @@ export class Books {
       this.db.run("delete from books where id = ?", id);
     });
     await rm(this.library.coverFile(id), { force: true });
+    for (const fn of this.removeListeners) await fn(id);
+  }
+
+  private readonly removeListeners: ((bookId: string) => Promise<void>)[] = [];
+
+  /** After a book is removed. */
+  onRemoved(fn: (bookId: string) => Promise<void>): void {
+    this.removeListeners.push(fn);
   }
 
   /** Marks the book as just read (called when the reader saves progress). */

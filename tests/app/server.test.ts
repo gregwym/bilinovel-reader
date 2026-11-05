@@ -12,6 +12,7 @@ import type { BookDetail, BookSummary, BookVoices, ChapterSegments, JobsOverview
 import type { HttpRequest, HttpResponse } from "../../src/utils/http";
 import type { PageContent } from "../../src/adapters/types";
 import { spokenText } from "../../src/speech/spoken";
+import type { ChapterBackup } from "../../app/server/backup";
 import { fixture } from "../helpers";
 
 const ORIGIN = "https://www.bilinovel.com";
@@ -174,12 +175,17 @@ describe("library server", () => {
     expect(ttsRequests[0].url).toBe("https://api.fish.audio/v1/tts");
     expect(chapter(detail).duration).toBeGreaterThan(5);
     expect(detail.audioChapters).toBe(1);
-    const files = execFileSync("find", [join(dir, "library"), "-type", "f"]).toString().trim().split("\n").sort();
-    expect(files.map((f) => f.slice(join(dir, "library").length + 1))).toEqual([
+    await services.backup.idle();
+    const all = execFileSync("find", [join(dir, "library"), "-type", "f"]).toString().trim().split("\n").sort();
+    expect(all.map((f) => f.slice(join(dir, "library").length + 1))).toEqual([
+      ".bili-reader/5369/book.json",
+      ".bili-reader/5369/chapters/180204.json",
+      ".bili-reader/5369/cover.jpg",
+      "测试作者/测试轻小说/01 第一卷 开始/004 第四章 分页的章节.md",
       "测试作者/测试轻小说/01 第一卷 开始/004 第四章 分页的章节.mp3",
-      "测试作者/测试轻小说/01 第一卷 开始/004 第四章 分页的章节.txt",
       "测试作者/测试轻小说/01 第一卷 开始/cover.jpg",
     ]);
+    const files = all.filter((f) => f.endsWith(".mp3"));
     const audio = await call("/api/books/5369/chapters/180204/audio", { headers: { range: "bytes=0-99" } });
     expect(audio.status).toBe(206);
     expect((await audio.arrayBuffer()).byteLength).toBe(100);
@@ -379,35 +385,87 @@ describe("library server", () => {
 
   it.skipIf(!hasFfmpeg)("moves files when the storage template changes", async () => {
     await send("PUT", "/api/settings", { storageTemplate: "{book}/{volumeNo}-{chapterNo} {chapter}" });
-    const r = await json<{ moved: number; texts: number }>(send("POST", "/api/library/relayout"));
+    const r = await json<{ moved: number }>(send("POST", "/api/library/relayout"));
     expect(r.moved).toBe(1);
-    expect(r.texts).toBe(1);
     expect(existsSync(join(dir, "library", "测试轻小说", "01-004 第四章 分页的章节.mp3"))).toBe(true);
-    expect(existsSync(join(dir, "library", "测试轻小说", "01-004 第四章 分页的章节.txt"))).toBe(true);
+    expect(existsSync(join(dir, "library", "测试轻小说", "01-004 第四章 分页的章节.md"))).toBe(true);
     expect(existsSync(join(dir, "library", "测试作者"))).toBe(false);
+    // The chapter's data follows its audio.
+    const data = JSON.parse(readFileSync(join(dir, "library", ".bili-reader", "5369", "chapters", "180204.json"), "utf8")) as ChapterBackup;
+    expect(data.audio?.file).toBe("测试轻小说/01-004 第四章 分页的章节.mp3");
+    expect(data.audio?.segments).toHaveLength(3);
   });
 
-  it.skipIf(!hasFfmpeg)("keeps each chapter's text in the library, whether voiced or not", async () => {
+  it.skipIf(!hasFfmpeg)("keeps each chapter's text in the library as Markdown, with its illustrations", async () => {
     const file = (name: string) => join(dir, "library", "测试轻小说", name);
-    const chapter = file("01-004 第四章 分页的章节.txt");
-    // The same text as the chapter's .txt download.
-    const download = new Uint8Array(await (await call("/api/books/5369/chapters/180204/text")).arrayBuffer());
-    expect(new Uint8Array(readFileSync(chapter))).toEqual(download);
+    const chapter = file("01-004 第四章 分页的章节.md");
+    const md = readFileSync(chapter, "utf8");
+    expect(md.startsWith("# 第四章 分页的章节\n\n")).toBe(true);
+    const page = await json<{ paragraphs: { text?: string }[] }>(call("/api/page?book=5369&chapter=180204&page=1"));
+    expect(md).toContain(page.paragraphs.find((p) => p.text)!.text!.trim());
 
-    // A chapter that is only read (no audio) gets its text too, once all its pages are cached.
+    // A chapter that is only read (no audio) is saved too, with its illustrations next to it.
     await call("/api/page?book=5369&chapter=180205&page=0");
-    const read = file("02-001 插图.txt");
+    const read = file("02-001 插图.md");
     await waitFor(() => existsSync(read));
-    expect(readFileSync(read, "utf8")).toContain("［插图］");
+    await services.backup.idle();
+    const text = readFileSync(read, "utf8");
+    const links = [...text.matchAll(/!\[插图\]\(<([^>]+)>\)/g)].map((m) => m[1]);
+    expect(links.length).toBeGreaterThan(0);
+    expect(links[0]).toBe("02-001 插图/01.png");
+    for (const link of links) expect(existsSync(file(link))).toBe(true);
     expect((await services.library.stats()).textFiles).toBe(2);
 
-    // Deleting the cached text keeps the file; a deleted file is written again by "check files".
+    // Deleting the cached text keeps the files; a deleted file is written again by "check files".
     await send("DELETE", "/api/books/5369/chapters/180205/pages");
     expect(existsSync(read)).toBe(true);
     rmSync(chapter);
     const r = await json<{ texts: number }>(send("POST", "/api/library/rescan"));
     expect(r.texts).toBe(1);
     expect(existsSync(chapter)).toBe(true);
+  });
+
+  it.skipIf(!hasFfmpeg)("reads and plays from the library alone in a new install", async () => {
+    const progress = { "5369": { chapterId: "180204", pageIndex: 1, paragraphIndex: 2, updatedAt: Date.now() } };
+    await send("PUT", "/api/kv/biliReader.progress", { value: JSON.stringify(progress) });
+    await services.backup.saveAll();
+    const image = (JSON.parse(readFileSync(join(dir, "library", ".bili-reader", "5369", "chapters", "180205.json"), "utf8")) as ChapterBackup).images[0];
+
+    // A new data folder (no database, no cache) and a site that is gone.
+    const config = loadConfig({ DATA_DIR: join(dir, "data2"), LIBRARY_DIR: join(dir, "library"), WEB_DIR: join(dir, "web"), FISH_API_KEY: "fish-key" }, dir);
+    const offline: string[] = [];
+    const s2 = createServices(config, "test", {
+      fetch: async (url) => {
+        offline.push(url);
+        return new Response("gone", { status: 404 });
+      },
+      request: ttsRequest,
+      sleep: async () => undefined,
+      ffmpeg: new Ffmpeg(),
+    });
+    try {
+      const app2 = createApp(s2);
+      const books = await json<BookSummary[]>(app2.request("/api/books"));
+      expect(books).toMatchObject([{ id: "5369", title: "测试轻小说", author: "测试作者", hasCover: true, audioChapters: 1 }]);
+      expect(books[0].position).toMatchObject({ chapterId: "180204", pageIndex: 1, paragraphIndex: 2 });
+      expect((await json<{ chapterId: string }>(app2.request("/api/page?book=5369&chapter=180204&page=2"))).chapterId).toBe("180204");
+      // A chapter whose cached text was deleted before is in the library too.
+      expect((await app2.request("/api/page?book=5369&chapter=180205&page=0")).status).toBe(200);
+      // Its audio plays segment by segment, as the reader asks for it.
+      const segments = await json<ChapterSegments>(app2.request("/api/books/5369/chapters/180204/segments"));
+      expect(segments.segments).toHaveLength(3);
+      expect(segments.segments.every((seg) => seg.ready)).toBe(true);
+      const audio = await app2.request(`/api/books/5369/chapters/180204/segments/0/audio`);
+      expect(audio.status).toBe(200);
+      expect((await app2.request("/api/books/5369/chapters/180204/audio")).status).toBe(200);
+      const img = await app2.request(`/api/img?url=${encodeURIComponent(image.url)}`);
+      expect(img.status).toBe(200);
+      expect(img.headers.get("content-type")).toBe("image/png");
+      expect(offline).toEqual([]);
+      await s2.backup.idle();
+    } finally {
+      s2.db.close();
+    }
   });
 
   it.skipIf(!hasFfmpeg)("follows the reading position", async () => {
