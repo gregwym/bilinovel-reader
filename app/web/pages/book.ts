@@ -1,5 +1,5 @@
 import { h } from "../../../src/utils/dom";
-import type { BookDetail, BookVoice, BookVoices, ChapterInfo, GenerateResult, VolumeInfo } from "../../shared/api";
+import type { BookDetail, BookVoice, BookVoices, ChapterInfo, DownloadResult, GenerateResult, VolumeInfo } from "../../shared/api";
 import type { Settings } from "../../../src/reader/ProgressStore";
 import { api } from "../api";
 import { segmentSheet } from "../segments";
@@ -28,7 +28,7 @@ import {
 const READER_SETTINGS_KEY = "biliReader.settings";
 const PROVIDER_LABEL: Record<string, string> = { gemini: "Gemini", fish: "Fish Audio" };
 
-/** A book: reading, its chapters' audio, generation and export. */
+/** A book: reading, its chapters' text and audio (downloading, generation and export). */
 export function bookPage({ id }: Record<string, string>): Page {
   const el = h("div", {}, topbar("", "/"));
   const body = h("div");
@@ -96,6 +96,14 @@ export function bookPage({ id }: Record<string, string>): Page {
       }
       if (queued) toast(`已加入 ${queued} 章到生成队列`);
       else if (!r.incomplete.length) toast(`${what}的语音都已生成`);
+      refresh();
+    });
+
+  /** Queues downloading chapters' text into the library (the counterpart of `generate`). */
+  const fetchText = (button: HTMLButtonElement | null, payload: object, what: string) =>
+    act(button, async () => {
+      const r = await api.post<DownloadResult>(`/api/books/${id}/download`, payload);
+      toast(r.queued ? `已加入 ${r.queued} 章到下载队列` : `${what}的原文都已下载`);
       refresh();
     });
 
@@ -175,9 +183,47 @@ export function bookPage({ id }: Record<string, string>): Page {
             ),
           )
         : null;
-    return [hero, status, intro, audioCard(book), offlineCard(book), ...book.volumes.map((v, vi) => volume(book, v, vi)), dangerZone(book)].filter(
+    return [hero, status, intro, textCard(book), audioCard(book), offlineCard(book), ...book.volumes.map((v, vi) => volume(book, v, vi)), dangerZone(book)].filter(
       Boolean,
     ) as Node[];
+  }
+
+  /** The text in the library: downloaded from the site like audio is generated. */
+  function textCard(book: BookDetail): HTMLElement {
+    const chapters = book.volumes.flatMap((v) => v.chapters).filter((c) => c.chapterId);
+    const partial = chapters.filter((c) => c.text === "partial").length;
+    const allBtn = h("button", { class: "btn small" }, "下载全书");
+    allBtn.addEventListener("click", () => {
+      if (!confirm(`下载《${book.title}》全部 ${book.chapters} 章的原文到书库？网站限速，章节多时需要较长时间。`)) return;
+      void fetchText(allBtn, { all: true }, "全书");
+    });
+    const nextBtn = h("button", { class: "btn small" }, "从当前起下载 10 章");
+    nextBtn.addEventListener("click", () => {
+      const from = book.position?.chapterId ?? firstChapter(book)?.chapterId;
+      if (from) void fetchText(nextBtn, { from, count: 10 }, "这些章节");
+    });
+    return h(
+      "section",
+      { class: "card" },
+      h("h2", {}, "原文"),
+      h(
+        "div",
+        { class: "stats" },
+        h("div", {}, h("b", {}, `${book.textChapters}/${book.chapters}`), h("span", {}, "已下载章节")),
+        h("div", {}, h("b", {}, partial ? String(partial) : "—"), h("span", {}, "不完整")),
+        h("div", {}, h("b", {}, book.textBytes ? formatBytes(book.textBytes) : "—"), h("span", {}, "占用空间")),
+      ),
+      h(
+        "div",
+        { class: "row" },
+        h(
+          "div",
+          { class: "grow" },
+          h("div", { class: "hint" }, "正文和插图存入书库（Markdown，在书的文件夹里）。网站删除本书或服务器数据丢失后，仍可从书库阅读和朗读。读过和生成过语音的章节会自动存入"),
+        ),
+      ),
+      h("div", { class: "actions" }, nextBtn, allBtn),
+    );
   }
 
   function audioCard(book: BookDetail): HTMLElement {
@@ -350,6 +396,7 @@ export function bookPage({ id }: Record<string, string>): Page {
   function volume(book: BookDetail, v: VolumeInfo, vi: number): HTMLElement {
     const linked = v.chapters.filter((c) => c.chapterId);
     const done = linked.filter((c) => c.audio === "done").length;
+    const texts = linked.filter((c) => c.text === "done").length;
     const isOpen = open.has(vi);
     const header = h(
       "header",
@@ -358,7 +405,11 @@ export function bookPage({ id }: Record<string, string>): Page {
       v.cover ? h("img", { class: "vol-cover", src: `/api/books/${id}/volumes/${vi}/cover`, alt: "", loading: "lazy" }) : null,
       h("span", { class: "title" }, v.title),
       offlineBadge(linked),
-      done ? h("span", { class: done === linked.length ? "badge ok" : "badge" }, `🎧 ${done}/${linked.length}`) : h("span", { class: "count" }, `${linked.length} 章`),
+      done
+        ? h("span", { class: done === linked.length ? "badge ok" : "badge", title: `语音已生成 ${done}/${linked.length} 章` }, `🎧 ${done}/${linked.length}`)
+        : texts
+          ? h("span", { class: texts === linked.length ? "badge ok" : "badge", title: `原文已下载 ${texts}/${linked.length} 章` }, `📄 ${texts}/${linked.length}`)
+          : h("span", { class: "count" }, `${linked.length} 章`),
     );
     const section = h("section", { class: isOpen ? "volume open" : "volume" }, header);
     header.addEventListener("click", () => {
@@ -370,7 +421,9 @@ export function bookPage({ id }: Record<string, string>): Page {
 
     const genBtn = h("button", { class: "btn small" }, "生成本卷");
     genBtn.addEventListener("click", () => void generate(genBtn, { volume: vi }, "本卷"));
-    const tools = h("div", { class: "tools" }, genBtn);
+    const textBtn = h("button", { class: "btn small" }, "下载本卷原文");
+    textBtn.addEventListener("click", () => void fetchText(textBtn, { volume: vi }, "本卷"));
+    const tools = h("div", { class: "tools" }, textBtn, genBtn);
     const exp = v.exportJob;
     const packing = exp && (exp.status === "queued" || exp.status === "running");
     const fresh = v.export && !v.export.stale;
@@ -416,7 +469,10 @@ export function bookPage({ id }: Record<string, string>): Page {
     else if (c.duration) sub.push(formatDuration(c.duration));
     if (c.audio === "stale") sub.push("声音已更换，需重新生成");
     if ((c.audio === "running" || c.audio === "queued" || c.audio === "failed") && c.message) sub.push(c.message);
-    if (c.incomplete) sub.push("正文不完整（网站只返回了部分）");
+    if (c.incomplete || c.text === "partial") sub.push("正文不完整（网站只返回了部分）");
+    if (c.text === "queued") sub.push("原文排队下载");
+    else if (c.text === "running") sub.push(c.textMessage ?? "下载原文中…");
+    else if (c.text === "failed") sub.push(`原文下载失败${c.textMessage ? `：${c.textMessage}` : ""}`);
     const name = h(
       "div",
       { class: "name" },
@@ -441,10 +497,32 @@ export function bookPage({ id }: Record<string, string>): Page {
         ? { label: "下载语音（MP3）", hint: c.duration ? formatDuration(c.duration) : "", href: `/api/books/${id}/chapters/${c.chapterId}/audio?download` }
         : { label: "下载语音（MP3）", hint: c.silent ? "仅插图" : "尚未生成", disabled: true },
       { label: "下载原文（TXT）", run: () => saveText(more, `/api/books/${id}/chapters/${c.chapterId}/text`) },
+      textItem(c),
       ...(offlineSupported ? offlineItems(book, c).map((it, i) => (i ? it : { ...it, divider: true })) : []),
       ...cacheItems(c).map((it, i) => (i ? it : { ...it, divider: true })),
     ]);
     return h("li", { class: cls }, name, segBtn, more, stateButton(book, c));
+  }
+
+  /** Download the chapter's text into the library (the counterpart of generating its audio). */
+  function textItem(c: ChapterInfo): MenuItem {
+    const label = "存入书库";
+    switch (c.text) {
+      case "done":
+        return { label, hint: c.textBytes ? `已存 · ${formatBytes(c.textBytes)}` : "已存", disabled: true };
+      case "queued":
+      case "running":
+        return {
+          label: "取消下载原文",
+          hint: c.text === "queued" ? "排队中" : (c.textMessage ?? "下载中"),
+          run: async () => {
+            if (c.textJobId) await api.post(`/api/jobs/${c.textJobId}/cancel`);
+            refresh();
+          },
+        };
+      default:
+        return { label, hint: c.text === "partial" ? "不完整 · 再次获取" : c.text === "failed" ? "失败 · 重试" : "下载原文", run: () => fetchText(null, { chapters: [c.chapterId] }, "本章") };
+    }
   }
 
   /** Delete this chapter's cached text or its audio on the server (never both at once). */

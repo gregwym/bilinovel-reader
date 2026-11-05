@@ -589,6 +589,34 @@ describe("library server", () => {
     expect(JSON.parse(merged.value)["5369"].chapterId).not.toBe("1");
   });
 
+  it("downloads chapters' text into the library like audio is generated", async () => {
+    await waitFor(() => !services.jobs.overview().counts.running);
+    PAGES["/novel/5369/180206.html"] = fixture("normal-chapter.html").replaceAll("180210", "180206");
+    const chapter = (d: BookDetail, id: string) => d.volumes.flatMap((v) => v.chapters).find((c) => c.chapterId === id)!;
+    const before = await json<BookDetail>(call("/api/books/5369"));
+    expect(chapter(before, "180206").text).toBe("none");
+    siteRequests.length = 0;
+    const res = await json<{ queued: number }>(send("POST", "/api/books/5369/download", { chapters: ["180206"] }));
+    expect(res.queued).toBe(1);
+    const job = await waitFor(async () => (await json<JobsOverview>(call("/api/jobs"))).jobs.find((j) => j.kind === "text" && j.target === "180206" && j.status === "done"));
+    expect(job.title).toBe(chapter(before, "180206").title);
+    // Done means it is in the library: the Markdown and the data a new install reads.
+    const after = await json<BookDetail>(call("/api/books/5369"));
+    expect(chapter(after, "180206").text).toBe("done");
+    expect(chapter(after, "180206").textBytes).toBeGreaterThan(0);
+    expect(after.textChapters).toBe(before.textChapters + 1);
+    expect(after.textBytes).toBeGreaterThan(before.textBytes);
+    const bookDir = join(dir, "library", "测试作者", "测试轻小说");
+    expect(existsSync(join(bookDir, ".bili-reader", "chapters", "180206.json"))).toBe(true);
+    expect(siteRequests.filter((p) => p === "/novel/5369/180206.html")).toHaveLength(1);
+    // Already there: nothing to queue, and no request to the site.
+    expect((await json<{ queued: number }>(send("POST", "/api/books/5369/download", { chapters: ["180206"] }))).queued).toBe(0);
+    expect(siteRequests.filter((p) => p === "/novel/5369/180206.html")).toHaveLength(1);
+    // The book's list shows the same count.
+    const list = await json<BookSummary[]>(call("/api/books"));
+    expect(list.find((b) => b.id === "5369")!.textChapters).toBe(after.textChapters);
+  });
+
   it("refuses image URLs on the local network", async () => {
     expect((await call("/api/img?url=http://192.168.1.2/x.jpg")).status).toBe(403);
     expect((await call("/api/img?url=http://localhost:8080/x.jpg")).status).toBe(403);

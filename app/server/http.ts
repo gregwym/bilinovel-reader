@@ -11,7 +11,7 @@ import { GEMINI_VOICES } from "../../src/speech/GeminiSpeechEngine";
 import { listFishVoices } from "../../src/speech/FishSpeechEngine";
 import { segmentKey, type TimelineSegment } from "../../src/speech/PageSpeechEngine";
 import { mergeProgress, type SavedProgress } from "../../src/reader/ProgressStore";
-import type { AppInfo, BookVoices, ChapterSegments, GenerateResult, PageProvider, ServerSettingsUpdate, TimelineResult } from "../shared/api";
+import type { AppInfo, BookVoices, ChapterSegments, DownloadResult, GenerateResult, PageProvider, ServerSettingsUpdate, TimelineResult } from "../shared/api";
 import type { Db } from "./db";
 import type { Config, Settings } from "./config";
 import type { SiteClient } from "./site/client";
@@ -20,8 +20,8 @@ import type { Ffmpeg } from "./audio/ffmpeg";
 import { PROVIDERS, READER_SETTINGS_KEY, describeError, type Tts } from "./tts";
 import type { Library } from "./library";
 import { NotImageError, type Images } from "./images";
-import type { Backup } from "./backup";
-import { bookCatalog, chapterText, findChapter, safeName, textFileContent } from "./library";
+import { savedTexts, type Backup } from "./backup";
+import { bookCatalog, chapterText, findChapter, safeName, textFileContent, type BookRow } from "./library";
 import { PROGRESS_KEY, type Books } from "./books";
 import { READER_PRIORITY, type Jobs } from "./jobs";
 import type { Planner } from "./planner";
@@ -330,20 +330,8 @@ export function createApp(d: AppDeps): Hono {
     const book = d.books.get(c.req.param("id"));
     if (!book) return c.json({ error: "书籍不存在" }, 404);
     if (!d.tts.profile()) return c.json({ error: "请先在设置中配置 Gemini 或 Fish Audio 密钥", code: "config" }, 400);
-    const body = await c.req
-      .json<{ chapters?: string[]; volume?: number; from?: string; count?: number; all?: boolean; partial?: boolean }>()
-      .catch(() => ({}) as Record<string, never>);
-    const catalog = bookCatalog(book);
-    const all = (catalog?.volumes ?? []).flatMap((v, vi) =>
-      v.chapters.flatMap((ch) => (ch.chapterId ? [{ id: ch.chapterId, title: ch.title, vi }] : [])),
-    );
-    let pick = all;
-    if (body.chapters) pick = all.filter((ch) => body.chapters!.includes(ch.id));
-    else if (body.volume !== undefined) pick = all.filter((ch) => ch.vi === body.volume);
-    else if (body.from) {
-      const i = all.findIndex((ch) => ch.id === body.from);
-      pick = i < 0 ? [] : all.slice(i, body.count ? i + body.count : undefined);
-    } else if (!body.all) pick = [];
+    const body = await c.req.json<ChapterPick & { partial?: boolean }>().catch(() => ({}) as Record<string, never>);
+    const pick = pickChapters(book, body);
     const profile = d.tts.profile()!;
     const profileId = d.tts.profileId(profile);
     const ready = new Map(d.library.chapterAudio(book.id).map((r) => [r.chapter_id, r.profile === profileId]));
@@ -361,6 +349,25 @@ export function createApp(d: AppDeps): Hono {
       queued++;
     }
     return c.json({ queued, incomplete } satisfies GenerateResult);
+  });
+
+  /**
+   * Queues downloading chapters' text into the library, picked like `generate`.
+   * Chapters whose whole text is there already are left out.
+   */
+  app.post("/api/books/:id/download", async (c) => {
+    const book = d.books.get(c.req.param("id"));
+    if (!book) return c.json({ error: "书籍不存在" }, 404);
+    const body = await c.req.json<ChapterPick>().catch(() => ({}) as Record<string, never>);
+    const saved = savedTexts(d.db, book.id);
+    let queued = 0;
+    for (const ch of pickChapters(book, body)) {
+      const text = saved.get(ch.id);
+      if (text && !text.incomplete) continue;
+      d.jobs.enqueueText(book.id, ch.id, ch.title, "manual");
+      queued++;
+    }
+    return c.json({ queued } satisfies DownloadResult);
   });
 
   // One chapter's cached text: fetched from the site again when next read. Its audio stays.
@@ -821,4 +828,26 @@ export function createApp(d: AppDeps): Hono {
   });
 
   return app;
+}
+
+/** Which chapters a request is about: `chapters`, a `volume`, `from` a chapter on (`count` of them), or `all`. */
+interface ChapterPick {
+  chapters?: string[];
+  volume?: number;
+  from?: string;
+  count?: number;
+  all?: boolean;
+}
+
+function pickChapters(book: BookRow, body: ChapterPick): { id: string; title: string; vi: number }[] {
+  const all = (bookCatalog(book)?.volumes ?? []).flatMap((v, vi) =>
+    v.chapters.flatMap((ch) => (ch.chapterId ? [{ id: ch.chapterId, title: ch.title, vi }] : [])),
+  );
+  if (body.chapters) return all.filter((ch) => body.chapters!.includes(ch.id));
+  if (body.volume !== undefined) return all.filter((ch) => ch.vi === body.volume);
+  if (body.from) {
+    const i = all.findIndex((ch) => ch.id === body.from);
+    return i < 0 ? [] : all.slice(i, body.count ? i + body.count : undefined);
+  }
+  return body.all ? all : [];
 }

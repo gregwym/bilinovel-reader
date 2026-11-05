@@ -17,7 +17,8 @@ export interface VoiceProfile {
 }
 
 export type JobStatus = "queued" | "running" | "done" | "failed" | "cancelled";
-export type JobKind = "chapter" | "export";
+/** chapter: voice a chapter; text: download its text into the library; export: pack a volume. */
+export type JobKind = "chapter" | "text" | "export";
 /** Why a chapter was queued: following the reading position, or asked for. */
 export type JobReason = "follow" | "manual";
 
@@ -26,7 +27,7 @@ export interface JobInfo {
   kind: JobKind;
   bookId: string;
   bookTitle: string;
-  /** Chapter id, or the volume index for an export. */
+  /** Chapter id (chapter, text), or the volume index for an export. */
   target: string;
   title: string;
   reason: JobReason;
@@ -67,6 +68,10 @@ export interface BookSummary {
   follow: boolean;
   ahead: number;
   audioBytes: number;
+  /** Chapters whose whole text is saved in the library. */
+  textChapters: number;
+  /** Their Markdown and illustrations. */
+  textBytes: number;
   /** The catalog is being fetched from the site. */
   loading?: boolean;
   /** Why the last catalog fetch failed. */
@@ -74,6 +79,8 @@ export interface BookSummary {
 }
 
 export type ChapterAudioState = "none" | "stale" | "queued" | "running" | "done" | "failed";
+/** done: the whole text is saved in the library; partial: only what the site sent (incomplete). */
+export type ChapterTextState = "none" | "partial" | "queued" | "running" | "done" | "failed";
 
 export interface ChapterInfo {
   chapterId?: string;
@@ -91,6 +98,12 @@ export interface ChapterInfo {
   pages?: number;
   /** One of them is only the start the site sent (see PageContent.incomplete). */
   incomplete?: boolean;
+  /** The text in the library (downloaded like audio is generated). */
+  text: ChapterTextState;
+  textMessage?: string;
+  textJobId?: number;
+  /** Markdown and illustrations in the library. */
+  textBytes?: number;
 }
 
 /** A chapter's speech segments in one voice (each is one request). */
@@ -251,6 +264,11 @@ export interface PageProbe {
   partial?: number;
 }
 
+
+/** `POST /api/books/:id/download`: chapters queued to download their text into the library. */
+export interface DownloadResult {
+  queued: number;
+}
 
 /** `POST /api/books/:id/generate`: chapters queued, and those left out because their text is incomplete. */
 export interface GenerateResult {

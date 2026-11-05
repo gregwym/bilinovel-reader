@@ -89,6 +89,7 @@ function render(books: BookSummary[]): Node[] {
       "div",
       { class: "shelf-tools" },
       h("span", {}, `共 ${books.length} 本`),
+      h("span", {}, `${books.reduce((n, b) => n + b.textChapters, 0)} 章原文`),
       h("span", {}, `${books.reduce((n, b) => n + b.audioChapters, 0)} 章有声`),
     ),
   );
@@ -121,7 +122,7 @@ function continueCard(book: BookSummary): HTMLElement {
       h("div", { class: "kicker" }, "继续阅读"),
       h("div", { class: "title" }, book.title),
       h("div", { class: "chapter" }, pos.chapterTitle ?? `第 ${(book.readIndex ?? 0) + 1} 章`),
-      h("div", { class: "hint" }, `${formatTime(pos.updatedAt)} · 有声 ${book.audioChapters}/${book.chapters} 章`),
+      h("div", { class: "hint" }, `${formatTime(pos.updatedAt)} · 原文 ${book.textChapters}/${book.chapters} · 有声 ${book.audioChapters}/${book.chapters} 章`),
       h("div", { class: "bottom" }, progressBar(readFraction(book)), read),
     ),
   );

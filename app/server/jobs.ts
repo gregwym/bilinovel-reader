@@ -45,7 +45,7 @@ class Cancelled extends Error {}
 class Paused extends Error {}
 
 /**
- * Background generation: a queue of chapter (and export) jobs in the
+ * Background work: a queue of chapter (voice), text (download) and export jobs in the
  * database, run one at a time. Failures that need the user block the
  * service until settings change; quota and throttling wait and retry.
  */
@@ -58,6 +58,8 @@ export class Jobs {
   private timer?: ReturnType<typeof setTimeout>;
   private stopped = false;
   private listeners: (() => void)[] = [];
+  /** Writes a chapter's text into the library (see Backup.saveChapter). */
+  private saveText: (bookId: string, chapterId: string) => Promise<unknown> = async () => undefined;
 
   constructor(
     private readonly db: Db,
@@ -84,6 +86,10 @@ export class Jobs {
   unblock(): void {
     this.blocked = {};
     this.kick();
+  }
+
+  setTextSaver(fn: (bookId: string, chapterId: string) => Promise<unknown>): void {
+    this.saveText = fn;
   }
 
   onChange(fn: () => void): void {
@@ -121,6 +127,20 @@ export class Jobs {
     }
     const id = this.insert("chapter", bookId, chapterId, title, reason);
     if (partial) this.db.run("update jobs set partial = 1 where id = ?", id);
+    this.kick();
+    return id;
+  }
+
+  /** Queues downloading a chapter's text into the library (no-op when queued; a manual request raises its priority). */
+  enqueueText(bookId: string, chapterId: string, title: string, reason: JobReason = "manual"): number {
+    const existing = this.active(bookId, "text", chapterId);
+    if (existing) {
+      if (PRIORITY[reason] > existing.priority) {
+        this.db.run("update jobs set priority = ?, reason = ? where id = ?", PRIORITY[reason], reason, existing.id);
+      }
+      return existing.id;
+    }
+    const id = this.insert("text", bookId, chapterId, title, reason);
     this.kick();
     return id;
   }
@@ -288,6 +308,7 @@ export class Jobs {
     );
     if (kind === "export") return rows[0];
     if (this.blocked.site) return undefined;
+    if (kind === "text") return rows[0];
     const provider = this.tts.profile()?.provider;
     if (!provider || this.blocked[provider]) return undefined;
     return rows[0];
@@ -296,7 +317,7 @@ export class Jobs {
   private async tick(): Promise<void> {
     if (this.stopped) return;
     if (!this.paused) {
-      for (const kind of ["chapter", "export"] as JobKind[]) {
+      for (const kind of ["chapter", "text", "export"] as JobKind[]) {
         // One job of each kind at a time.
         if ([...this.running].some((id) => this.db.get<JobRow>("select kind from jobs where id = ?", id)?.kind === kind)) continue;
         const job = this.nextJob(kind);
@@ -332,6 +353,7 @@ export class Jobs {
     this.update(job.id, { status: "running", progress: 0, message: null, error: null });
     try {
       if (job.kind === "chapter") await this.runChapter(job);
+      else if (job.kind === "text") await this.runText(job);
       else await this.runExport(job);
       if (this.db.get<{ status: string }>("select status from jobs where id = ?", job.id)?.status === "running") {
         this.update(job.id, { status: "done", progress: 1 });
@@ -438,6 +460,27 @@ export class Jobs {
     this.update(job.id, { message: "合成章节文件…" });
     if (!(await this.ffmpeg.check())) throw new Error("未找到 ffmpeg，无法合成章节文件");
     await this.library.assemble(book, job.target, segments, profileId);
+    this.update(job.id, { message: null });
+  }
+
+  // -------------------------------------------------------------------------
+  // Text
+
+  /** Fetches a chapter's pages (those not cached yet) and writes its text into the library. */
+  private async runText(job: JobRow): Promise<void> {
+    const book = this.library.book(job.book_id);
+    if (!book) throw new Error("书籍已删除");
+    this.update(job.id, { message: "获取正文…" });
+    const pages = await this.source.chapterPages(book.id, job.target, (n) =>
+      this.update(job.id, { message: `获取正文（第 ${n} 页）…`, progress: Math.min(0.9, n / (n + 1)) }),
+    );
+    this.checkCancelled(job.id);
+    this.update(job.id, { message: "存入书库…", progress: 0.95 });
+    // What the site sent is kept either way; an incomplete chapter is asked for again later.
+    await this.saveText(book.id, job.target);
+    if (!this.source.cachedChapterPages(book.id, job.target).complete) throw new Error("网站返回的页面不是本章");
+    const partial = pages.find((p) => p.incomplete);
+    if (partial) throw incompleteError(partial);
     this.update(job.id, { message: null });
   }
 

@@ -1,9 +1,10 @@
 import { h } from "../../../src/utils/dom";
-import type { JobInfo, JobStatus, JobsOverview } from "../../shared/api";
+import type { JobInfo, JobKind, JobStatus, JobsOverview } from "../../shared/api";
 import { api } from "../api";
 import { cancelSave, offlineSupported, onSaveChange, saveTasks, type SaveTask } from "../offline";
 import { act, formatBytes, formatTime, poll, progressBar, toast, topbar, type Page } from "../ui";
 
+const KIND_LABEL: Record<JobKind, string> = { chapter: "生成语音", text: "下载原文", export: "导出" };
 const STATUS_LABEL: Record<JobStatus, string> = {
   queued: "排队",
   running: "进行中",
@@ -129,7 +130,7 @@ export function jobsPage(): Page {
         h(
           "a",
           { class: "book", href: `/book/${j.bookId}`, "data-link": true },
-          `${j.bookTitle} · ${j.kind === "export" ? "导出" : j.reason === "follow" ? "跟随阅读" : "手动"} · ${STATUS_LABEL[j.status]} · ${formatTime(j.updatedAt)}`,
+          `${j.bookTitle} · ${KIND_LABEL[j.kind]}${j.kind === "export" ? "" : j.reason === "follow" ? "（跟随阅读）" : ""} · ${STATUS_LABEL[j.status]} · ${formatTime(j.updatedAt)}`,
         ),
         msg,
         j.status === "running" ? progressBar(j.progress) : null,
