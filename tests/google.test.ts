@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   GoogleSpeechEngine,
   GoogleUsageMeter,
@@ -182,10 +182,13 @@ describe("cloud audio interruptions", () => {
   });
 
   it("reports a system pause (call, other audio, headphones) as cancelled", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
     const p = e.speak("一", { rate: 1 });
     await new Promise((r) => setTimeout(r, 0));
+    now.mockReturnValue(10_000); // well after starting (a pause right away is retried once)
     audio.pause(); // not via the engine
     await expect(p).resolves.toBe("cancelled");
+    now.mockRestore();
   });
 
   it("ignores the pause event from stopping the previous chunk", async () => {

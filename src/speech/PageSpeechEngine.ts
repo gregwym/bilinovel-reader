@@ -2,6 +2,7 @@ import { httpRequest, type HttpRequest, type HttpResponse } from "../utils/http"
 import { log } from "../utils/log";
 import { sleep } from "../utils/async";
 import { SpeechEngineError, type SpeakOptions, type SpeechEngine } from "./SpeechEngine";
+import { EarlyPauseRetry } from "./earlyPause";
 import { silentWavUrl } from "./CloudSpeechEngine";
 
 /**
@@ -542,6 +543,7 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
   private guard?: ReturnType<typeof setTimeout>;
   private unlocked = false;
   private held = false;
+  private readonly early = new EarlyPauseRetry();
 
   constructor(
     private readonly backend: PageBackend<C>,
@@ -645,6 +647,7 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
   resumeInPlace(): boolean {
     if (!this.held || !this.settle) return false;
     this.held = false;
+    this.early.started();
     void this.audio.play().catch(() => this.stop());
     return true;
   }
@@ -871,7 +874,12 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
       };
       // Paused by the system (call, other audio, lock-screen control).
       const onPause = () => {
-        if (this.settle === settle && !this.held && audio.paused && !audio.ended) settle("cancelled");
+        if (this.settle !== settle || this.held || !audio.paused || audio.ended) return;
+        if (this.early.shouldRetry()) {
+          void audio.play().catch(() => this.settle === settle && settle("cancelled"));
+          return;
+        }
+        settle("cancelled");
       };
       this.settle = settle;
       audio.addEventListener("timeupdate", check);
@@ -882,6 +890,7 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
         check();
         return;
       }
+      this.early.started();
       audio
         .play()
         .then(() => {

@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   GeminiSpeechEngine,
   GeminiUsageMeter,
@@ -243,11 +243,28 @@ describe("GeminiSpeechEngine", () => {
 
   it("still reports a system pause as cancelled", async () => {
     const { e, audio } = engine([1, 2, 3].map(() => audioResponse(pcm([1, 1, 1]))), undefined, 4);
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
     const first = e.speak(book[0][0], at(0, 0));
     await flush();
+    now.mockReturnValue(10_000);
     audio.pause();
     await expect(first).resolves.toBe("cancelled");
     expect(e.pauseInPlace()).toBe(false);
+    now.mockRestore();
+  });
+
+  it("plays again once when the system pauses right after starting (iOS back from the background)", async () => {
+    const { e, audio } = engine([1, 2, 3].map(() => audioResponse(pcm([1, 1, 1]))), undefined, 4);
+    const first = e.speak(book[0][0], at(0, 0));
+    await flush();
+    audio.at(0.5);
+    expect(e.pauseInPlace()).toBe(true);
+    expect(e.resumeInPlace()).toBe(true);
+    audio.pause(); // the system takes it away again
+    await flush();
+    expect(audio.paused).toBe(false);
+    audio.pause(); // a second time it is a real interruption
+    await expect(first).resolves.toBe("cancelled");
   });
 
   it("generates the following pages ahead", async () => {

@@ -83,6 +83,22 @@ describe("Azure SSML", () => {
 });
 
 describe("AzureSpeechEngine", () => {
+  it("plays again once when the system pauses right after starting, then reports a pause", async () => {
+    const { e, audio } = engine([ok()]);
+    const listeners: Record<string, (() => void)[]> = {};
+    audio.addEventListener = (ev: string, fn: () => void) => void (listeners[ev] ??= []).push(fn);
+    audio.play = () => ((audio.paused = false), audio.plays.push(audio.src), Promise.resolve());
+    const systemPause = () => ((audio.paused = true), (listeners.pause ?? []).forEach((f) => f()));
+    const p = e.speak("你好", { rate: 1 });
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+    systemPause();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(audio.paused).toBe(false);
+    expect(audio.plays).toHaveLength(2);
+    systemPause();
+    await expect(p).resolves.toBe("cancelled");
+  });
+
   it("synthesizes, plays and reports usage", async () => {
     let used = 0;
     const { e, requests, audio } = engine([ok()], (n) => (used += n));
