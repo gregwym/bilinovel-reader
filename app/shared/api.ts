@@ -113,6 +113,8 @@ export interface TimelineResult {
 export interface VolumeInfo {
   title: string;
   chapters: ChapterInfo[];
+  /** The catalog shows a cover for this volume (`/api/books/:id/volumes/:vi/cover`). */
+  cover?: boolean;
   /** Ready export (m4b) of the volume, if any; `stale` once a chapter changed after it was made. */
   export?: { bytes: number; createdAt: number; stale: boolean };
   exportJob?: { status: JobStatus; progress: number; message?: string };

@@ -92,6 +92,8 @@ export interface SiteAdapter {
   setFrameHost?(host: FrameHost): void;
   /** Loads the book's table of contents. */
   fetchCatalog?(bookId: string): Promise<Catalog>;
+  /** The book's cover image, when the adapter has one (lock screen artwork when the volume has none). */
+  bookCover?(bookId: string): string | undefined;
   /** Builds the URL of a given page of a chapter (used for progress restore). */
   pageUrl(bookId: string, chapterId: string, pageIndex: number): string;
 }

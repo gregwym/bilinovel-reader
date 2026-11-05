@@ -750,7 +750,16 @@ export class ReaderView {
     let current: HTMLElement | undefined;
     if (st.catalog) {
       for (const vol of st.catalog.volumes) {
-        if (vol.title) list.append(h("div", { class: "br-toc-vol" }, vol.title));
+        if (vol.title || vol.cover) {
+          list.append(
+            h(
+              "div",
+              { class: "br-toc-vol" },
+              vol.cover ? h("img", { class: "br-toc-vol-cover", src: vol.cover, alt: "", loading: "lazy" }) : null,
+              h("span", {}, vol.title),
+            ),
+          );
+        }
         for (const ch of vol.chapters) {
           const isCurrent = !!ch.chapterId && ch.chapterId === st.chapterId;
           const btn = h(

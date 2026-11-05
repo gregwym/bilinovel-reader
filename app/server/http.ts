@@ -300,6 +300,21 @@ export function createApp(d: AppDeps): Hono {
     }
   });
 
+  /** A volume's cover: its own (fetched now if not yet), else the book's. */
+  app.get("/api/books/:id/volumes/:vi/cover", async (c) => {
+    const book = d.books.get(c.req.param("id"));
+    const vi = Number(c.req.param("vi"));
+    if (!book) return c.body(null, 404);
+    const cache = { "Cache-Control": "private, max-age=86400" };
+    let own = d.library.volumeCover(book, vi);
+    if (!own && bookCatalog(book)?.volumes[vi]?.cover) {
+      await d.library.updateCovers(book.id);
+      own = d.library.volumeCover(book, vi);
+    }
+    const file = own ?? d.library.coverFile(book.id);
+    return existsSync(file) ? sendFile(c, file, "image/jpeg", cache) : c.body(null, 404);
+  });
+
   app.get("/api/books/:id/cover", (c) => {
     const file = d.library.coverFile(c.req.param("id"));
     if (!existsSync(file)) return c.body(null, 404);

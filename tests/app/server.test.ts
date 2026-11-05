@@ -195,6 +195,13 @@ describe("library server", () => {
     const volumeCover = readFileSync(join(bookDir, "01 第一卷 开始", "cover.jpg"));
     expect(volumeCover.equals(readFileSync(join(bookDir, "cover.jpg")))).toBe(false);
     expect(volumeCover.equals(readFileSync(services.library.volumeCover(services.library.book("5369")!, 0)!))).toBe(true);
+    // The app shows it for the volume (table of contents, lock screen); a volume without one shows the book's.
+    const detailNow = await json<BookDetail>(call("/api/books/5369"));
+    expect(detailNow.volumes.map((v) => !!v.cover)).toEqual([true, false]);
+    const shown = Buffer.from(await (await call("/api/books/5369/volumes/0/cover")).arrayBuffer());
+    expect(shown.equals(volumeCover)).toBe(true);
+    const other = Buffer.from(await (await call("/api/books/5369/volumes/1/cover")).arrayBuffer());
+    expect(other.equals(readFileSync(services.library.coverFile("5369")))).toBe(true);
     // Without it in the data folder (a new install), it is taken from the volume's folder, not the site.
     const kept = services.library.volumeCover(services.library.book("5369")!, 0)!;
     rmSync(kept);

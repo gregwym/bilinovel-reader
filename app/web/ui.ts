@@ -1,5 +1,5 @@
 import { h, svg } from "../../src/utils/dom";
-import type { BookSummary, ReadingPosition } from "../shared/api";
+import type { BookDetail, BookSummary, ChapterInfo, ReadingPosition } from "../shared/api";
 
 /** Shared pieces of the library pages. */
 
@@ -245,4 +245,11 @@ export function topbar(title: string, back?: string, ...right: Node[]): HTMLElem
     h("h1", {}, title),
     ...right,
   );
+}
+
+/** Lock screen artwork for a chapter: its volume's cover when the catalog shows one, else the book's. */
+export function coverArt(book: BookDetail, chapter: ChapterInfo): MediaImage[] {
+  const vi = book.volumes.findIndex((v) => v.chapters.some((c) => c.chapterId === chapter.chapterId));
+  if (vi >= 0 && book.volumes[vi].cover) return [{ src: `/api/books/${book.id}/volumes/${vi}/cover`, type: "image/jpeg" }];
+  return book.hasCover ? [{ src: `/api/books/${book.id}/cover`, type: "image/jpeg" }] : [];
 }

@@ -1,7 +1,7 @@
 import { h } from "../../src/utils/dom";
 import type { BookDetail, ChapterInfo, ChapterSegments } from "../shared/api";
 import { api } from "./api";
-import { act, download, icon, menu, poll } from "./ui";
+import { act, coverArt, download, icon, menu, poll } from "./ui";
 
 /**
  * A chapter's speech segments in a bottom sheet: each one can be played as
@@ -74,7 +74,7 @@ export function segmentSheet(book: BookDetail, chapter: ChapterInfo): { close: (
         title: `${chapter.title}（${i + 1}）`,
         artist: book.author,
         album: book.title,
-        artwork: book.hasCover ? [{ src: `/api/books/${book.id}/cover`, type: "image/jpeg" }] : [],
+        artwork: coverArt(book, chapter),
       });
     }
     render();
