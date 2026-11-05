@@ -45,10 +45,15 @@ import {
 } from "../speech/FishSpeechEngine";
 import {
   PageSpeechEngine,
+  segmentKey,
+  splitPage,
+  type ChapterTimeline,
   type PageBackend,
   type PageContext,
   type PageEngineOptions,
   type SegmentStore,
+  type TimelineSegment,
+  type TrackPosition,
 } from "../speech/PageSpeechEngine";
 import type { GeminiConfig } from "../speech/GeminiSpeechEngine";
 import type { FishConfig } from "../speech/FishSpeechEngine";
@@ -141,6 +146,12 @@ export interface ReaderHost {
   };
   /** Voices of a service whose key the host keeps. */
   listVoices?(provider: CloudProvider): Promise<AzureVoice[]>;
+  /**
+   * A chapter's stored audio as one track (`prefix`: the voice's cache key),
+   * when the host knows the whole chapter even if the reader loaded only part
+   * of it; undefined when not all of it is stored. Default: from the pages loaded.
+   */
+  chapterTimeline?(bookId: string, chapterId: string, provider: PageProvider, prefix: string): Promise<ChapterTimeline | undefined>;
 }
 
 /** Placeholder key for services whose key the host keeps. */
@@ -216,9 +227,11 @@ export class Reader implements PlaybackSource {
   /** Engines that generate whole pages ahead, with the size of their local audio cache. */
   private readonly paged: Record<
     PageProvider,
-    { engine: Pick<PageSpeechEngine<never>, "clearCache" | "cacheBytes">; cacheBytes: number }
+    { engine: Pick<PageSpeechEngine<never>, "clearCache" | "cacheBytes" | "locate" | "maxChunkLength">; cacheBytes: number }
   >;
   private settings!: Settings;
+  /** Whether the lock screen shows the chapter's track (and can seek in it). */
+  private trackShown = false;
   private cursorId?: string;
   private loading?: Promise<boolean>;
   private loadFailed = false;
@@ -1071,6 +1084,10 @@ export class Reader implements PlaybackSource {
   private pageEngineOptions(provider: PageProvider, maxChunk: number, usage: PageEngineOptions["usage"]): PageEngineOptions {
     return {
       pages: (id, count) => this.pagesFrom(id, count, maxChunk),
+      timeline: (id, prefix) => this.chapterTimeline(provider, id, prefix, maxChunk),
+      onTrack: (position) => {
+        if (this.settings.ttsEngine === provider) this.setTrack(position);
+      },
       usage,
       onStatus: (msg) => {
         this.view.setCloudState(provider, { status: msg });
@@ -1090,12 +1107,7 @@ export class Reader implements PlaybackSource {
   private pagesFrom(id: string, count: number, maxChunk: number): PageContext {
     const p = this.buffer.get(id);
     if (!p) return { pages: [], index: 0 };
-    const title = this.buffer.chapterOf(id)?.title;
-    const chunks = (ps: ReaderParagraph[]) =>
-      ps.flatMap((q, i) => {
-        const text = spokenText(ps, i, q.pageIndex, title);
-        return text ? splitIntoChunks(text, maxChunk) : [];
-      });
+    const chunks = (ps: ReaderParagraph[]) => this.utterances(ps, maxChunk).flat();
     let page = this.buffer.pageParagraphs(p.chapterId, p.pageIndex);
     const ctx: PageContext = { pages: [chunks(page)], index: chunks(page.slice(0, page.indexOf(p))).length };
     while (ctx.pages.length < count && page.length) {
@@ -1105,6 +1117,37 @@ export class Reader implements PlaybackSource {
       ctx.pages.push(chunks(page));
     }
     return ctx;
+  }
+
+  /** Each paragraph's utterance texts (as the player and the page engines split them), for one page's paragraphs. */
+  private utterances(ps: ReaderParagraph[], maxChunk: number): string[][] {
+    const title = ps[0] && this.buffer.chapterOf(ps[0].id)?.title;
+    return ps.map((q, i) => {
+      const text = spokenText(ps, i, q.pageIndex, title);
+      return text ? splitIntoChunks(text, maxChunk) : [];
+    });
+  }
+
+  /**
+   * The chapter of `id` as one track: from the host, or else from its pages
+   * when all of them are loaded (segments split as the page engines split them).
+   */
+  private async chapterTimeline(provider: PageProvider, id: string, prefix: string, maxChunk: number): Promise<ChapterTimeline | undefined> {
+    const ch = this.buffer.chapterOf(id);
+    if (!ch) return undefined;
+    if (this.host.chapterTimeline) return this.host.chapterTimeline(this.buffer.bookId, ch.chapterId, provider, prefix);
+    const pages = [...new Set(ch.pageIndexes)].sort((a, b) => a - b);
+    if (ch.pageCount === undefined || pages.length !== ch.pageCount || pages.some((p, i) => p !== i)) return undefined;
+    const segments: TimelineSegment[] = [];
+    for (const pageIndex of pages) {
+      const texts = this.utterances(this.buffer.pageParagraphs(ch.chapterId, pageIndex), maxChunk).flat();
+      let first = 0;
+      for (const part of texts.length ? splitPage(texts, maxChunk) : []) {
+        segments.push({ key: segmentKey(prefix, part), pageIndex, first });
+        first += part.length;
+      }
+    }
+    return { chapterId: ch.chapterId, segments };
   }
 
   /** Mirrors the current site page in the address bar without reloading or adding history. */
@@ -1233,6 +1276,8 @@ export class Reader implements PlaybackSource {
         status: this.settings.ttsEngine === provider && !slot.key ? "请先填写密钥" : "",
       });
     }
+    // Another engine reports its own track (if any) once it plays.
+    this.setTrack(undefined);
     const engine = this.currentEngine();
     // Either way the current chunk restarts with the new engine/voice when playing.
     if (this.player.engineIs(engine)) this.player.restartCurrent();
@@ -1319,6 +1364,54 @@ export class Reader implements PlaybackSource {
   }
 
   /** Tells the system whether we are playing, so a headphone click sends "play" rather than "pause". */
+  /**
+   * The chapter's position on the lock screen / Control Center (Safari shows
+   * it instead of the playing segment's), which can then be dragged; cleared
+   * when the chapter isn't available as one track.
+   */
+  private setTrack(position: TrackPosition | undefined): void {
+    const ms = (navigator as Navigator & { mediaSession?: MediaSession }).mediaSession;
+    if (!ms?.setPositionState) return;
+    try {
+      if (position) ms.setPositionState({ duration: position.duration, position: position.position, playbackRate: position.rate });
+      else ms.setPositionState();
+    } catch (err) {
+      log.debug("setPositionState failed", err);
+    }
+    if (!!position === this.trackShown) return;
+    this.trackShown = !!position;
+    try {
+      ms.setActionHandler("seekto", position ? (d) => d.seekTime !== undefined && void this.seekTrack(d.seekTime) : null);
+    } catch {
+      /* unsupported action */
+    }
+  }
+
+  /** Plays from the paragraph at `seconds` into the chapter's track (loading its page if needed). */
+  private async seekTrack(seconds: number): Promise<void> {
+    const t = this.settings.ttsEngine;
+    if (t !== "gemini" && t !== "fish") return;
+    const engine = this.paged[t].engine;
+    const at = await engine.locate(seconds);
+    if (!at) return;
+    const maxChunk = engine.maxChunkLength;
+    const find = () => {
+      const ps = this.buffer.pageParagraphs(at.chapterId, at.pageIndex);
+      let n = 0;
+      for (const [i, chunks] of this.utterances(ps, maxChunk).entries()) {
+        n += chunks.length;
+        if (n > at.utterance) return ps[i];
+      }
+      return ps[ps.length - 1];
+    };
+    let p = find();
+    if (!p) {
+      if (!(await this.jumpTo({ chapterId: at.chapterId, pageIndex: at.pageIndex, paragraphIndex: 0 }))) return;
+      p = find();
+    }
+    if (p) this.moveCursorTo(p.id, true);
+  }
+
   private setMediaPlaybackState(state: PlayerState): void {
     const ms = (navigator as Navigator & { mediaSession?: MediaSession }).mediaSession;
     if (!ms) return;

@@ -3,6 +3,7 @@
  */
 
 import type { Catalog, ChapterNav } from "../../src/adapters/types";
+import type { ChapterTimeline } from "../../src/speech/PageSpeechEngine";
 
 export type PageProvider = "gemini" | "fish";
 
@@ -102,6 +103,11 @@ export interface ChapterSegments {
   /** False while pages are still being fetched: more segments will follow. */
   complete: boolean;
   segments: { key: string; text: string; chars: number; ready: boolean }[];
+}
+
+/** A chapter's audio as one track (see src/speech/PageSpeechEngine ChapterTimeline); null until all of it is stored. */
+export interface TimelineResult {
+  timeline: ChapterTimeline | null;
 }
 
 export interface VolumeInfo {

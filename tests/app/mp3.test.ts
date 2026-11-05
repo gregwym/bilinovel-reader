@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { id3Size, id3Tag, isFrameStart, mp3Frames } from "../../app/server/audio/mp3";
+import { audioSeconds, id3Size, id3Tag, isFrameStart, mp3Frames } from "../../app/server/audio/mp3";
+import { pcmToWav } from "../../src/speech/PageSpeechEngine";
 
 /** A constant bitrate MPEG1 Layer III frame (128 kbps, 44.1 kHz, mono). */
 function frame(): Uint8Array {
@@ -27,5 +28,15 @@ describe("mp3", () => {
     expect(mp3Frames(new Uint8Array(100))).toBeUndefined();
     // Cut off mid-frame: not joined as is.
     expect(mp3Frames(data.subarray(0, data.length - 10))).toBeUndefined();
+  });
+
+  it("tells how long an MP3 or WAV plays", async () => {
+    const data = new Uint8Array(4 * 417);
+    for (let i = 0; i < 4; i++) data.set(frame(), i * 417);
+    expect(audioSeconds(data)).toBeCloseTo((4 * 1152) / 44100);
+    // 1.5 s of 16-bit mono PCM at 24 kHz.
+    const wav = new Uint8Array(await pcmToWav(new Uint8Array(72000), 24000).arrayBuffer());
+    expect(audioSeconds(wav)).toBeCloseTo(1.5);
+    expect(audioSeconds(new Uint8Array(50))).toBeUndefined();
   });
 });
