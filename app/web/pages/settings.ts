@@ -351,7 +351,7 @@ export function settingsPage(): Page {
         chapterNo: "001",
         chapterId: "56789",
       };
-      const base = `${stats.libraryDir}/${template.value.replace(/\{(\w+)\}/g, (m, k: string) => sample[k] ?? m)}`;
+      const base = `${stats.libraryDir}/作者/书名/${template.value.replace(/\{(\w+)\}/g, (m, k: string) => sample[k] ?? m)}`;
       preview.textContent = `例：${base}.mp3（正文 ${base.split("/").pop()}.md 和插图在同一文件夹）`;
     };
     template.addEventListener("input", showPreview);
@@ -402,7 +402,11 @@ export function settingsPage(): Page {
       h(
         "label",
         { class: "field" },
-        h("span", {}, "文件路径模板：{author} {book} {bookId} {volume} {volumeNo} {chapter} {chapterNo} {chapterId}"),
+        h(
+          "span",
+          {},
+          "书内文件路径模板（每本书的文件夹固定为「作者/书名」，书的数据也在里面）：{volume} {volumeNo} {chapter} {chapterNo} {chapterId} {book} {author} {bookId}",
+        ),
         template,
         preview,
       ),

@@ -187,11 +187,32 @@ export class Library {
     this.listeners.forEach((fn) => fn(bookId, chapterId));
   }
 
+  /**
+   * The book's folder, relative to the library: always `author/book`, so a
+   * book's files and its data (see backup.ts) are together in one folder. A
+   * book with the same author and title as one added before gets its id in
+   * the folder name.
+   */
+  bookDir(book: Pick<BookRow, "id" | "title" | "author" | "added_at">): string {
+    const author = safeName(book.author, "未知作者");
+    const plain = `${author}/${safeName(book.title, book.id)}`;
+    const taken = this.db
+      .all<Pick<BookRow, "id" | "title" | "author">>(
+        "select id, title, author from books where id != ? and (added_at < ? or (added_at = ? and id < ?))",
+        book.id,
+        book.added_at,
+        book.added_at,
+        book.id,
+      )
+      .some((b) => `${safeName(b.author, "未知作者")}/${safeName(b.title, b.id)}` === plain);
+    return taken ? `${author}/${[...safeName(book.title, book.id)].slice(0, 70).join("")} (${book.id})` : plain;
+  }
+
   /** The chapter's path relative to the library without an extension (its files are this plus `.mp3`, `.md`). */
   chapterBase(book: BookRow, chapterId: string, template = this.settings.get().storageTemplate): string | undefined {
     const place = findChapter(bookCatalog(book), chapterId);
     if (!place) return undefined;
-    return renderTemplate(template, {
+    return `${this.bookDir(book)}/` + renderTemplate(template, {
       author: book.author,
       book: book.title,
       bookId: book.id,
@@ -365,7 +386,8 @@ export class Library {
     await this.pruneDirs(dirname(file));
   }
 
-  private async pruneDirs(dir: string): Promise<void> {
+  /** Deletes `dir` (absolute) and the folders above it that are left empty (or with only a cover). */
+  async pruneDirs(dir: string): Promise<void> {
     while (dir.startsWith(this.dir + sep)) {
       let entries: string[];
       try {
@@ -440,9 +462,11 @@ export class Library {
     return result;
   }
 
-  /** Moves every file to where the current storage template puts it. */
-  async relayout(): Promise<RescanResult> {
-    const rows = this.db.all<ChapterAudioRow>("select * from chapter_audio");
+  /** Moves every file (or a book's) to where the current storage template puts it. */
+  async relayout(bookId?: string): Promise<RescanResult> {
+    const rows = bookId
+      ? this.db.all<ChapterAudioRow>("select * from chapter_audio where book_id = ?", bookId)
+      : this.db.all<ChapterAudioRow>("select * from chapter_audio");
     const result: RescanResult = { checked: rows.length, missing: 0, moved: 0, texts: 0 };
     for (const row of rows) {
       const book = this.book(row.book_id);

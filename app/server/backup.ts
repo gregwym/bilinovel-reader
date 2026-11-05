@@ -15,9 +15,11 @@ import type { SiteSource } from "./site/source";
  * the data a new install needs to read and listen from the library alone —
  * book details, catalog, reading position, the cached pages exactly as
  * parsed (the spoken text and so the audio's keys are built from them), and
- * where each audio segment is inside its chapter file. That data is in
- * `.bili-reader/<book id>/` at the top of the library, where the storage
- * template can't put anything; it is read back when the database lacks it.
+ * where each audio segment is inside its chapter file. That data is in the
+ * book's folder (`author/book/.bili-reader/`, a name the storage template
+ * can't make), so a book's folder holds the whole book; the reader's settings
+ * are in `.bili-reader/` at the top of the library. It is read back when the
+ * database lacks it.
  */
 
 export const BACKUP_DIR = ".bili-reader";
@@ -136,12 +138,45 @@ export class Backup {
     return this.library.abs(rel);
   }
 
-  private metaDir(bookId: string): string {
-    return join(this.library.dir, BACKUP_DIR, bookId);
+  private dirKey = (bookId: string) => `backup.dir:${bookId}`;
+
+  /** The book's data folder (absolute): in the book's folder where it was last written, else where it goes. */
+  private metaDir(bookId: string): string | undefined {
+    const book = this.library.book(bookId);
+    const folder = this.db.getKv(this.dirKey(bookId)) ?? (book && this.library.bookDir(book));
+    return folder && join(this.abs(folder), BACKUP_DIR);
   }
 
-  private chapterFile(bookId: string, chapterId: string): string {
-    return join(this.metaDir(bookId), "chapters", `${chapterId}.json`);
+  private chapterFile(bookId: string, chapterId: string): string | undefined {
+    const dir = this.metaDir(bookId);
+    return dir && join(dir, "chapters", `${chapterId}.json`);
+  }
+
+  /**
+   * Keeps the book's data in its folder: when the folder changes (the book
+   * was renamed on the site), the data and the audio move to the new one.
+   */
+  private async ensureFolder(book: BookRow): Promise<string> {
+    const folder = this.library.bookDir(book);
+    const prev = this.db.getKv(this.dirKey(book.id));
+    if (prev === folder) return join(this.abs(folder), BACKUP_DIR);
+    const meta = join(this.abs(folder), BACKUP_DIR);
+    if (prev) {
+      const old = join(this.abs(prev), BACKUP_DIR);
+      if (existsSync(old)) {
+        if (existsSync(meta)) await rm(old, { recursive: true, force: true });
+        else {
+          await mkdir(this.abs(folder), { recursive: true });
+          await rename(old, meta);
+        }
+      }
+    }
+    this.db.setKv(this.dirKey(book.id), folder);
+    if (prev) {
+      await this.library.relayout(book.id);
+      await this.library.pruneDirs(this.abs(prev));
+    }
+    return meta;
   }
 
   /** Runs backup work one task at a time; a failure is logged and gives `fallback`. */
@@ -236,20 +271,29 @@ export class Backup {
       for (const row of this.db.all<{ file: string }>("select file from chapter_backup where book_id = ?", bookId)) {
         await this.library.removeFile(row.file);
       }
-      await rm(this.metaDir(bookId), { recursive: true, force: true });
+      const folder = this.db.getKv(this.dirKey(bookId));
+      if (folder) {
+        await rm(join(this.abs(folder), BACKUP_DIR), { recursive: true, force: true });
+        await this.library.pruneDirs(this.abs(folder));
+      }
+      this.db.setKv(this.dirKey(bookId), undefined);
       this.db.run("delete from backup_images where book_id = ?", bookId);
       this.db.run("delete from chapter_backup where book_id = ?", bookId);
     }, undefined);
   }
 
-  /** A page as saved in the library (when the database and the site don't have it). */
-  page(bookId: string, chapterId: string, pageIndex: number): { fetchedAt: number; page: PageContent } | undefined {
+  private readChapter(file: string | undefined): ChapterBackup | undefined {
     try {
-      const data = JSON.parse(readFileSync(this.chapterFile(bookId, chapterId), "utf8")) as ChapterBackup;
-      return data.pages.find((p) => p.page.pageIndex === pageIndex);
+      const data = file ? (JSON.parse(readFileSync(file, "utf8")) as ChapterBackup) : undefined;
+      return data?.format === FORMAT ? data : undefined;
     } catch {
       return undefined;
     }
+  }
+
+  /** A page as saved in the library (when the database and the site don't have it). */
+  page(bookId: string, chapterId: string, pageIndex: number): { fetchedAt: number; page: PageContent } | undefined {
+    return this.readChapter(this.chapterFile(bookId, chapterId))?.pages.find((p) => p.page.pageIndex === pageIndex);
   }
 
   private async writeBookAll(bookId: string): Promise<number> {
@@ -281,7 +325,7 @@ export class Backup {
       ahead: book.ahead,
       ...(progress ? { progress } : {}),
     };
-    const dir = this.metaDir(bookId);
+    const dir = await this.ensureFolder(book);
     const cover = this.library.coverFile(bookId);
     if (existsSync(cover)) {
       const target = join(dir, "cover.jpg");
@@ -300,8 +344,22 @@ export class Backup {
     const place = book && findChapter(bookCatalog(book), chapterId);
     const base = book && this.library.chapterBase(book, chapterId);
     if (!book || !place || !base) return false;
-    const { pages, complete } = this.source.cachedChapterPages(bookId, chapterId);
-    if (!complete || !pages.length) return false;
+    const meta = await this.ensureFolder(book);
+    const jsonFile = join(meta, "chapters", `${chapterId}.json`);
+    const cached = this.source.cachedChapterPages(bookId, chapterId);
+    let pages = cached.pages;
+    const fetched = new Map(
+      this.db
+        .all<{ page_index: number; fetched_at: number }>("select page_index, fetched_at from pages where book_id = ? and chapter_id = ?", bookId, chapterId)
+        .map((r) => [r.page_index, r.fetched_at]),
+    );
+    if (!cached.complete || !pages.length) {
+      // Not cached (any more): what the library has is written again, e.g. at a new place.
+      const saved = this.readChapter(jsonFile);
+      if (!saved?.pages.length) return false;
+      pages = saved.pages.map((p) => p.page);
+      for (const p of saved.pages) fetched.set(p.page.pageIndex, p.fetchedAt);
+    }
     const incomplete = pages.some((p) => p.incomplete);
     const old = this.db.get<BackupRow>("select * from chapter_backup where book_id = ? and chapter_id = ?", bookId, chapterId);
     // A complete copy is kept when the site later sends only part of the chapter.
@@ -312,11 +370,6 @@ export class Backup {
     const local = new Map(images.saved.map((i) => [i.url, `${folder}/${i.file.split("/").pop()}`]));
     const md = chapterMarkdown(place.chapterTitle, pages, (url) => local.get(url) ?? url);
     const mdRel = `${base}.md`;
-    const fetched = new Map(
-      this.db
-        .all<{ page_index: number; fetched_at: number }>("select page_index, fetched_at from pages where book_id = ? and chapter_id = ?", bookId, chapterId)
-        .map((r) => [r.page_index, r.fetched_at]),
-    );
     const data: ChapterBackup = {
       format: FORMAT,
       bookId,
@@ -330,7 +383,6 @@ export class Backup {
     };
     const json = JSON.stringify(data);
     const hash = sha1(json);
-    const jsonFile = this.chapterFile(bookId, chapterId);
     if (old && old.hash === hash && old.file === mdRel && existsSync(this.abs(mdRel)) && existsSync(jsonFile) && !images.written) {
       return false;
     }
@@ -438,33 +490,43 @@ export class Backup {
    * only when the site doesn't give it (see `page`).
    */
   restore(): { books: number; chapters: number } {
-    const root = join(this.library.dir, BACKUP_DIR);
     const result = { books: 0, chapters: 0 };
     this.restoreSettings();
-    let ids: string[];
-    try {
-      ids = readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
-    } catch {
-      return result;
-    }
-    for (const id of ids) {
+    const dirs = (dir: string) => {
       try {
-        const added = this.restoreBook(id);
-        if (added) result.books++;
-        result.chapters += this.restoreChapters(id, !added);
-      } catch (err) {
-        console.warn(`[backup] restoring ${id}:`, err instanceof Error ? err.message : String(err));
+        return readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith(".")).map((e) => e.name);
+      } catch {
+        return [];
+      }
+    };
+    // Book folders are `author/book`.
+    for (const author of dirs(this.library.dir)) {
+      for (const title of dirs(join(this.library.dir, author))) {
+        const folder = `${author}/${title}`;
+        const meta = join(this.abs(folder), BACKUP_DIR);
+        if (!existsSync(join(meta, "book.json"))) continue;
+        try {
+          const book = this.restoreBook(folder, meta);
+          if (!book) continue;
+          if (book.added) result.books++;
+          result.chapters += this.restoreChapters(book.id, meta, !book.added);
+        } catch (err) {
+          console.warn(`[backup] restoring ${folder}:`, err instanceof Error ? err.message : String(err));
+        }
       }
     }
     return result;
   }
 
-  private restoreBook(id: string): boolean {
-    const file = join(this.metaDir(id), "book.json");
-    if (!existsSync(file)) return false;
-    const b = JSON.parse(readFileSync(file, "utf8")) as BookBackup;
-    if (b.format !== FORMAT || b.id !== id) return false;
-    let restored = false;
+  private restoreBook(folder: string, meta: string): { id: string; added: boolean } | undefined {
+    const b = JSON.parse(readFileSync(join(meta, "book.json"), "utf8")) as BookBackup;
+    const id = b.id;
+    if (b.format !== FORMAT || !/^\d+$/.test(String(id))) return undefined;
+    const saved = this.db.getKv(this.dirKey(id));
+    // Another folder already holds this book's data (a copy): that one stays.
+    if (saved && saved !== folder && existsSync(join(this.abs(saved), BACKUP_DIR, "book.json"))) return undefined;
+    this.db.setKv(this.dirKey(id), folder);
+    let added = false;
     if (!this.library.book(id)) {
       this.db.run(
         `insert into books (id, title, author, cover_url, intro, catalog, catalog_at, added_at, read_at, follow, ahead)
@@ -481,9 +543,9 @@ export class Backup {
         b.follow ? 1 : 0,
         b.ahead,
       );
-      restored = true;
+      added = true;
     }
-    const cover = join(this.metaDir(id), "cover.jpg");
+    const cover = join(meta, "cover.jpg");
     const target = this.library.coverFile(id);
     if (existsSync(cover) && !existsSync(target)) {
       mkdirSync(dirname(target), { recursive: true });
@@ -493,7 +555,7 @@ export class Backup {
       const all = this.db.getJson<Record<string, SavedProgress>>(PROGRESS_KEY) ?? {};
       if (!all[id]) this.db.setJson(PROGRESS_KEY, { ...all, [id]: b.progress });
     }
-    return restored;
+    return { id, added };
   }
 
   /**
@@ -501,8 +563,8 @@ export class Backup {
    * pages, and its chapters with a backup row written since their data file
    * changed are skipped.
    */
-  private restoreChapters(bookId: string, known: boolean): number {
-    const dir = join(this.metaDir(bookId), "chapters");
+  private restoreChapters(bookId: string, meta: string, known: boolean): number {
+    const dir = join(meta, "chapters");
     let files: string[];
     try {
       files = readdirSync(dir).filter((f) => f.endsWith(".json"));

@@ -178,9 +178,9 @@ describe("library server", () => {
     await services.backup.idle();
     const all = execFileSync("find", [join(dir, "library"), "-type", "f"]).toString().trim().split("\n").sort();
     expect(all.map((f) => f.slice(join(dir, "library").length + 1))).toEqual([
-      ".bili-reader/5369/book.json",
-      ".bili-reader/5369/chapters/180204.json",
-      ".bili-reader/5369/cover.jpg",
+      "测试作者/测试轻小说/.bili-reader/book.json",
+      "测试作者/测试轻小说/.bili-reader/chapters/180204.json",
+      "测试作者/测试轻小说/.bili-reader/cover.jpg",
       "测试作者/测试轻小说/01 第一卷 开始/004 第四章 分页的章节.md",
       "测试作者/测试轻小说/01 第一卷 开始/004 第四章 分页的章节.mp3",
       "测试作者/测试轻小说/01 第一卷 开始/cover.jpg",
@@ -384,20 +384,23 @@ describe("library server", () => {
   });
 
   it.skipIf(!hasFfmpeg)("moves files when the storage template changes", async () => {
-    await send("PUT", "/api/settings", { storageTemplate: "{book}/{volumeNo}-{chapterNo} {chapter}" });
+    // A template from before the book's folder was fixed: only the part inside it is kept.
+    await send("PUT", "/api/settings", { storageTemplate: "{author}/{book}/{volumeNo}-{chapterNo} {chapter}" });
+    expect((await json<{ storageTemplate: string }>(call("/api/settings"))).storageTemplate).toBe("{volumeNo}-{chapterNo} {chapter}");
     const r = await json<{ moved: number }>(send("POST", "/api/library/relayout"));
     expect(r.moved).toBe(1);
-    expect(existsSync(join(dir, "library", "测试轻小说", "01-004 第四章 分页的章节.mp3"))).toBe(true);
-    expect(existsSync(join(dir, "library", "测试轻小说", "01-004 第四章 分页的章节.md"))).toBe(true);
-    expect(existsSync(join(dir, "library", "测试作者"))).toBe(false);
+    const book = join(dir, "library", "测试作者", "测试轻小说");
+    expect(existsSync(join(book, "01-004 第四章 分页的章节.mp3"))).toBe(true);
+    expect(existsSync(join(book, "01-004 第四章 分页的章节.md"))).toBe(true);
+    expect(existsSync(join(book, "01 第一卷 开始"))).toBe(false);
     // The chapter's data follows its audio.
-    const data = JSON.parse(readFileSync(join(dir, "library", ".bili-reader", "5369", "chapters", "180204.json"), "utf8")) as ChapterBackup;
-    expect(data.audio?.file).toBe("测试轻小说/01-004 第四章 分页的章节.mp3");
+    const data = JSON.parse(readFileSync(join(dir, "library", "测试作者", "测试轻小说", ".bili-reader", "chapters", "180204.json"), "utf8")) as ChapterBackup;
+    expect(data.audio?.file).toBe("测试作者/测试轻小说/01-004 第四章 分页的章节.mp3");
     expect(data.audio?.segments).toHaveLength(3);
   });
 
   it.skipIf(!hasFfmpeg)("keeps each chapter's text in the library as Markdown, with its illustrations", async () => {
-    const file = (name: string) => join(dir, "library", "测试轻小说", name);
+    const file = (name: string) => join(dir, "library", "测试作者", "测试轻小说", name);
     const chapter = file("01-004 第四章 分页的章节.md");
     const md = readFileSync(chapter, "utf8");
     expect(md.startsWith("# 第四章 分页的章节\n\n")).toBe(true);
@@ -425,11 +428,28 @@ describe("library server", () => {
     expect(existsSync(chapter)).toBe(true);
   });
 
+  it.skipIf(!hasFfmpeg)("moves a renamed book's folder with its data and audio", async () => {
+    const lib = join(dir, "library", "测试作者");
+    services.db.run("update books set title = '改名的书' where id = '5369'");
+    await services.backup.saveBook("5369");
+    expect(existsSync(join(lib, "改名的书", ".bili-reader", "book.json"))).toBe(true);
+    expect(existsSync(join(lib, "改名的书", "01-004 第四章 分页的章节.mp3"))).toBe(true);
+    expect(existsSync(join(lib, "改名的书", "01-004 第四章 分页的章节.md"))).toBe(true);
+    expect(existsSync(join(lib, "测试轻小说"))).toBe(false);
+    expect((await call("/api/books/5369/chapters/180204/audio")).status).toBe(200);
+    // A second book with the same author and title gets its id in the folder name.
+    const book = services.library.book("5369")!;
+    expect(services.library.bookDir({ ...book, id: "9999", added_at: book.added_at + 1 })).toBe("测试作者/改名的书 (9999)");
+    services.db.run("update books set title = '测试轻小说' where id = '5369'");
+    await services.backup.saveBook("5369");
+    expect(existsSync(join(lib, "改名的书"))).toBe(false);
+  });
+
   it.skipIf(!hasFfmpeg)("reads and plays from the library alone in a new install", async () => {
     const progress = { "5369": { chapterId: "180204", pageIndex: 1, paragraphIndex: 2, updatedAt: Date.now() } };
     await send("PUT", "/api/kv/biliReader.progress", { value: JSON.stringify(progress) });
     await services.backup.saveAll();
-    const image = (JSON.parse(readFileSync(join(dir, "library", ".bili-reader", "5369", "chapters", "180205.json"), "utf8")) as ChapterBackup).images[0];
+    const image = (JSON.parse(readFileSync(join(dir, "library", "测试作者", "测试轻小说", ".bili-reader", "chapters", "180205.json"), "utf8")) as ChapterBackup).images[0];
 
     // A new data folder (no database, no cache) and a site that is gone.
     const config = loadConfig({ DATA_DIR: join(dir, "data2"), LIBRARY_DIR: join(dir, "library"), WEB_DIR: join(dir, "web"), FISH_API_KEY: "fish-key" }, dir);
