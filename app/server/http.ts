@@ -10,8 +10,9 @@ import { parseChapterUrl } from "../../src/adapters/bilinovel/url";
 import { SpeechEngineError } from "../../src/speech/SpeechEngine";
 import { GEMINI_VOICES } from "../../src/speech/GeminiSpeechEngine";
 import { listFishVoices } from "../../src/speech/FishSpeechEngine";
+import { segmentKey, type TimelineSegment } from "../../src/speech/PageSpeechEngine";
 import { mergeProgress, type SavedProgress } from "../../src/reader/ProgressStore";
-import type { AppInfo, BookVoices, ChapterSegments, GenerateResult, PageProvider, ServerSettingsUpdate } from "../shared/api";
+import type { AppInfo, BookVoices, ChapterSegments, GenerateResult, PageProvider, ServerSettingsUpdate, TimelineResult } from "../shared/api";
 import type { Db } from "./db";
 import type { Config, Settings } from "./config";
 import type { SiteClient } from "./site/client";
@@ -443,6 +444,32 @@ export function createApp(d: AppDeps): Hono {
       return { key, text: text.slice(0, 80), chars: text.length, ready: !!d.tts.stored(shown.provider, key) };
     });
     return c.json({ provider: shown.provider, voice, voices, complete, segments } satisfies ChapterSegments);
+  });
+
+  /**
+   * A chapter's audio in one voice (`prefix`, its cache key) as one track:
+   * every segment with how long it plays, for the reader to show and seek the
+   * chapter as a whole. `timeline` is null until the chapter's text and all
+   * its audio are stored.
+   */
+  app.get("/api/books/:id/chapters/:chapter/timeline", async (c) => {
+    const provider = c.req.query("provider") ?? "";
+    const prefix = c.req.query("prefix") ?? "";
+    if (!isProvider(provider) || !prefix) return c.json({ error: "缺少参数" }, 400);
+    const chapterId = c.req.param("chapter");
+    const { pages, complete } = d.source.cachedChapterPages(c.req.param("id"), chapterId);
+    const none = { timeline: null } satisfies TimelineResult;
+    if (!complete || !pages.length) return c.json(none);
+    const segments: TimelineSegment[] = [];
+    for (const part of d.tts.layout(provider, pages)) {
+      const key = segmentKey(prefix, part.texts);
+      const stored = d.tts.stored(provider, key);
+      const seconds = stored && (await d.tts.seconds(stored));
+      if (!seconds) return c.json(none);
+      segments.push({ key, pageIndex: part.pageIndex, first: part.first, seconds });
+    }
+    if (!segments.length) return c.json(none);
+    return c.json({ timeline: { chapterId, segments } } satisfies TimelineResult);
   });
 
   /** One segment of a chapter to download: its audio (`voice`, default the current one) or its text. */

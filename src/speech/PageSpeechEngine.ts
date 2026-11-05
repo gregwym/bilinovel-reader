@@ -3,6 +3,7 @@ import { log } from "../utils/log";
 import { sleep } from "../utils/async";
 import { SpeechEngineError, type SpeakOptions, type SpeechEngine } from "./SpeechEngine";
 import { silentWavUrl } from "./CloudSpeechEngine";
+import { audioSeconds } from "../utils/mp3";
 
 /**
  * Speech generated one site page at a time (Gemini, Fish Audio).
@@ -508,6 +509,31 @@ export interface PageContext {
   index: number;
 }
 
+/**
+ * A chapter's audio as one track: all its segments in order, so playback can
+ * be shown (and moved) as one chapter rather than a few minutes at a time.
+ */
+export interface ChapterTimeline {
+  chapterId: string;
+  segments: TimelineSegment[];
+}
+
+export interface TimelineSegment {
+  key: string;
+  /** Site page the segment is part of, and its first utterance's position among that page's utterances. */
+  pageIndex: number;
+  first: number;
+  /** Playing time; looked up in the store when missing. */
+  seconds?: number;
+}
+
+/** Where playback is in the chapter's track. */
+export interface TrackPosition {
+  duration: number;
+  position: number;
+  rate: number;
+}
+
 export interface PageEngineOptions {
   /** Page layout around a paragraph (`count` pages from its page on). */
   pages?(paragraphId: string, count: number): PageContext | undefined;
@@ -521,6 +547,17 @@ export interface PageEngineOptions {
   onStatus?(message: string): void;
   /** A request finished (usage changed) or the cache changed size. */
   onUsage?(cacheBytes: number): void;
+  /**
+   * The chapter holding a paragraph as one track (`prefix`: the voice's cache
+   * key), when all its pages are known; undefined otherwise.
+   */
+  timeline?(paragraphId: string, prefix: string): Promise<ChapterTimeline | undefined>;
+  /**
+   * Position in the chapter's track while its audio plays or is paused;
+   * undefined when the chapter isn't available as a whole (not all of it is
+   * stored yet), so only the segment's own position is known.
+   */
+  onTrack?(position: TrackPosition | undefined): void;
 }
 
 /** After a paragraph's end, keep the audio running this long for the player to ask for the next one. */
@@ -542,6 +579,10 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
   private guard?: ReturnType<typeof setTimeout>;
   private unlocked = false;
   private held = false;
+  /** The chapter's track while one of its segments plays: where that segment starts in it. */
+  private track?: { timeline: ChapterTimeline; offset: number; total: number };
+  /** Playing time of stored segments, by key. */
+  private readonly seconds = new Map<string, number>();
 
   constructor(
     private readonly backend: PageBackend<C>,
@@ -556,6 +597,9 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
     this.audio = options.audio ?? new Audio();
     this.audio.preload = "auto";
     this.store = options.store ?? new MemorySegmentStore();
+    for (const ev of ["loadedmetadata", "playing", "pause", "seeked", "ratechange"]) {
+      this.audio.addEventListener(ev, () => this.reportTrack());
+    }
   }
 
   /** Paragraphs are split only when one alone exceeds a request. */
@@ -615,7 +659,7 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
       }
       if (token !== this.token) return "cancelled";
     }
-    return this.playParagraph(seg, idx, rendered, options.rate, continuing);
+    return this.playParagraph(seg, idx, rendered, options.rate, continuing, options.paragraphId, cfg);
   }
 
   /** Stored audio only loads; only audio that isn't stored is said to be generated. */
@@ -778,6 +822,84 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
   }
 
   // -------------------------------------------------------------------------
+  // The chapter as one track
+
+  /** A new segment plays: where it is in its chapter's track (looked up again for another chapter). */
+  private async followTrack(seg: Segment, paragraphId: string | undefined, cfg: C | undefined): Promise<void> {
+    const known = this.track && this.placeIn(this.track.timeline, seg.key);
+    if (known) {
+      this.track = known;
+      this.reportTrack();
+      return;
+    }
+    this.track = undefined;
+    this.reportTrack();
+    if (!paragraphId || !cfg || !this.options.timeline) return;
+    const timeline = await this.options.timeline(paragraphId, this.backend.cacheKey(cfg)).catch(() => undefined);
+    const filled = timeline && (await this.withSeconds(timeline));
+    if (this.playing?.seg !== seg || !filled) return;
+    this.track = this.placeIn(filled, seg.key);
+    this.reportTrack();
+  }
+
+  private placeIn(timeline: ChapterTimeline, key: string): PageSpeechEngine<C>["track"] {
+    const at = timeline.segments.findIndex((s) => s.key === key);
+    if (at < 0) return undefined;
+    const sum = (list: TimelineSegment[]) => list.reduce((n, s) => n + (s.seconds ?? 0), 0);
+    return { timeline, offset: sum(timeline.segments.slice(0, at)), total: sum(timeline.segments) };
+  }
+
+  /** The timeline with every segment's playing time, or undefined when one isn't stored (yet). */
+  private async withSeconds(timeline: ChapterTimeline): Promise<ChapterTimeline | undefined> {
+    const segments: TimelineSegment[] = [];
+    for (const s of timeline.segments) {
+      let seconds = s.seconds ?? this.seconds.get(s.key);
+      if (seconds === undefined) {
+        const stored = await this.store.get(s.key).catch(() => undefined);
+        seconds = stored && audioSeconds(new Uint8Array(await stored.audio.arrayBuffer()));
+      }
+      if (!seconds || !Number.isFinite(seconds)) return undefined;
+      this.seconds.set(s.key, seconds);
+      segments.push({ ...s, seconds });
+    }
+    return segments.length ? { ...timeline, segments } : undefined;
+  }
+
+  private reportTrack(): void {
+    const t = this.track;
+    if (!t || !this.playing) return this.options.onTrack?.(undefined);
+    const now = Number.isFinite(this.audio.currentTime) ? this.audio.currentTime : 0;
+    this.options.onTrack?.({
+      duration: t.total,
+      position: Math.min(t.offset + now, t.total),
+      rate: this.audio.playbackRate || 1,
+    });
+  }
+
+  /**
+   * Where `seconds` into the chapter's track is: the chapter, page and
+   * utterance (counted as in the timeline) whose paragraph holds that moment.
+   */
+  async locate(seconds: number): Promise<{ chapterId: string; pageIndex: number; utterance: number } | undefined> {
+    const t = this.track;
+    if (!t) return undefined;
+    const list = t.timeline.segments;
+    let acc = 0;
+    for (const [i, s] of list.entries()) {
+      const len = s.seconds ?? 0;
+      if (seconds < acc + len || i === list.length - 1) {
+        const within = Math.max(0, seconds - acc);
+        const bounds = this.segments.get(s.key)?.done?.bounds ?? (await this.store.get(s.key).catch(() => undefined))?.bounds ?? [0, 1];
+        let idx = 0;
+        for (let b = 1; b < bounds.length - 1; b++) if (bounds[b] * len <= within) idx = b;
+        return { chapterId: t.timeline.chapterId, pageIndex: s.pageIndex, utterance: s.first + idx };
+      }
+      acc += len;
+    }
+    return undefined;
+  }
+
+  // -------------------------------------------------------------------------
   // Playback
 
   private settleCurrent(r: "done" | "cancelled"): void {
@@ -802,6 +924,8 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
     rendered: Rendered,
     rate: number,
     continuing: boolean,
+    paragraphId?: string,
+    cfg?: C,
   ): Promise<"done" | "cancelled"> {
     const audio = this.audio;
     this.clearGuard();
@@ -810,6 +934,7 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
       const url = URL.createObjectURL(rendered.audio);
       this.playing = { seg, idx, url, duration: NaN };
       audio.src = url;
+      void this.followTrack(seg, paragraphId, cfg);
     }
     const p = this.playing;
     p.idx = idx;
