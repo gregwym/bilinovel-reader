@@ -64,7 +64,9 @@ async function siteFetch(url: string): Promise<Response> {
   siteRequests.push(u.pathname);
   if (u.pathname.startsWith("/novel/7777")) await siteGate;
   if (/readpai\.com/.test(u.hostname)) {
-    return new Response(new Uint8Array(readFileSync(join(dir, "cover.png"))), { headers: { "content-type": "image/png" } });
+    // The first volume has its own cover in the catalog.
+    const image = u.pathname === "/5/5369/1.jpg" ? "volume.png" : "cover.png";
+    return new Response(new Uint8Array(readFileSync(join(dir, image))), { headers: { "content-type": "image/png" } });
   }
   const body = PAGES[u.pathname];
   return body ? new Response(body, { headers: { "content-type": "text/html" } }) : new Response("missing", { status: 404 });
@@ -98,6 +100,7 @@ beforeAll(() => {
   if (hasFfmpeg) {
     execFileSync("ffmpeg", ["-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-ac", "1", "-b:a", "32k", join(dir, "tone.mp3")]);
     execFileSync("ffmpeg", ["-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=60x80", "-frames:v", "1", join(dir, "cover.png")]);
+    execFileSync("ffmpeg", ["-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=60x80", "-frames:v", "1", join(dir, "volume.png")]);
     mp3 = readFileSync(join(dir, "tone.mp3"));
   }
   const config = loadConfig({ DATA_DIR: join(dir, "data"), LIBRARY_DIR: join(dir, "library"), WEB_DIR: join(dir, "web"), FISH_API_KEY: "fish-key" }, dir);
@@ -186,6 +189,26 @@ describe("library server", () => {
       "测试作者/测试轻小说/cover.jpg",
     ]);
     const files = all.filter((f) => f.endsWith(".mp3"));
+    // The volume's folder has the volume's own cover; the book's folder the book's.
+    await services.library.updateCovers("5369");
+    const bookDir = join(dir, "library", "测试作者", "测试轻小说");
+    const volumeCover = readFileSync(join(bookDir, "01 第一卷 开始", "cover.jpg"));
+    expect(volumeCover.equals(readFileSync(join(bookDir, "cover.jpg")))).toBe(false);
+    expect(volumeCover.equals(readFileSync(services.library.volumeCover(services.library.book("5369")!, 0)!))).toBe(true);
+    // The app shows it for the volume (table of contents, lock screen); a volume without one shows the book's.
+    const detailNow = await json<BookDetail>(call("/api/books/5369"));
+    expect(detailNow.volumes.map((v) => !!v.cover)).toEqual([true, false]);
+    const shown = Buffer.from(await (await call("/api/books/5369/volumes/0/cover")).arrayBuffer());
+    expect(shown.equals(volumeCover)).toBe(true);
+    const other = Buffer.from(await (await call("/api/books/5369/volumes/1/cover")).arrayBuffer());
+    expect(other.equals(readFileSync(services.library.coverFile("5369")))).toBe(true);
+    // Without it in the data folder (a new install), it is taken from the volume's folder, not the site.
+    const kept = services.library.volumeCover(services.library.book("5369")!, 0)!;
+    rmSync(kept);
+    const asked = siteRequests.length;
+    await services.library.updateCovers("5369");
+    expect(siteRequests.slice(asked)).not.toContain("/5/5369/1.jpg");
+    expect(readFileSync(kept).equals(volumeCover)).toBe(true);
     const audio = await call("/api/books/5369/chapters/180204/audio", { headers: { range: "bytes=0-99" } });
     expect(audio.status).toBe(206);
     expect((await audio.arrayBuffer()).byteLength).toBe(100);
@@ -418,6 +441,8 @@ describe("library server", () => {
     expect(links[0]).toBe("02-001 插图/01.png");
     for (const link of links) expect(existsSync(file(link))).toBe(true);
     expect((await services.library.stats()).textFiles).toBe(2);
+    // A volume without its own cover gets the book's.
+    expect(readFileSync(join(dirname(read), "cover.jpg")).equals(readFileSync(file("cover.jpg")))).toBe(true);
 
     // Deleting the cached text keeps the files; a deleted file is written again by "check files".
     await send("DELETE", "/api/books/5369/chapters/180205/pages");
@@ -481,7 +506,11 @@ describe("library server", () => {
       const img = await app2.request(`/api/img?url=${encodeURIComponent(image.url)}`);
       expect(img.status).toBe(200);
       expect(img.headers.get("content-type")).toBe("image/png");
-      expect(offline).toEqual([]);
+      await s2.library.updateCovers("5369");
+      // Nothing from the site; only the first volume's cover is asked for, as no volume folder holds it with this template.
+      expect([...new Set(offline)]).toEqual(["https://img3.readpai.com/5/5369/1.jpg"]);
+      // The storage template comes back too.
+      expect((await json<{ storageTemplate: string }>(app2.request("/api/settings"))).storageTemplate).toBe("{volumeNo}-{chapterNo} {chapter}");
       await s2.backup.idle();
     } finally {
       s2.db.close();

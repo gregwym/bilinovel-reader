@@ -3,6 +3,7 @@ import { DEFAULT_SETTINGS, type Settings } from "../../../src/reader/ProgressSto
 import { GEMINI_PRESET_MODELS, GEMINI_VOICES } from "../../../src/speech/GeminiSpeechEngine";
 import { FISH_MODELS } from "../../../src/speech/FishSpeechEngine";
 import type { AzureVoice } from "../../../src/speech/AzureSpeechEngine";
+import { bookTemplate } from "../../shared/template";
 import type { AppInfo, LibraryStats, PageProbe, PageProvider, RescanResult, ServerSettings, ServerSettingsUpdate, SiteFailure } from "../../shared/api";
 import { api } from "../api";
 import { offlineSupported, removeSaved, savedBooks, usage } from "../offline";
@@ -351,7 +352,8 @@ export function settingsPage(): Page {
         chapterNo: "001",
         chapterId: "56789",
       };
-      const base = `${stats.libraryDir}/作者/书名/${template.value.replace(/\{(\w+)\}/g, (m, k: string) => sample[k] ?? m)}`;
+      // As the server will store it (an old full template loses its {author}/{book}/ folders).
+      const base = `${stats.libraryDir}/作者/书名/${bookTemplate(template.value).replace(/\{(\w+)\}/g, (m, k: string) => sample[k] ?? m)}`;
       preview.textContent = `例：${base}.mp3（正文 ${base.split("/").pop()}.md 和插图在同一文件夹）`;
     };
     template.addEventListener("input", showPreview);

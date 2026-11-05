@@ -3,7 +3,7 @@
  *
  * Mobile theme (see Montaro2017/bili_novel_packer):
  *   .volume-chapters > li.chapter-bar     volume title
- *   .volume-chapters > li.volume-cover    volume cover (ignored)
+ *   .volume-chapters > li.volume-cover    volume cover (its image)
  *   .volume-chapters > li.jsChapter > a   chapter link; `href="javascript:…"`
  *                                         when the site has no link for it
  * Other layouts fall back to headings (`h2`/`h3`, `.v-line`) as volume titles
@@ -60,6 +60,11 @@ export function parseCatalogDocument(doc: Document, url: URL, bookId: string): C
       volumes.push(volume);
       continue;
     }
+    if (el.closest(".volume-cover")) {
+      const cover = coverOf(el, url);
+      if (volume && cover && !volume.cover) volume.cover = cover;
+      continue;
+    }
     const chapter = toChapter(el, url, bookId);
     if (!chapter) continue;
     if (chapter.chapterId) {
@@ -75,6 +80,13 @@ export function parseCatalogDocument(doc: Document, url: URL, bookId: string): C
   const nonEmpty = volumes.filter((v) => v.chapters.length);
   if (!nonEmpty.some((v) => v.chapters.some((c) => c.url))) throw new ParseError("Catalog has no chapters", url.href);
   return { bookId, volumes: nonEmpty };
+}
+
+/** The image of a volume's cover entry (lazy-loaded: `data-src`, not the placeholder). */
+function coverOf(el: Element, base: URL): string | undefined {
+  const img = el.querySelector("img");
+  const src = [img?.getAttribute("data-src"), img?.getAttribute("src")].find((s) => s && !/loading|lazy|blank/i.test(s));
+  return src ? resolveHref(src, base) : undefined;
 }
 
 function toChapter(a: Element, base: URL, bookId: string): CatalogChapter | undefined {

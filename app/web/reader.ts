@@ -18,6 +18,8 @@ import { api } from "./api";
  */
 
 const imageUrl = (url: string) => `/api/img?url=${encodeURIComponent(url)}`;
+/** A volume's cover through the server (its own, else the book's). */
+export const volumeCover = (bookId: string, volumeIndex: number) => `/api/books/${bookId}/volumes/${volumeIndex}/cover`;
 
 /** Replaces the site's origin with the app's (the reader mirrors page URLs in the address bar). */
 function local(url: string | undefined): string | undefined {
@@ -84,8 +86,16 @@ export class LibraryAdapter implements SiteAdapter {
     const catalog = await api.get<Catalog>(`/api/catalog/${bookId}`);
     return {
       ...catalog,
-      volumes: catalog.volumes.map((v) => ({ ...v, chapters: v.chapters.map((c) => ({ ...c, url: local(c.url) })) })),
+      volumes: catalog.volumes.map((v, vi) => ({
+        ...v,
+        cover: v.cover ? volumeCover(bookId, vi) : undefined,
+        chapters: v.chapters.map((c) => ({ ...c, url: local(c.url) })),
+      })),
     };
+  }
+
+  bookCover(bookId: string): string {
+    return `/api/books/${bookId}/cover`;
   }
 }
 

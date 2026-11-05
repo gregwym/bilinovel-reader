@@ -58,6 +58,29 @@ async function main(): Promise<void> {
 
 void main();
 
+/**
+ * After the server is updated, a page left open (an installed app on iOS
+ * stays in memory for days) still runs the old build, which may not match
+ * the server any more: it is reloaded once, when shown again. Not while
+ * reading, which would stop the audio.
+ */
+async function checkVersion(): Promise<void> {
+  if (!import.meta.env.PROD || /^\/novel\//.test(location.pathname)) return;
+  try {
+    const info = (await (await fetch("/api/info", { credentials: "same-origin", cache: "no-store" })).json()) as AppInfo;
+    if (!info.version || info.version === __VERSION__ || sessionStorage.getItem(RELOADED) === info.version) return;
+    sessionStorage.setItem(RELOADED, info.version);
+    location.reload();
+  } catch {
+    // Offline, or private mode: keep the page.
+  }
+}
+const RELOADED = "biliReader.reloadedFor";
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") void checkVersion();
+});
+void checkVersion();
+
 // Installable as an app (home screen / desktop); see public/sw.js.
 if ("serviceWorker" in navigator && import.meta.env.PROD) {
   window.addEventListener("load", () => void navigator.serviceWorker.register("/sw.js").catch(() => undefined));

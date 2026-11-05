@@ -359,6 +359,7 @@ export class Books {
       return {
         title: v.title,
         chapters,
+        cover: v.cover ? true : undefined,
         export: exp
           ? {
               bytes: exp.size,

@@ -20,6 +20,8 @@ describe("catalog", () => {
       "第四章 分页的章节",
     ]);
     expect(catalog.volumes[1].chapters.map((c) => c.chapterId)).toEqual(["180205", "180206"]);
+    // Each volume's cover, where the catalog shows one.
+    expect(catalog.volumes.map((v) => v.cover)).toEqual(["https://img3.readpai.com/5/5369/1.jpg", undefined]);
     expect(catalog.volumes[0].chapters[0]).toEqual({
       title: "序章",
       chapterId: "180201",

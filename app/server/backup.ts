@@ -31,6 +31,8 @@ const PROGRESS_KEY = "biliReader.progress";
  * name the stored audio.
  */
 const SETTINGS_KEYS = ["biliReader.settings", "server.geminiStyles"];
+/** Server settings, of which only the storage template is kept (the rest is about reaching the site, or secret). */
+const SERVER_SETTINGS_KEY = "server.settings";
 
 export interface BookBackup {
   format: number;
@@ -235,6 +237,8 @@ export class Backup {
       const v = this.db.getKv(key);
       if (v !== undefined) values[key] = v;
     }
+    const template = this.db.getJson<{ storageTemplate?: string }>(SERVER_SETTINGS_KEY)?.storageTemplate;
+    if (template) values.storageTemplate = template;
     if (!Object.keys(values).length) return false;
     const json = JSON.stringify({ format: FORMAT, values });
     const file = this.settingsFile();
@@ -249,6 +253,10 @@ export class Backup {
       if (saved.format !== FORMAT) return;
       for (const key of SETTINGS_KEYS) {
         if (typeof saved.values[key] === "string" && this.db.getKv(key) === undefined) this.db.setKv(key, saved.values[key]);
+      }
+      const server = this.db.getJson<Record<string, unknown>>(SERVER_SETTINGS_KEY) ?? {};
+      if (typeof saved.values.storageTemplate === "string" && server.storageTemplate === undefined) {
+        this.db.setJson(SERVER_SETTINGS_KEY, { ...server, storageTemplate: saved.values.storageTemplate });
       }
     } catch {
       // None saved yet.
@@ -389,7 +397,7 @@ export class Backup {
     }
     await writeAtomic(this.abs(mdRel), md);
     await writeAtomic(jsonFile, json);
-    await this.library.placeCover(bookId, dirname(this.abs(mdRel)));
+    await this.library.placeCover(book, dirname(this.abs(mdRel)), place.volumeIndex);
     if (old?.file && old.file !== mdRel) await this.library.removeFile(old.file);
     const bytes = Buffer.byteLength(md) + images.saved.reduce((n, i) => n + i.bytes, 0);
     this.db.run(

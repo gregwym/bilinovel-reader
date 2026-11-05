@@ -855,6 +855,15 @@ textarea {
   transform: rotate(90deg);
 }
 
+.volume > header .vol-cover {
+  width: 30px;
+  height: 42px;
+  flex: none;
+  object-fit: cover;
+  border-radius: 3px;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.2);
+}
+
 .volume > header .title {
   flex: 1;
   min-width: 0;

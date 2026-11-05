@@ -379,6 +379,8 @@ export class Reader implements PlaybackSource {
         this.view.setPlayerState(state, message);
         if (state === "idle") this.view.setActive(undefined);
         this.setMediaPlaybackState(state);
+        // The lock screen shows the volume's cover: the catalog says which.
+        if (state === "playing" && !this.catalog) void this.ensureCatalog().then((c) => c && this.updateMediaMetadata());
       },
       onParagraph: (id) => {
         this.view.setSelected(undefined);
@@ -772,7 +774,11 @@ export class Reader implements PlaybackSource {
     this.catalogLoading = this.adapter
       .fetchCatalog(bookId)
       .then(
-        (catalog) => (this.catalog = catalog),
+        (catalog) => {
+          this.catalog = catalog;
+          this.updateMediaMetadata();
+          return catalog;
+        },
         (err: unknown) => {
           log.error("catalog failed", err);
           this.catalogError = describeError(err).message;
@@ -1421,8 +1427,17 @@ export class Reader implements PlaybackSource {
   private updateMediaMetadata(chapterTitle?: string): void {
     const ms = (navigator as Navigator & { mediaSession?: MediaSession }).mediaSession;
     if (!ms || typeof MediaMetadata === "undefined") return;
+    const chapter = this.cursorId ? this.buffer.chapterOf(this.cursorId) : undefined;
+    const title = chapterTitle ?? chapter?.title;
+    const volume = chapter && this.catalog?.volumes.find((v) => v.chapters.some((c) => c.chapterId === chapter.chapterId));
+    const cover = volume?.cover ?? this.adapter.bookCover?.(this.buffer.bookId);
     try {
-      ms.metadata = new MediaMetadata({ title: chapterTitle || this.buffer.bookTitle, artist: this.buffer.bookTitle });
+      ms.metadata = new MediaMetadata({
+        title: title || this.buffer.bookTitle,
+        artist: this.buffer.bookTitle,
+        album: volume?.title || this.buffer.bookTitle,
+        artwork: cover ? [{ src: cover }] : [],
+      });
     } catch {
       /* ignore */
     }

@@ -34,8 +34,8 @@ export function createServices(config: Config, version: string, options: Service
   const source = new SiteSource(db, client, () => settings.get().siteOrigin);
   const ffmpeg = options.ffmpeg ?? new Ffmpeg(config.ffmpeg, config.ffprobe);
   const tts = new Tts(db, settings, ffmpeg, config.dataDir, config.libraryDir, options.request, options.sleep);
-  const library = new Library(db, settings, ffmpeg, tts, config.libraryDir, config.dataDir);
   const images = new Images(db, client, config.dataDir, config.libraryDir, () => `${settings.get().siteOrigin}/`);
+  const library = new Library(db, settings, ffmpeg, tts, images, config.libraryDir, config.dataDir);
   const backup = new Backup(db, library, source, images);
   source.setBackup((b, c, i) => backup.page(b, c, i));
   // A new install (or a lost database) reads back what the library holds.
@@ -49,7 +49,10 @@ export function createServices(config: Config, version: string, options: Service
     books.reconcile(id);
     void backup.saveChapter(id, chapterId);
   });
-  books.onCatalog((id) => void backup.saveBook(id));
+  books.onCatalog((id) => {
+    void backup.saveBook(id);
+    void library.updateCovers(id);
+  });
   books.onRemoved((id) => backup.removeBook(id));
   library.onChange((id, chapterId) => void backup.saveChapter(id, chapterId));
   // Upgrade existing libraries before the planner sees their reading positions.
@@ -57,6 +60,9 @@ export function createServices(config: Config, version: string, options: Service
   for (const book of books.list()) books.reconcile(book.id);
   // What was cached before (or changed while the server was down) into the library.
   void backup.saveAll();
+  void (async () => {
+    for (const book of books.list()) await library.updateCovers(book.id);
+  })();
   settings.onChange(() => {
     client.reset();
     jobs.unblock();

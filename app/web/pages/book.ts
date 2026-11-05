@@ -8,6 +8,7 @@ import { navigate } from "../router";
 import {
   act,
   cover,
+  coverArt,
   download,
   formatBytes,
   formatDuration,
@@ -116,7 +117,7 @@ export function bookPage({ id }: Record<string, string>): Page {
         title: ch.title,
         artist: book.author,
         album: book.title,
-        artwork: book.hasCover ? [{ src: `/api/books/${id}/cover`, type: "image/jpeg" }] : [],
+        artwork: coverArt(book, ch),
       });
     }
   };
@@ -354,6 +355,7 @@ export function bookPage({ id }: Record<string, string>): Page {
       "header",
       {},
       h("span", { class: "chev" }, icon("chevron")),
+      v.cover ? h("img", { class: "vol-cover", src: `/api/books/${id}/volumes/${vi}/cover`, alt: "", loading: "lazy" }) : null,
       h("span", { class: "title" }, v.title),
       offlineBadge(linked),
       done ? h("span", { class: done === linked.length ? "badge ok" : "badge" }, `🎧 ${done}/${linked.length}`) : h("span", { class: "count" }, `${linked.length} 章`),
