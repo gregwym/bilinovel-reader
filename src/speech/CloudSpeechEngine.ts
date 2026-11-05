@@ -2,6 +2,7 @@ import { httpRequest, type HttpRequest, type HttpResponse } from "../utils/http"
 import { log } from "../utils/log";
 import { sleep } from "../utils/async";
 import { SpeechEngineError, type SpeakOptions, type SpeechEngine } from "./SpeechEngine";
+import { EarlyPauseRetry } from "./earlyPause";
 
 /** A short silent WAV, used to unlock the audio element inside a user gesture. */
 export function silentWavUrl(): string {
@@ -59,6 +60,7 @@ export abstract class CloudSpeechEngine implements SpeechEngine {
   private token = 0;
   private unlocked = false;
   private held = false;
+  private readonly early = new EarlyPauseRetry();
 
   constructor(protected readonly options: CloudEngineOptions = {}) {
     this.request = options.request ?? httpRequest;
@@ -143,7 +145,12 @@ export abstract class CloudSpeechEngine implements SpeechEngine {
       // control): report it so the player shows "paused" instead of waiting forever.
       // A stale event from stopping the previous chunk arrives after play() and is ignored.
       const onPause = () => {
-        if (this.settle === settle && !this.held && audio.paused && !audio.ended) settle("cancelled");
+        if (this.settle !== settle || this.held || !audio.paused || audio.ended) return;
+        if (this.early.shouldRetry()) {
+          void audio.play().catch(() => this.settle === settle && settle("cancelled"));
+          return;
+        }
+        settle("cancelled");
       };
       audio.addEventListener("ended", onEnded);
       audio.addEventListener("error", onError);
@@ -152,6 +159,7 @@ export abstract class CloudSpeechEngine implements SpeechEngine {
       this.revokeUrl();
       this.objectUrl = URL.createObjectURL(blob);
       audio.src = this.objectUrl;
+      this.early.started();
       audio
         .play()
         .then(() => {
@@ -184,6 +192,7 @@ export abstract class CloudSpeechEngine implements SpeechEngine {
   resumeInPlace(): boolean {
     if (!this.held || !this.settle) return false;
     this.held = false;
+    this.early.started();
     void this.audio.play().catch(() => this.stop());
     return true;
   }
