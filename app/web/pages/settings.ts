@@ -351,7 +351,8 @@ export function settingsPage(): Page {
         chapterNo: "001",
         chapterId: "56789",
       };
-      preview.textContent = `例：${stats.libraryDir}/${template.value.replace(/\{(\w+)\}/g, (m, k: string) => sample[k] ?? m)}.mp3`;
+      const base = `${stats.libraryDir}/${template.value.replace(/\{(\w+)\}/g, (m, k: string) => sample[k] ?? m)}`;
+      preview.textContent = `例：${base}.mp3（正文 ${base.split("/").pop()}.txt 在同一文件夹）`;
     };
     template.addEventListener("input", showPreview);
     showPreview();
@@ -361,7 +362,7 @@ export function settingsPage(): Page {
       void act(saveTemplate, async () => {
         await api.put("/api/settings", { storageTemplate: template.value, defaultAhead: ahead });
         const r = await api.post<RescanResult>("/api/library/relayout");
-        toast(r.moved ? `已移动 ${r.moved} 个文件` : "已保存");
+        toast(r.moved || r.texts ? `已整理 ${r.moved + r.texts} 个文件` : "已保存");
         reload();
       }),
     );
@@ -369,7 +370,10 @@ export function settingsPage(): Page {
     rescan.addEventListener("click", () =>
       void act(rescan, async () => {
         const r = await api.post<RescanResult>("/api/library/rescan");
-        toast(`检查了 ${r.checked} 个文件${r.missing ? `，${r.missing} 个缺失（将重新生成）` : "，全部完好"}`);
+        toast(
+          `检查了 ${r.checked} 个音频文件${r.missing ? `，${r.missing} 个缺失（将重新生成）` : "，全部完好"}` +
+            (r.texts ? `；写入 ${r.texts} 个正文文件` : ""),
+        );
         reload();
       }),
     );
@@ -391,6 +395,7 @@ export function settingsPage(): Page {
         { class: "stats", style: "margin-bottom:12px" },
         h("div", {}, h("b", {}, String(stats.chapterFiles)), h("span", {}, "章节文件")),
         h("div", {}, h("b", {}, formatBytes(stats.libraryBytes)), h("span", {}, "有声书")),
+        h("div", {}, h("b", {}, String(stats.textFiles)), h("span", {}, "正文文件")),
         h("div", {}, h("b", {}, formatBytes(stats.segmentBytes + stats.cacheBytes)), h("span", {}, "缓存")),
       ),
       stats.ffmpeg ? null : h("div", { class: "banner error" }, "找不到 ffmpeg，无法生成章节音频。"),

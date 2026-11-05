@@ -80,6 +80,18 @@ const MIGRATIONS = [
   `select 1;`,
   // A chapter job that may voice a chapter the site sent only part of (the user confirmed it).
   `alter table jobs add column partial integer not null default 0;`,
+  // A chapter's text in the library next to its audio (source_at: newest cached page it was written from).
+  `
+  create table chapter_text (
+    book_id text not null,
+    chapter_id text not null,
+    file text not null,
+    bytes integer not null,
+    source_at integer not null,
+    updated_at integer not null,
+    primary key (book_id, chapter_id)
+  );
+  `,
 ];
 
 export type Row = Record<string, SQLInputValue>;

@@ -97,7 +97,7 @@ export class SiteSource {
   private readonly templates = new Map<string, Promise<ShuffleTemplate>>();
   private readonly catalogs = new Map<string, { at: number; catalog: Promise<SiteCatalog> }>();
   private readonly pending = new Map<string, Promise<PageContent>>();
-  private readonly pageListeners: ((bookId: string) => void)[] = [];
+  private readonly pageListeners: ((bookId: string, chapterId: string) => void)[] = [];
   private readonly failures: SiteFailure[] = [];
 
   constructor(
@@ -110,7 +110,7 @@ export class SiteSource {
     return buildPageUrl(this.origin(), bookId, chapterId, pageIndex);
   }
 
-  onPageCached(fn: (bookId: string) => void): void {
+  onPageCached(fn: (bookId: string, chapterId: string) => void): void {
     this.pageListeners.push(fn);
   }
 
@@ -227,7 +227,7 @@ export class SiteSource {
       JSON.stringify(page),
       Date.now(),
     );
-    this.pageListeners.forEach((fn) => fn(page.bookId));
+    this.pageListeners.forEach((fn) => fn(page.bookId, page.chapterId));
     return page;
   }
 

@@ -19,7 +19,7 @@ it("keeps every cached page when upgrading from a version before 0.10.21", () =>
   const raw = new DatabaseSync(file);
   const latest = Number((raw.prepare("pragma user_version").get() as { user_version: number }).user_version);
   // Back to the schema before the no-op migration (version 3), with pages from before and after 2026-11-04 04:10 UTC.
-  raw.exec("alter table jobs drop column partial; pragma user_version = 3");
+  raw.exec("alter table jobs drop column partial; drop table chapter_text; pragma user_version = 3");
   const add = raw.prepare("insert into pages values ('5370', ?, 0, '{}', ?)");
   add.run("288334", Date.parse("2026-11-03T12:00:00Z"));
   add.run("288458", Date.parse("2026-11-04T04:30:00Z"));
@@ -29,6 +29,6 @@ it("keeps every cached page when upgrading from a version before 0.10.21", () =>
   expect(db.all("select chapter_id from pages order by chapter_id")).toEqual([{ chapter_id: "288334" }, { chapter_id: "288458" }]);
   // The no-op keeps the deleting migration's number (4), so later ones keep theirs.
   expect(Number((db.sql.prepare("pragma user_version").get() as { user_version: number }).user_version)).toBe(latest);
-  expect(latest).toBe(5);
+  expect(latest).toBe(6);
   db.sql.close();
 });

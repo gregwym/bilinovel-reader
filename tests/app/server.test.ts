@@ -177,6 +177,7 @@ describe("library server", () => {
     const files = execFileSync("find", [join(dir, "library"), "-type", "f"]).toString().trim().split("\n").sort();
     expect(files.map((f) => f.slice(join(dir, "library").length + 1))).toEqual([
       "测试作者/测试轻小说/01 第一卷 开始/004 第四章 分页的章节.mp3",
+      "测试作者/测试轻小说/01 第一卷 开始/004 第四章 分页的章节.txt",
       "测试作者/测试轻小说/01 第一卷 开始/cover.jpg",
     ]);
     const audio = await call("/api/books/5369/chapters/180204/audio", { headers: { range: "bytes=0-99" } });
@@ -378,10 +379,35 @@ describe("library server", () => {
 
   it.skipIf(!hasFfmpeg)("moves files when the storage template changes", async () => {
     await send("PUT", "/api/settings", { storageTemplate: "{book}/{volumeNo}-{chapterNo} {chapter}" });
-    const r = await json<{ moved: number }>(send("POST", "/api/library/relayout"));
+    const r = await json<{ moved: number; texts: number }>(send("POST", "/api/library/relayout"));
     expect(r.moved).toBe(1);
+    expect(r.texts).toBe(1);
     expect(existsSync(join(dir, "library", "测试轻小说", "01-004 第四章 分页的章节.mp3"))).toBe(true);
+    expect(existsSync(join(dir, "library", "测试轻小说", "01-004 第四章 分页的章节.txt"))).toBe(true);
     expect(existsSync(join(dir, "library", "测试作者"))).toBe(false);
+  });
+
+  it.skipIf(!hasFfmpeg)("keeps each chapter's text in the library, whether voiced or not", async () => {
+    const file = (name: string) => join(dir, "library", "测试轻小说", name);
+    const chapter = file("01-004 第四章 分页的章节.txt");
+    // The same text as the chapter's .txt download.
+    const download = new Uint8Array(await (await call("/api/books/5369/chapters/180204/text")).arrayBuffer());
+    expect(new Uint8Array(readFileSync(chapter))).toEqual(download);
+
+    // A chapter that is only read (no audio) gets its text too, once all its pages are cached.
+    await call("/api/page?book=5369&chapter=180205&page=0");
+    const read = file("02-001 插图.txt");
+    await waitFor(() => existsSync(read));
+    expect(readFileSync(read, "utf8")).toContain("［插图］");
+    expect((await services.library.stats()).textFiles).toBe(2);
+
+    // Deleting the cached text keeps the file; a deleted file is written again by "check files".
+    await send("DELETE", "/api/books/5369/chapters/180205/pages");
+    expect(existsSync(read)).toBe(true);
+    rmSync(chapter);
+    const r = await json<{ texts: number }>(send("POST", "/api/library/rescan"));
+    expect(r.texts).toBe(1);
+    expect(existsSync(chapter)).toBe(true);
   });
 
   it.skipIf(!hasFfmpeg)("follows the reading position", async () => {

@@ -94,6 +94,13 @@ export class Books {
     this.recoveryListeners.push(fn);
   }
 
+  private readonly catalogListeners: ((bookId: string) => void)[] = [];
+
+  /** After a book's catalog is saved (chapters and their names may have changed). */
+  onCatalog(fn: (bookId: string) => void): void {
+    this.catalogListeners.push(fn);
+  }
+
   /** Startup/new-content backfill; catalog_at remains the upstream fetch time. */
   reconcile(id: string): void {
     const book = this.get(id);
@@ -110,6 +117,7 @@ export class Books {
         JSON.stringify(catalog), fetchedAt ?? null, id);
       if (recovered.length) this.recoveryListeners.forEach((fn) => fn(id, recovered));
     });
+    this.catalogListeners.forEach((fn) => fn(id));
   }
 
   /**
@@ -230,6 +238,7 @@ export class Books {
 
   async remove(id: string): Promise<void> {
     await this.library.deleteBookAudio(id);
+    await this.library.deleteBookText(id);
     this.db.tx(() => {
       this.db.run("delete from jobs where book_id = ? and status in ('queued', 'done', 'failed', 'cancelled')", id);
       this.db.run("update jobs set status = 'cancelled' where book_id = ? and status = 'running'", id);

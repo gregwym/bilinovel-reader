@@ -5,7 +5,7 @@ import { extname, join, normalize, sep } from "node:path";
 import { Readable } from "node:stream";
 import { Hono, type Context } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
-import { ContentUnavailableError, FetchError, ParseError, type PageContent } from "../../src/adapters/types";
+import { ContentUnavailableError, FetchError, ParseError } from "../../src/adapters/types";
 import { parseChapterUrl } from "../../src/adapters/bilinovel/url";
 import { SpeechEngineError } from "../../src/speech/SpeechEngine";
 import { GEMINI_VOICES } from "../../src/speech/GeminiSpeechEngine";
@@ -20,7 +20,7 @@ import type { SiteSource } from "./site/source";
 import type { Ffmpeg } from "./audio/ffmpeg";
 import { PROVIDERS, READER_SETTINGS_KEY, describeError, type Tts } from "./tts";
 import type { Library } from "./library";
-import { bookCatalog, findChapter, safeName } from "./library";
+import { bookCatalog, chapterText, findChapter, safeName, textFileContent } from "./library";
 import { PROGRESS_KEY, type Books } from "./books";
 import { READER_PRIORITY, type Jobs } from "./jobs";
 import type { Planner } from "./planner";
@@ -133,14 +133,8 @@ const disposition = (name: string) =>
   `attachment; filename="download${extname(name)}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 
 /** A chapter as plain text: its title, then one paragraph per line (images as a mark). */
-function chapterText(title: string, pages: PageContent[]): string {
-  const lines = pages.flatMap((p) => p.paragraphs).flatMap((p) => (p.text?.trim() ? [p.text.trim()] : p.imageUrl ? ["［插图］"] : []));
-  return [title, ...lines].join("\n\n");
-}
-
 const textResponse = (c: Context, text: string, name: string) =>
-  // A BOM and CRLF so older readers and Notepad show it right.
-  c.body(`\ufeff${text.replace(/\n/g, "\r\n")}`, 200, { "Content-Type": "text/plain; charset=utf-8", "Content-Disposition": disposition(name) });
+  c.body(textFileContent(text), 200, { "Content-Type": "text/plain; charset=utf-8", "Content-Disposition": disposition(name) });
 
 /** Image hosts the proxy refuses (the server's own network). */
 function privateHost(host: string): boolean {

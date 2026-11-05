@@ -32,15 +32,21 @@ export function createServices(config: Config, version: string, options: Service
   const source = new SiteSource(db, client, () => settings.get().siteOrigin);
   const ffmpeg = options.ffmpeg ?? new Ffmpeg(config.ffmpeg, config.ffprobe);
   const tts = new Tts(db, settings, ffmpeg, config.dataDir, config.libraryDir, options.request, options.sleep);
-  const library = new Library(db, settings, ffmpeg, tts, config.libraryDir, config.dataDir);
+  const library = new Library(db, settings, ffmpeg, tts, source, config.libraryDir, config.dataDir);
   const books = new Books(db, settings, source, client, library, tts, ffmpeg);
   const jobs = new Jobs(db, source, tts, library, ffmpeg);
   const planner = new Planner(books, jobs, tts, library, source);
   books.onRecovered((id, recovered) => jobs.recoverChapters(id, recovered));
-  source.onPageCached((id) => books.reconcile(id));
+  source.onPageCached((id, chapterId) => {
+    books.reconcile(id);
+    void library.saveText(id, chapterId);
+  });
+  books.onCatalog((id) => void library.saveText(id));
   // Upgrade existing libraries before the planner sees their reading positions.
   // This is idempotent and does not require fetching the catalog again.
   for (const book of books.list()) books.reconcile(book.id);
+  // Text of chapters cached before (or changed while the server was down) into the library.
+  void library.saveAllText();
   settings.onChange(() => {
     client.reset();
     jobs.unblock();

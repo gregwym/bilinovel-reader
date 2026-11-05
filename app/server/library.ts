@@ -1,7 +1,7 @@
 import { copyFile, mkdir, open, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join, sep } from "node:path";
-import type { Catalog } from "../../src/adapters/types";
+import type { Catalog, PageContent } from "../../src/adapters/types";
 import type { LibraryStats, RescanResult } from "../shared/api";
 import type { Db } from "./db";
 import type { Settings } from "./config";
@@ -9,6 +9,7 @@ import type { Ffmpeg, Tags } from "./audio/ffmpeg";
 import { id3Tag, mp3Frames, sameFormat, type Mp3Format } from "./audio/mp3";
 import type { StoredAudio, Tts } from "./tts";
 import type { PageProvider } from "../shared/api";
+import type { SiteSource } from "./site/source";
 
 /** A segment going into a chapter file. */
 export interface ChapterPart {
@@ -37,6 +38,26 @@ export interface BookRow {
   read_at: number | null;
   follow: number;
   ahead: number;
+}
+
+export interface ChapterTextRow {
+  book_id: string;
+  chapter_id: string;
+  file: string;
+  bytes: number;
+  source_at: number;
+  updated_at: number;
+}
+
+/** A chapter's text: its title, then each paragraph (an illustration as ［插图］). */
+export function chapterText(title: string, pages: PageContent[]): string {
+  const lines = pages.flatMap((p) => p.paragraphs).flatMap((p) => (p.text?.trim() ? [p.text.trim()] : p.imageUrl ? ["［插图］"] : []));
+  return [title, ...lines].join("\n\n");
+}
+
+/** A .txt file's content: a BOM and CRLF so older readers and Notepad show it right. */
+export function textFileContent(text: string): string {
+  return `\ufeff${text.replace(/\n/g, "\r\n")}`;
 }
 
 export interface ChapterAudioRow {
@@ -146,11 +167,15 @@ async function dirSize(dir: string): Promise<{ files: number; bytes: number }> {
 }
 
 export class Library {
+  /** Text writes, one at a time. */
+  private textQueue: Promise<unknown> = Promise.resolve();
+
   constructor(
     private readonly db: Db,
     private readonly settings: Settings,
     private readonly ffmpeg: Ffmpeg,
     private readonly tts: Tts,
+    private readonly source: SiteSource,
     readonly dir: string,
     private readonly dataDir: string,
   ) {}
@@ -161,9 +186,20 @@ export class Library {
 
   /** The chapter's path relative to the library (with `.mp3`), or undefined if it isn't in the catalog. */
   chapterPath(book: BookRow, chapterId: string, template = this.settings.get().storageTemplate): string | undefined {
+    const base = this.chapterBase(book, chapterId, template);
+    return base && `${base}.mp3`;
+  }
+
+  /** Where the chapter's text goes: next to its audio, as `.txt`. */
+  textPath(book: BookRow, chapterId: string): string | undefined {
+    const base = this.chapterBase(book, chapterId);
+    return base && `${base}.txt`;
+  }
+
+  private chapterBase(book: BookRow, chapterId: string, template = this.settings.get().storageTemplate): string | undefined {
     const place = findChapter(bookCatalog(book), chapterId);
     if (!place) return undefined;
-    const rel = renderTemplate(template, {
+    return renderTemplate(template, {
       author: book.author,
       book: book.title,
       bookId: book.id,
@@ -173,7 +209,6 @@ export class Library {
       chapterNo: place.chapterIndex + 1,
       chapterId,
     });
-    return `${rel}.mp3`;
   }
 
   abs(rel: string): string {
@@ -387,7 +422,7 @@ export class Library {
    */
   async rescan(): Promise<RescanResult> {
     const rows = this.db.all<ChapterAudioRow>("select * from chapter_audio");
-    const result: RescanResult = { checked: rows.length, missing: 0, moved: 0 };
+    const result: RescanResult = { checked: rows.length, missing: 0, moved: 0, texts: 0 };
     for (const row of rows) {
       if (!row.file || existsSync(this.abs(row.file))) continue;
       const book = this.book(row.book_id);
@@ -407,13 +442,15 @@ export class Library {
         result.missing++;
       }
     }
+    // Text files are written again from the cached text.
+    result.texts = await this.saveAllText();
     return result;
   }
 
   /** Moves every file to where the current storage template puts it. */
   async relayout(): Promise<RescanResult> {
     const rows = this.db.all<ChapterAudioRow>("select * from chapter_audio");
-    const result: RescanResult = { checked: rows.length, missing: 0, moved: 0 };
+    const result: RescanResult = { checked: rows.length, missing: 0, moved: 0, texts: 0 };
     for (const row of rows) {
       const book = this.book(row.book_id);
       const expected = book ? this.chapterPath(book, row.chapter_id) : undefined;
@@ -437,6 +474,7 @@ export class Library {
       this.tts.moved(row.file, expected);
       result.moved++;
     }
+    result.texts = await this.saveAllText();
     return result;
   }
 
@@ -444,17 +482,107 @@ export class Library {
     const lib = this.db.get<{ n: number; bytes: number }>("select count(*) as n, coalesce(sum(bytes), 0) as bytes from chapter_audio")!;
     const seg = this.db.get<{ n: number; bytes: number }>("select count(*) as n, coalesce(sum(bytes), 0) as bytes from segments where start is null")!;
     const books = this.db.get<{ n: number }>("select count(*) as n from books")!;
+    const text = this.db.get<{ n: number; bytes: number }>("select count(*) as n, coalesce(sum(bytes), 0) as bytes from chapter_text")!;
     const exports = await dirSize(join(this.dataDir, "exports"));
     return {
       books: books.n,
       chapterFiles: lib.n,
       libraryBytes: lib.bytes,
+      textFiles: text.n,
+      textBytes: text.bytes,
       segmentFiles: seg.n,
       segmentBytes: seg.bytes,
       cacheBytes: exports.bytes,
       libraryDir: this.dir,
       ffmpeg: await this.ffmpeg.check(),
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Text: each chapter's text as a .txt next to its audio, so the library is a
+  // whole backup of the books. Written from the cached pages once a chapter's
+  // pages are all there and complete; a file is kept when its cached text is
+  // deleted or the site later sends only part of it.
+
+  chapterTexts(bookId: string): ChapterTextRow[] {
+    return this.db.all<ChapterTextRow>("select * from chapter_text where book_id = ?", bookId);
+  }
+
+  /** Runs text work one task at a time; failures are logged and give `fallback`. */
+  private serial<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
+    const run = this.textQueue.then(fn).catch((err: unknown) => {
+      console.warn("[library] text:", err instanceof Error ? err.message : String(err));
+      return fallback;
+    });
+    this.textQueue = run;
+    return run;
+  }
+
+  /** Writes a chapter's text (or, without `chapterId`, the book's) if it is new or changed; resolves to how many files were written. */
+  saveText(bookId: string, chapterId?: string): Promise<number> {
+    return this.serial(async () => (chapterId ? Number(await this.writeText(bookId, chapterId)) : this.writeBookText(bookId)), 0);
+  }
+
+  /** Writes every book's text that is new, changed or missing on disk. */
+  saveAllText(): Promise<number> {
+    return this.serial(async () => {
+      let n = 0;
+      for (const { id } of this.db.all<{ id: string }>("select id from books")) n += await this.writeBookText(id);
+      return n;
+    }, 0);
+  }
+
+  private async writeBookText(bookId: string): Promise<number> {
+    const book = this.book(bookId);
+    let n = 0;
+    for (const vol of bookCatalog(book ?? { catalog: null })?.volumes ?? []) {
+      for (const ch of vol.chapters) if (ch.chapterId && (await this.writeText(bookId, ch.chapterId))) n++;
+    }
+    return n;
+  }
+
+  private async writeText(bookId: string, chapterId: string): Promise<boolean> {
+    const book = this.book(bookId);
+    const place = book && findChapter(bookCatalog(book), chapterId);
+    const rel = book && this.textPath(book, chapterId);
+    if (!book || !place || !rel) return false;
+    const at = this.db.get<{ t: number | null }>(
+      "select max(fetched_at) as t from pages where book_id = ? and chapter_id = ?",
+      bookId,
+      chapterId,
+    )?.t;
+    if (!at) return false;
+    const row = this.db.get<ChapterTextRow>("select * from chapter_text where book_id = ? and chapter_id = ?", bookId, chapterId);
+    const out = this.abs(rel);
+    if (row && row.file === rel && row.source_at >= at && existsSync(out)) return false;
+    const { pages, complete } = this.source.cachedChapterPages(bookId, chapterId);
+    if (!complete || !pages.length || pages.some((p) => p.incomplete)) return false;
+    const data = Buffer.from(textFileContent(chapterText(place.chapterTitle, pages)), "utf8");
+    await mkdir(dirname(out), { recursive: true });
+    await writeFile(`${out}.part`, data);
+    await rename(`${out}.part`, out);
+    await this.placeCover(bookId, dirname(out));
+    if (row?.file && row.file !== rel) await this.removeFile(row.file);
+    this.db.run(
+      `insert into chapter_text (book_id, chapter_id, file, bytes, source_at, updated_at) values (?, ?, ?, ?, ?, ?)
+       on conflict (book_id, chapter_id) do update set file = excluded.file, bytes = excluded.bytes,
+       source_at = excluded.source_at, updated_at = excluded.updated_at`,
+      bookId,
+      chapterId,
+      rel,
+      data.length,
+      at,
+      Date.now(),
+    );
+    return true;
+  }
+
+  /** Removes a book's text files (when the book is removed). */
+  deleteBookText(bookId: string): Promise<void> {
+    return this.serial(async () => {
+      for (const row of this.chapterTexts(bookId)) await this.removeFile(row.file);
+      this.db.run("delete from chapter_text where book_id = ?", bookId);
+    }, undefined);
   }
 
   /** Records a chapter that has nothing to read aloud (only illustrations). */
