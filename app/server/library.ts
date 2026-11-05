@@ -1,7 +1,7 @@
 import { copyFile, mkdir, open, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join, sep } from "node:path";
-import type { Catalog } from "../../src/adapters/types";
+import type { Catalog, PageContent } from "../../src/adapters/types";
 import type { LibraryStats, RescanResult } from "../shared/api";
 import type { Db } from "./db";
 import type { Settings } from "./config";
@@ -37,6 +37,17 @@ export interface BookRow {
   read_at: number | null;
   follow: number;
   ahead: number;
+}
+
+/** A chapter's text: its title, then each paragraph (an illustration as ［插图］). */
+export function chapterText(title: string, pages: PageContent[]): string {
+  const lines = pages.flatMap((p) => p.paragraphs).flatMap((p) => (p.text?.trim() ? [p.text.trim()] : p.imageUrl ? ["［插图］"] : []));
+  return [title, ...lines].join("\n\n");
+}
+
+/** A .txt file's content: a BOM and CRLF so older readers and Notepad show it right. */
+export function textFileContent(text: string): string {
+  return `\ufeff${text.replace(/\n/g, "\r\n")}`;
 }
 
 export interface ChapterAudioRow {
@@ -146,6 +157,8 @@ async function dirSize(dir: string): Promise<{ files: number; bytes: number }> {
 }
 
 export class Library {
+  private readonly listeners: ((bookId: string, chapterId: string) => void)[] = [];
+
   constructor(
     private readonly db: Db,
     private readonly settings: Settings,
@@ -161,9 +174,45 @@ export class Library {
 
   /** The chapter's path relative to the library (with `.mp3`), or undefined if it isn't in the catalog. */
   chapterPath(book: BookRow, chapterId: string, template = this.settings.get().storageTemplate): string | undefined {
+    const base = this.chapterBase(book, chapterId, template);
+    return base && `${base}.mp3`;
+  }
+
+  /** After a chapter's audio file is made, moved or deleted. */
+  onChange(fn: (bookId: string, chapterId: string) => void): void {
+    this.listeners.push(fn);
+  }
+
+  private changed(bookId: string, chapterId: string): void {
+    this.listeners.forEach((fn) => fn(bookId, chapterId));
+  }
+
+  /**
+   * The book's folder, relative to the library: always `author/book`, so a
+   * book's files and its data (see backup.ts) are together in one folder. A
+   * book with the same author and title as one added before gets its id in
+   * the folder name.
+   */
+  bookDir(book: Pick<BookRow, "id" | "title" | "author" | "added_at">): string {
+    const author = safeName(book.author, "未知作者");
+    const plain = `${author}/${safeName(book.title, book.id)}`;
+    const taken = this.db
+      .all<Pick<BookRow, "id" | "title" | "author">>(
+        "select id, title, author from books where id != ? and (added_at < ? or (added_at = ? and id < ?))",
+        book.id,
+        book.added_at,
+        book.added_at,
+        book.id,
+      )
+      .some((b) => `${safeName(b.author, "未知作者")}/${safeName(b.title, b.id)}` === plain);
+    return taken ? `${author}/${[...safeName(book.title, book.id)].slice(0, 70).join("")} (${book.id})` : plain;
+  }
+
+  /** The chapter's path relative to the library without an extension (its files are this plus `.mp3`, `.md`). */
+  chapterBase(book: BookRow, chapterId: string, template = this.settings.get().storageTemplate): string | undefined {
     const place = findChapter(bookCatalog(book), chapterId);
     if (!place) return undefined;
-    const rel = renderTemplate(template, {
+    return `${this.bookDir(book)}/` + renderTemplate(template, {
       author: book.author,
       book: book.title,
       bookId: book.id,
@@ -173,7 +222,6 @@ export class Library {
       chapterNo: place.chapterIndex + 1,
       chapterId,
     });
-    return `${rel}.mp3`;
   }
 
   abs(rel: string): string {
@@ -275,6 +323,7 @@ export class Library {
       row.duration,
       row.updated_at,
     );
+    this.changed(book.id, chapterId);
     return row;
   }
 
@@ -323,7 +372,7 @@ export class Library {
     }
   }
 
-  private async placeCover(bookId: string, dir: string): Promise<void> {
+  async placeCover(bookId: string, dir: string): Promise<void> {
     const cover = this.coverFile(bookId);
     const target = join(dir, "cover.jpg");
     if (!existsSync(cover) || existsSync(target)) return;
@@ -331,13 +380,14 @@ export class Library {
   }
 
   /** Deletes a library file and the folders it leaves empty (with only a cover). */
-  private async removeFile(rel: string): Promise<void> {
+  async removeFile(rel: string): Promise<void> {
     const file = this.abs(rel);
     await rm(file, { force: true });
     await this.pruneDirs(dirname(file));
   }
 
-  private async pruneDirs(dir: string): Promise<void> {
+  /** Deletes `dir` (absolute) and the folders above it that are left empty (or with only a cover). */
+  async pruneDirs(dir: string): Promise<void> {
     while (dir.startsWith(this.dir + sep)) {
       let entries: string[];
       try {
@@ -367,6 +417,7 @@ export class Library {
       await this.removeFile(row.file);
     }
     this.db.run("delete from chapter_audio where book_id = ? and chapter_id = ?", bookId, chapterId);
+    this.changed(bookId, chapterId);
   }
 
   /** Removes a book's audio (library files and exports). */
@@ -387,7 +438,7 @@ export class Library {
    */
   async rescan(): Promise<RescanResult> {
     const rows = this.db.all<ChapterAudioRow>("select * from chapter_audio");
-    const result: RescanResult = { checked: rows.length, missing: 0, moved: 0 };
+    const result: RescanResult = { checked: rows.length, missing: 0, moved: 0, texts: 0 };
     for (const row of rows) {
       if (!row.file || existsSync(this.abs(row.file))) continue;
       const book = this.book(row.book_id);
@@ -406,14 +457,17 @@ export class Library {
         this.db.run("delete from chapter_audio where book_id = ? and chapter_id = ?", row.book_id, row.chapter_id);
         result.missing++;
       }
+      this.changed(row.book_id, row.chapter_id);
     }
     return result;
   }
 
-  /** Moves every file to where the current storage template puts it. */
-  async relayout(): Promise<RescanResult> {
-    const rows = this.db.all<ChapterAudioRow>("select * from chapter_audio");
-    const result: RescanResult = { checked: rows.length, missing: 0, moved: 0 };
+  /** Moves every file (or a book's) to where the current storage template puts it. */
+  async relayout(bookId?: string): Promise<RescanResult> {
+    const rows = bookId
+      ? this.db.all<ChapterAudioRow>("select * from chapter_audio where book_id = ?", bookId)
+      : this.db.all<ChapterAudioRow>("select * from chapter_audio");
+    const result: RescanResult = { checked: rows.length, missing: 0, moved: 0, texts: 0 };
     for (const row of rows) {
       const book = this.book(row.book_id);
       const expected = book ? this.chapterPath(book, row.chapter_id) : undefined;
@@ -436,6 +490,7 @@ export class Library {
       );
       this.tts.moved(row.file, expected);
       result.moved++;
+      this.changed(row.book_id, row.chapter_id);
     }
     return result;
   }
@@ -444,11 +499,14 @@ export class Library {
     const lib = this.db.get<{ n: number; bytes: number }>("select count(*) as n, coalesce(sum(bytes), 0) as bytes from chapter_audio")!;
     const seg = this.db.get<{ n: number; bytes: number }>("select count(*) as n, coalesce(sum(bytes), 0) as bytes from segments where start is null")!;
     const books = this.db.get<{ n: number }>("select count(*) as n from books")!;
+    const text = this.db.get<{ n: number; bytes: number }>("select count(*) as n, coalesce(sum(bytes), 0) as bytes from chapter_backup")!;
     const exports = await dirSize(join(this.dataDir, "exports"));
     return {
       books: books.n,
       chapterFiles: lib.n,
       libraryBytes: lib.bytes,
+      textFiles: text.n,
+      textBytes: text.bytes,
       segmentFiles: seg.n,
       segmentBytes: seg.bytes,
       cacheBytes: exports.bytes,
@@ -468,5 +526,6 @@ export class Library {
       profile,
       Date.now(),
     );
+    this.changed(bookId, chapterId);
   }
 }

@@ -94,6 +94,13 @@ export class Books {
     this.recoveryListeners.push(fn);
   }
 
+  private readonly catalogListeners: ((bookId: string) => void)[] = [];
+
+  /** After a book's catalog is saved (chapters and their names may have changed). */
+  onCatalog(fn: (bookId: string) => void): void {
+    this.catalogListeners.push(fn);
+  }
+
   /** Startup/new-content backfill; catalog_at remains the upstream fetch time. */
   reconcile(id: string): void {
     const book = this.get(id);
@@ -110,6 +117,7 @@ export class Books {
         JSON.stringify(catalog), fetchedAt ?? null, id);
       if (recovered.length) this.recoveryListeners.forEach((fn) => fn(id, recovered));
     });
+    this.catalogListeners.forEach((fn) => fn(id));
   }
 
   /**
@@ -206,6 +214,7 @@ export class Books {
     this.saveCatalog(id, catalog, Date.now());
     if (!existsSync(this.library.coverFile(id))) {
       await this.fetchCover(id).catch((err) => console.warn("[library] cover", id, String(err)));
+      if (existsSync(this.library.coverFile(id))) this.catalogListeners.forEach((fn) => fn(id));
     }
     return this.get(id)!;
   }
@@ -239,6 +248,14 @@ export class Books {
       this.db.run("delete from books where id = ?", id);
     });
     await rm(this.library.coverFile(id), { force: true });
+    for (const fn of this.removeListeners) await fn(id);
+  }
+
+  private readonly removeListeners: ((bookId: string) => Promise<void>)[] = [];
+
+  /** After a book is removed. */
+  onRemoved(fn: (bookId: string) => Promise<void>): void {
+    this.removeListeners.push(fn);
   }
 
   /** Marks the book as just read (called when the reader saves progress). */

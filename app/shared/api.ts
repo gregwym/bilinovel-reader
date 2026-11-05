@@ -189,6 +189,9 @@ export interface LibraryStats {
   books: number;
   chapterFiles: number;
   libraryBytes: number;
+  /** Chapter texts (.txt) in the library. */
+  textFiles: number;
+  textBytes: number;
   segmentFiles: number;
   segmentBytes: number;
   cacheBytes: number;
@@ -200,6 +203,8 @@ export interface RescanResult {
   checked: number;
   missing: number;
   moved: number;
+  /** Chapter texts written (new, changed, moved or missing). */
+  texts: number;
 }
 
 export interface AppInfo {

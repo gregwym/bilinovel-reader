@@ -97,7 +97,7 @@ export class SiteSource {
   private readonly templates = new Map<string, Promise<ShuffleTemplate>>();
   private readonly catalogs = new Map<string, { at: number; catalog: Promise<SiteCatalog> }>();
   private readonly pending = new Map<string, Promise<PageContent>>();
-  private readonly pageListeners: ((bookId: string) => void)[] = [];
+  private readonly pageListeners: ((bookId: string, chapterId: string) => void)[] = [];
   private readonly failures: SiteFailure[] = [];
 
   constructor(
@@ -110,8 +110,15 @@ export class SiteSource {
     return buildPageUrl(this.origin(), bookId, chapterId, pageIndex);
   }
 
-  onPageCached(fn: (bookId: string) => void): void {
+  onPageCached(fn: (bookId: string, chapterId: string) => void): void {
     this.pageListeners.push(fn);
+  }
+
+  private backup?: (bookId: string, chapterId: string, pageIndex: number) => { fetchedAt: number; page: PageContent } | undefined;
+
+  /** Where a page comes from when neither the database nor the site has it (the library's backup). */
+  setBackup(fn: NonNullable<SiteSource["backup"]>): void {
+    this.backup = fn;
   }
 
   /** Reuses existing content without network requests or guessing IDs. */
@@ -187,7 +194,20 @@ export class SiteSource {
     if (cached && !cached.incomplete) return Promise.resolve(cached);
     // An incomplete page is asked for again; what was kept stays when that fails.
     if (cached) return this.fetch(bookId, chapterId, pageIndex).catch(() => cached);
-    return this.fetch(bookId, chapterId, pageIndex);
+    return this.fetch(bookId, chapterId, pageIndex).catch((err: unknown) => {
+      const saved = this.backup?.(bookId, chapterId, pageIndex);
+      if (!saved) throw err;
+      this.db.run(
+        `insert into pages (book_id, chapter_id, page_index, data, fetched_at) values (?, ?, ?, ?, ?)
+         on conflict (book_id, chapter_id, page_index) do nothing`,
+        bookId,
+        chapterId,
+        pageIndex,
+        JSON.stringify(saved.page),
+        saved.fetchedAt,
+      );
+      return saved.page;
+    });
   }
 
   private fetch(bookId: string, chapterId: string, pageIndex: number): Promise<PageContent> {
@@ -227,7 +247,7 @@ export class SiteSource {
       JSON.stringify(page),
       Date.now(),
     );
-    this.pageListeners.forEach((fn) => fn(page.bookId));
+    this.pageListeners.forEach((fn) => fn(page.bookId, page.chapterId));
     return page;
   }
 
