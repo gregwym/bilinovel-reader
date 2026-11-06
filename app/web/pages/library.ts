@@ -114,7 +114,8 @@ function continueCard(book: BookSummary): HTMLElement {
   );
   const card = h(
     "div",
-    { class: "continue", role: "link", tabindex: 0 },
+    // Kept as is while the book doesn't change (its listeners use it).
+    { class: "continue", role: "link", tabindex: 0, "data-keep": `continue:${JSON.stringify(book)}` },
     cover(book),
     h(
       "div",
@@ -134,7 +135,7 @@ function bookTile(book: BookSummary): HTMLElement {
   const badge = book.audioChapters > 0 ? h("span", { class: "corner" }, `🎧 ${book.audioChapters}`) : null;
   const tile = h(
     "a",
-    { class: "book", href: `/book/${book.id}`, "data-link": true },
+    { class: "book", href: `/book/${book.id}`, "data-link": true, "data-keep": `tile:${JSON.stringify(book)}` },
     cover(book, badge),
     h("div", { class: "title" }, book.title),
     h(

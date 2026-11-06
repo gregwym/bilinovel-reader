@@ -78,9 +78,7 @@ export function bookPage({ id }: Record<string, string>): Page {
       later = setTimeout(() => draw(shown ?? book), 300);
       return;
     }
-    const y = window.scrollY;
     swap(body, render(book));
-    window.scrollTo(0, y);
   };
 
   const load = async (force = false) => show(await api.keep<BookDetail>(`/api/books/${id}`), force);
