@@ -477,7 +477,8 @@ export function settingsPage(): Page {
     );
   }
 
-  return { el };
+  // Kept under its tab: catches up when shown again, unless a field is being edited.
+  return { el, resume: () => void load(false).catch(() => undefined) };
 }
 
 let previewAudio: HTMLAudioElement | undefined;

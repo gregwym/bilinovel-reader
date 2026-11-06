@@ -4,7 +4,8 @@ import type { Page } from "./ui";
 
 type Handler = (params: Record<string, string>) => Page;
 const routes: { pattern: RegExp; keys: string[]; handler: Handler }[] = [];
-let render: (page: Page, path: string) => void = () => undefined;
+/** Shows `path`; `make` builds its page (not called when the shell shows one it kept). */
+let render: (path: string, make: () => Page) => void = () => undefined;
 
 export function route(path: string, handler: Handler): void {
   const keys: string[] = [];
@@ -37,11 +38,10 @@ export function navigate(path: string, replace = false): void {
 
 export function show(): void {
   const path = location.pathname;
-  const page = resolve(path) ?? resolve("/")!;
-  render(page, path);
+  render(path, () => resolve(path) ?? resolve("/")!);
 }
 
-export function startRouter(onRender: (page: Page, path: string) => void): void {
+export function startRouter(onRender: (path: string, make: () => Page) => void): void {
   render = onRender;
   window.addEventListener("popstate", show);
   document.addEventListener("click", (ev) => {

@@ -42,8 +42,7 @@ window.addEventListener("pagehide", remember);
 async function main(): Promise<void> {
   resume();
   if (/^\/novel\/\d+\/\d+(_\d+)?\.html$/.test(location.pathname)) {
-    const res = await fetch("/api/info", { credentials: "same-origin" });
-    const info = (await res.json()) as AppInfo;
+    const info = await appInfo();
     if (info.auth && !info.loggedIn) {
       location.href = `/login?next=${encodeURIComponent(location.pathname)}`;
       return;
@@ -58,6 +57,35 @@ async function main(): Promise<void> {
 
 void main();
 
+const INFO_KEY = "app.info";
+
+/**
+ * The server's info for the reader. Offline, or while the server is slow to
+ * answer, the last one is used rather than leaving the page blank: the reader
+ * opens and reads saved chapters (the service worker serves them).
+ */
+async function appInfo(): Promise<AppInfo> {
+  let last: AppInfo | undefined;
+  try {
+    last = JSON.parse(localStorage.getItem(INFO_KEY) ?? "null") as AppInfo | undefined;
+  } catch {
+    // Private mode.
+  }
+  const fresh = fetch("/api/info", { credentials: "same-origin" }).then(async (res) => {
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const info = (await res.json()) as AppInfo;
+    try {
+      localStorage.setItem(INFO_KEY, JSON.stringify(info));
+    } catch {
+      // Private mode.
+    }
+    return info;
+  });
+  const fallback: AppInfo = last ?? { version: __VERSION__, auth: false, loggedIn: true, ffmpeg: false, siteOrigin: "https://www.bilinovel.com" };
+  const wait = new Promise<AppInfo>((resolve) => setTimeout(() => resolve(fallback), last ? 2500 : 6000));
+  return Promise.race([fresh.catch(() => fallback), wait]);
+}
+
 /**
  * After the server is updated, a page left open (an installed app on iOS
  * stays in memory for days) still runs the old build, which may not match
@@ -70,12 +98,24 @@ async function checkVersion(): Promise<void> {
     const info = (await (await fetch("/api/info", { credentials: "same-origin", cache: "no-store" })).json()) as AppInfo;
     if (!info.version || info.version === __VERSION__ || sessionStorage.getItem(RELOADED) === info.version) return;
     sessionStorage.setItem(RELOADED, info.version);
+    // The service worker opens the app from its copy of the page (sw.js): the new one first.
+    await refreshShell();
     location.reload();
   } catch {
     // Offline, or private mode: keep the page.
   }
 }
 const RELOADED = "biliReader.reloadedFor";
+
+/** Puts the server's current index.html in the service worker's cache ("shell-v1" in sw.js). */
+async function refreshShell(): Promise<void> {
+  try {
+    const res = await fetch("/", { cache: "no-store", credentials: "same-origin" });
+    if (res.ok && typeof caches !== "undefined") await (await caches.open("shell-v1")).put("/", res);
+  } catch {
+    // The reload then fetches it.
+  }
+}
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") void checkVersion();
 });
