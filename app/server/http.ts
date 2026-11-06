@@ -300,18 +300,22 @@ export function createApp(d: AppDeps): Hono {
     }
   });
 
-  /** A volume's cover: its own (fetched now if not yet), else the book's. */
-  app.get("/api/books/:id/volumes/:vi/cover", async (c) => {
+  /**
+   * A volume's cover: its own, else the book's while its own is fetched in
+   * the background. Never waits for the site: the book page asks for every
+   * volume's at once, and requests left waiting on a slow image host would
+   * take all the browser's connections (the app then hangs, even navigating).
+   */
+  app.get("/api/books/:id/volumes/:vi/cover", (c) => {
     const book = d.books.get(c.req.param("id"));
     const vi = Number(c.req.param("vi"));
     if (!book) return c.body(null, 404);
-    const cache = { "Cache-Control": "private, max-age=86400" };
-    let own = d.library.volumeCover(book, vi);
-    if (!own && bookCatalog(book)?.volumes[vi]?.cover) {
-      await d.library.updateCovers(book.id);
-      own = d.library.volumeCover(book, vi);
-    }
+    const own = d.library.volumeCover(book, vi);
+    if (!own && bookCatalog(book)?.volumes[vi]?.cover) void d.library.updateCovers(book.id);
     const file = own ?? d.library.coverFile(book.id);
+    // The book's in its place is kept only briefly (its own shows once fetched), not asked
+    // for again on every redraw of the book page.
+    const cache = { "Cache-Control": `private, max-age=${own ? 86400 : 600}` };
     return existsSync(file) ? sendFile(c, file, "image/jpeg", cache) : c.body(null, 404);
   });
 

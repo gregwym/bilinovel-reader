@@ -51,8 +51,11 @@ const RETRYABLE = new Set([408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523
  * configured; its cookies and user agent are then reused.
  */
 export class SiteClient {
-  private tail: Promise<unknown> = Promise.resolve();
+  private readonly queue: { url: string; start: () => Promise<void> }[] = [];
+  private busy = false;
   private lastStart = -Infinity;
+  /** Pages asked for by background work (see `html`), until someone waits for them. */
+  private readonly background = new Set<string>();
   private imageTail: Promise<unknown> = Promise.resolve();
   private solved?: { cookies: Record<string, string>; userAgent: string };
 
@@ -89,29 +92,60 @@ export class SiteClient {
     return headers;
   }
 
-  /** Runs `task` in the site's serial lane, after the minimum gap. */
-  private lane<T>(task: () => Promise<T>): Promise<T> {
-    const run = this.tail.then(async () => {
-      const wait = this.lastStart + this.settings().requestIntervalMs - this.now();
-      if (wait > 0) await this.sleep(wait);
-      this.lastStart = this.now();
-      return task();
+  /**
+   * Runs `task` in the site's serial lane, after the minimum gap. What a
+   * person waits for (the reader, a catalog refresh) goes before background
+   * work, which only gets the turns nobody else wants.
+   */
+  private lane<T>(url: string, task: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      this.queue.push({ url, start: () => task().then(resolve, reject) });
+      void this.pump();
     });
-    this.tail = run.catch(() => undefined);
-    return run;
   }
 
-  /** Fetches a page's HTML; throws FetchError (challenge = true when a bot check blocks it). */
-  async html(url: string, retries = 2): Promise<string> {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        return await this.lane(() => this.htmlOnce(url));
-      } catch (err) {
-        const e = err instanceof FetchError ? err : new FetchError(String(err), url);
-        const retry = !e.challenge && (e.status === undefined || RETRYABLE.has(e.status));
-        if (!retry || attempt >= retries) throw e;
-        await this.sleep(3000 * 2 ** attempt);
+  private async pump(): Promise<void> {
+    if (this.busy || !this.queue.length) return;
+    this.busy = true;
+    try {
+      const wait = this.lastStart + this.settings().requestIntervalMs - this.now();
+      if (wait > 0) await this.sleep(wait);
+      // Chosen after the gap: a request that came meanwhile still goes first.
+      let i = this.queue.findIndex((e) => !this.background.has(e.url));
+      if (i < 0) i = 0;
+      const [entry] = this.queue.splice(i, 1);
+      this.lastStart = this.now();
+      await entry.start();
+    } finally {
+      this.busy = false;
+      void this.pump();
+    }
+  }
+
+  /** A page asked for in the background is now waited for: it takes its turn like any other. */
+  promote(url: string): void {
+    this.background.delete(url);
+  }
+
+  /**
+   * Fetches a page's HTML; throws FetchError (challenge = true when a bot
+   * check blocks it). `background`: after everything a person waits for.
+   */
+  async html(url: string, retries = 2, background = false): Promise<string> {
+    if (background) this.background.add(url);
+    try {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await this.lane(url, () => this.htmlOnce(url));
+        } catch (err) {
+          const e = err instanceof FetchError ? err : new FetchError(String(err), url);
+          const retry = !e.challenge && (e.status === undefined || RETRYABLE.has(e.status));
+          if (!retry || attempt >= retries) throw e;
+          await this.sleep(3000 * 2 ** attempt);
+        }
       }
+    } finally {
+      if (background) this.background.delete(url);
     }
   }
 

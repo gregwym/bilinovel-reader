@@ -156,7 +156,7 @@ export class Books {
     const failed = this.fillFailed.get(id) ?? new Set<string>();
     this.fillFailed.set(id, failed);
     const load = (chapterId: string, pageIndex: number) =>
-      this.source.page(id, chapterId, pageIndex).catch((err: unknown) => {
+      this.source.page(id, chapterId, pageIndex, false, true).catch((err: unknown) => {
         failed.add(pageRef({ chapterId, pageIndex }));
         throw err;
       });

@@ -428,6 +428,7 @@ export class Jobs {
     this.update(job.id, { message: "获取正文…" });
     const pages = await this.source.chapterPages(book.id, job.target, (n) =>
       this.update(job.id, { message: `获取正文（第 ${n} 页）…` }),
+      true,
     );
     this.checkCancelled(job.id);
     // Never voice a chapter the site sent only part of (wait and ask again),
@@ -473,6 +474,7 @@ export class Jobs {
     this.update(job.id, { message: "获取正文…" });
     const pages = await this.source.chapterPages(book.id, job.target, (n) =>
       this.update(job.id, { message: `获取正文（第 ${n} 页）…`, progress: Math.min(0.9, n / (n + 1)) }),
+      true,
     );
     this.checkCancelled(job.id);
     this.update(job.id, { message: "存入书库…", progress: 0.95 });
