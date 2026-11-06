@@ -12,6 +12,9 @@ import type { StoredAudio, Tts } from "./tts";
 import type { PageProvider } from "../shared/api";
 import type { Images } from "./images";
 
+/** How long a volume cover the site didn't deliver is left alone before it is asked for again. */
+const COVER_RETRY_MS = 3600_000;
+
 /** A segment going into a chapter file. */
 export interface ChapterPart {
   provider: PageProvider;
@@ -407,6 +410,8 @@ export class Library {
   }
 
   private readonly coverRuns = new Map<string, Promise<void>>();
+  /** Volume covers the site didn't deliver, by URL: when (not asked for again for an hour). */
+  private readonly coverFailed = new Map<string, number>();
 
   /** Fetches the covers of a book's volumes not fetched yet, and puts them in the volumes' folders. */
   updateCovers(bookId: string): Promise<void> {
@@ -441,6 +446,8 @@ export class Library {
     for (const [vi, v] of catalog.volumes.entries()) {
       const file = v.cover && this.volumeCoverFile(bookId, v.cover);
       if (!v.cover || !file || existsSync(file)) continue;
+      // A slow or unreachable image host would otherwise hold the image queue (illustrations too) on every catalog save.
+      if (Date.now() - (this.coverFailed.get(v.cover) ?? -Infinity) < COVER_RETRY_MS) continue;
       // Saved in the volume's folder before (a new install): no need to ask the site.
       let saved: Buffer | undefined;
       for (const [dir, i] of folders) {
@@ -461,7 +468,9 @@ export class Library {
         await mkdir(dirname(file), { recursive: true });
         await writeFile(`${file}.part`, jpeg);
         await rename(`${file}.part`, file);
+        this.coverFailed.delete(v.cover);
       } catch (err) {
+        this.coverFailed.set(v.cover, Date.now());
         console.warn(`[library] cover of ${bookId} ${v.title}:`, err instanceof Error ? err.message : String(err));
       }
     }
