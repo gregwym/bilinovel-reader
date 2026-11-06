@@ -123,6 +123,21 @@ export type StatusKind = "idle" | "loading" | "error" | "end";
 const USER_SCROLL_GRACE_MS = 4000;
 
 /**
+ * An illustration that failed is asked for once more past the browser's cache
+ * (which may hold a broken copy for good: the server's answers are kept as
+ * immutable), then shown again; only a second failure marks it broken.
+ */
+export async function retryImage(img: HTMLImageElement, fig: HTMLElement, load: typeof fetch = fetch): Promise<void> {
+  const src = img.getAttribute("src");
+  if (!src) return void fig.classList.add("broken");
+  img.addEventListener("error", () => fig.classList.add("broken"), { once: true });
+  // Cross-origin (the userscript on the site): opaque, but still refreshes the cache.
+  await load(src, { cache: "reload", mode: "no-cors", credentials: "same-origin" }).catch(() => undefined);
+  img.removeAttribute("src");
+  img.setAttribute("src", src);
+}
+
+/**
  * All DOM for the reader, mounted in a Shadow DOM so the site's CSS cannot
  * leak in (and ours cannot leak out). The original page is only hidden by an
  * overlay plus a reversible scroll lock; it is never modified.
@@ -441,7 +456,7 @@ export class ReaderView {
   private renderImage(p: Paragraph): HTMLElement {
     const img = h("img", { src: p.imageUrl, loading: "lazy", decoding: "async", alt: "插图" });
     const fig = h("figure", { class: "br-img", "data-id": p.id }, img);
-    img.addEventListener("error", () => fig.classList.add("broken"), { once: true });
+    img.addEventListener("error", () => void retryImage(img, fig), { once: true });
     return fig;
   }
 
