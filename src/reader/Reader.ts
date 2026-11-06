@@ -772,7 +772,9 @@ export class Reader implements PlaybackSource {
     if (this.catalogLoading) return this.catalogLoading;
     this.catalogError = undefined;
     this.catalogLoading = this.adapter
-      .fetchCatalog(bookId)
+      .fetchCatalog(bookId, () => {
+        if (this.catalog?.bookId === bookId) this.view.updateToc(this.tocState());
+      })
       .then(
         (catalog) => {
           this.catalog = catalog;

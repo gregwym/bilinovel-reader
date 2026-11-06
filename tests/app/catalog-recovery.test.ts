@@ -2,7 +2,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../../app/server/config";
 import { createServices } from "../../app/server/services";
 import { createApp } from "../../app/server/http";
@@ -17,6 +17,10 @@ const catalogHtml = `<div id="volumes"><h2>卷</h2><ul>
 const pageHtml = `<script>var ReadParams={articleid:'10',chapterid:'321',articlename:'书',chaptername:'下次见',
   url_previous:'/novel/10/100.html',url_next:'/novel/10/999.html'};</script>
   <div id="acontent"><p>这是可以朗读的正文。</p></div>`;
+/** The chapter after the placeholder: its「上一章」is the chapter the catalog has no link for. */
+const afterHtml = `<script>var ReadParams={articleid:'10',chapterid:'999',articlename:'书',chaptername:'后',
+  url_previous:'/novel/10/321.html',url_next:'/novel/10/catalog'};</script>
+  <div id="acontent"><p>后一章的正文。</p></div>`;
 const catalog = (): Catalog => ({ bookId: "10", volumes: [{ title: "卷", chapters: [
   { title: "前", chapterId: "100" }, { title: "下次见" }, { title: "后", chapterId: "999" },
 ] }] });
@@ -30,11 +34,11 @@ let requests: string[] = [];
 function setup() {
   const dir = mkdtempSync(join(tmpdir(), "bili-recovery-"));
   dirs.push(dir);
-  const config = loadConfig({ DATA_DIR: join(dir, "data"), LIBRARY_DIR: join(dir, "library"), FISH_API_KEY: "fake-key" }, dir);
+  const config = loadConfig({ SITE_REQUEST_INTERVAL_MS: "500", DATA_DIR: join(dir, "data"), LIBRARY_DIR: join(dir, "library"), FISH_API_KEY: "fake-key" }, dir);
   const open = () => {
     const s = createServices(config, "test", { fetch: async (url) => {
       requests.push(url);
-      return new Response(url.endsWith("/catalog") ? catalogHtml : pageHtml);
+      return new Response(url.endsWith("/catalog") ? catalogHtml : url.endsWith("/999.html") ? afterHtml : pageHtml);
     } });
     opened.push(s);
     return s;
@@ -81,8 +85,28 @@ describe("existing library recovery", () => {
     expect(recoveredId(s)).toBe("321");
     expect(s.jobs.overview().jobs).toEqual([]);
   });
+  it("follows the neighbouring chapter's link after a catalog fetch", async () => {
+    const { s } = setup();
+    await s.books.refresh("10");
+    // Two page requests, at the site request interval.
+    await vi.waitFor(() => expect(recoveredId(s)).toBe("321"), { timeout: 9000, interval: 100 });
+    expect(requests.filter((u) => /\/novel\/10\/\d+\.html$/.test(u))).toEqual([`${origin}/novel/10/999.html`, `${origin}/novel/10/321.html`]);
+    // Nothing more to look up: the next fetch loads no pages.
+    s.db.run("update books set catalog_at=0 where id='10'");
+    requests = [];
+    await s.books.refresh("10");
+    expect(requests.filter((u) => /\/novel\/10\/\d+\.html$/.test(u))).toEqual([]);
+  }, 15_000);
+  it("links what a saved catalog lacks at startup, without fetching the catalog again", async () => {
+    const { open } = setup();
+    const upgraded = open();
+    await vi.waitFor(() => expect(recoveredId(upgraded)).toBe("321"), { timeout: 9000, interval: 100 });
+    expect(requests).toEqual([`${origin}/novel/10/999.html`, `${origin}/novel/10/321.html`]);
+    expect(upgraded.books.get("10")!.catalog_at).toBe(123);
+  }, 15_000);
   it("leaves unavailable placeholders alone and never guesses an ID", () => {
     const { s, open } = setup();
+    // Synchronously: no evidence yet (what startup then loads is the test above).
     expect(recoveredId(open())).toBeUndefined();
     expect(s.jobs.overview().jobs).toEqual([]);
   });

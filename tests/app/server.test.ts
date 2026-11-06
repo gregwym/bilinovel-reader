@@ -507,8 +507,13 @@ describe("library server", () => {
       expect(img.status).toBe(200);
       expect(img.headers.get("content-type")).toBe("image/png");
       await s2.library.updateCovers("5369");
-      // Nothing from the site; only the first volume's cover is asked for, as no volume folder holds it with this template.
-      expect([...new Set(offline)]).toEqual(["https://img3.readpai.com/5/5369/1.jpg"]);
+      // Nothing from the site but the lookup for the catalog's placeholder (the chapters next to it; it fails offline,
+      // and nothing needs it); only the first volume's cover is asked for, as no volume folder holds it with this template.
+      expect([...new Set(offline)].sort()).toEqual([
+        "https://img3.readpai.com/5/5369/1.jpg",
+        "https://www.bilinovel.com/novel/5369/180202.html",
+        "https://www.bilinovel.com/novel/5369/180203.html",
+      ]);
       // The storage template comes back too.
       expect((await json<{ storageTemplate: string }>(app2.request("/api/settings"))).storageTemplate).toBe("{volumeNo}-{chapterNo} {chapter}");
       await s2.backup.idle();

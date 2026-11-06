@@ -40,6 +40,12 @@ describe("catalog placeholder recovery", () => {
       prev: { url: url("555"), chapterId: "555", pageIndex: 0 } })])).toEqual([]);
     expect(reconcileCatalog(catalog(), [page(), page({ chapterId: "444", url: url("444") })])).toEqual([]);
   });
+  it("matches a title the chapter page shows with a character masked as 〇", () => {
+    expect(reconcileCatalog(catalog(), [page({ chapterTitle: "下〇见" })])).toHaveLength(1);
+    for (const chapterTitle of ["下〇", "下〇见了", "〇〇〇", "上〇见"]) {
+      expect(reconcileCatalog(catalog(), [page({ chapterTitle })])).toEqual([]);
+    }
+  });
   it("does not confuse repeated titles in different volumes", () => {
     const c = catalog();
     c.volumes.push({ title: "二", chapters: [{ title: "前", chapterId: "500" }, { title: "下次见" }] });
