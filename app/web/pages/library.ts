@@ -1,7 +1,7 @@
 import { h } from "../../../src/utils/dom";
 import type { BookSummary } from "../../shared/api";
 import { api, ApiError } from "../api";
-import { cover, formatTime, icon, openReader, poll, progressBar, toast, type Page } from "../ui";
+import { cover, formatTime, icon, openReader, poll, progressBar, swap, toast, type Page } from "../ui";
 import { navigate } from "../router";
 
 /** The bookshelf: the book being read, then every book as a cover grid. */
@@ -59,14 +59,14 @@ export function libraryPage(): Page {
     const sig = JSON.stringify(books);
     if (sig === last) return;
     last = sig;
-    body.replaceChildren(...render(books));
+    swap(body, render(books));
   };
   const load = async () => show(await api.keep<BookSummary[]>("/api/books"));
   // Drawn at once from the last answer; the server's replaces it when it comes.
   const kept = api.cached<BookSummary[]>("/api/books");
   if (kept) show(kept);
   void load().catch((err: Error) => (kept ? toast(err.message) : body.replaceChildren(h("div", { class: "banner error" }, err.message))));
-  return { el, dispose: poll(load, 5000) };
+  return { el, dispose: poll(load, 5000, el), resume: () => void load().catch(() => undefined) };
 }
 
 function render(books: BookSummary[]): Node[] {

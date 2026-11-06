@@ -8,6 +8,7 @@ import { navigate } from "../router";
 import {
   act,
   cover,
+  swap,
   coverArt,
   download,
   formatBytes,
@@ -48,8 +49,11 @@ export function bookPage({ id }: Record<string, string>): Page {
 
   const loadVoices = async () => {
     voicesAt = Date.now();
-    voices = await api.keep<BookVoices>(`/api/books/${id}/voices`);
-    if (shown) draw(shown);
+    const next = await api.keep<BookVoices>(`/api/books/${id}/voices`);
+    // Usually the same as the kept answer the page was drawn with: no redraw then.
+    const changed = JSON.stringify(next) !== JSON.stringify(voices);
+    voices = next;
+    if (changed && shown) draw(shown);
   };
 
   /**
@@ -75,7 +79,7 @@ export function bookPage({ id }: Record<string, string>): Page {
       return;
     }
     const y = window.scrollY;
-    body.replaceChildren(...render(book));
+    swap(body, render(book));
     window.scrollTo(0, y);
   };
 
@@ -97,10 +101,12 @@ export function bookPage({ id }: Record<string, string>): Page {
       const cur = currentVolume(book);
       open.add(cur >= 0 ? cur : 0);
     }
-    document.title = `${book.title} · Bili Reader`;
+    // Not while another page is shown (this one kept under another tab): the shell sets it when shown.
+    if (el.isConnected) document.title = title();
     draw(book);
   };
 
+  const title = () => (shown ? `${shown.title} · Bili Reader` : "Bili Reader");
   const refresh = () => void load(true).catch((err: Error) => toast(err.message));
 
   const generate = (button: HTMLButtonElement | null, payload: object, what: string) =>
@@ -152,7 +158,7 @@ export function bookPage({ id }: Record<string, string>): Page {
   };
 
   function render(book: BookDetail): Node[] {
-    const backdrop = h("div", { class: "backdrop" });
+    const backdrop = h("div", { class: "backdrop", "data-keep": book.hasCover ? "backdrop" : undefined });
     if (book.hasCover) backdrop.style.backgroundImage = `url("/api/books/${id}/cover")`;
     const readBtn = h(
       "button",
@@ -423,7 +429,7 @@ export function bookPage({ id }: Record<string, string>): Page {
       "header",
       {},
       h("span", { class: "chev" }, icon("chevron")),
-      v.cover ? h("img", { class: "vol-cover", src: `/api/books/${id}/volumes/${vi}/cover`, alt: "", loading: "lazy" }) : null,
+      v.cover ? volumeCover(`/api/books/${id}/volumes/${vi}/cover`) : null,
       h("span", { class: "title" }, v.title),
       offlineBadge(linked),
       done
@@ -716,7 +722,7 @@ export function bookPage({ id }: Record<string, string>): Page {
   const kept = api.cached<BookDetail>(`/api/books/${id}`);
   if (kept) show(kept);
   void load().catch((err: Error) => (kept ? toast(err.message) : body.replaceChildren(h("div", { class: "banner error" }, err.message))));
-  const stop = poll(() => load(), 3000);
+  const stop = poll(() => load(), 3000, el);
   // Saving on this device: redrawn as it goes (at most once a frame).
   let frame = 0;
   const unsubscribe = onSaveChange(() => {
@@ -728,6 +734,8 @@ export function bookPage({ id }: Record<string, string>): Page {
   });
   return {
     el,
+    resume: () => void load().catch(() => undefined),
+    title,
     dispose: () => {
       stop();
       unsubscribe();
@@ -739,6 +747,10 @@ export function bookPage({ id }: Record<string, string>): Page {
       sheet?.close();
     },
   };
+}
+
+function volumeCover(src: string): HTMLElement {
+  return h("img", { class: "vol-cover", src, alt: "", loading: "lazy", "data-keep": src });
 }
 
 function firstChapter(book: BookDetail): { chapterId: string; pageIndex: number } | undefined {

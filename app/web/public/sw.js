@@ -1,7 +1,7 @@
 // Service worker of the library web app: makes it installable, opens the app
-// shell without a network round trip, and serves chapters saved for offline
-// reading (app/web/offline.ts) when the server can't be reached. The API
-// otherwise always goes to the server.
+// also offline or with the server down or slow, and serves chapters saved for
+// offline reading (app/web/offline.ts) when the server can't be reached or is
+// slow. The API otherwise always goes to the server.
 const CACHE = "shell-v1";
 /** Saved chapters; the name is shared with offline.ts. */
 const OFFLINE = "offline-v1";
@@ -25,35 +25,54 @@ self.addEventListener("activate", (event) => {
   );
 });
 
-/** Keeps every file of the current build (lazy chunks too, e.g. the reader's) and drops older builds'. */
+/**
+ * Keeps every file of the current build (lazy chunks too, e.g. the reader's).
+ * The previous build's files stay too: a page opened from the cached
+ * index.html while the newer one came (see "navigate" below) may still load
+ * its lazy chunks.
+ */
 async function precache() {
   const res = await fetch("/assets.json", { cache: "no-cache" });
   if (!res.ok) return;
-  const files = new Set(await res.json());
+  const files = await res.json();
   const cache = await caches.open(CACHE);
+  const list = async (key) => (await (await cache.match(key))?.json().catch(() => undefined)) ?? [];
+  let previous = await list("/assets-prev.json");
+  const stored = await list("/assets.json");
+  if (stored.join() !== files.join()) {
+    previous = stored;
+    await cache.put("/assets-prev.json", new Response(JSON.stringify(previous)));
+    await cache.put("/assets.json", new Response(JSON.stringify(files)));
+  }
+  const keep = new Set([...files, ...previous]);
   const have = new Set();
   for (const req of await cache.keys()) {
     const path = new URL(req.url).pathname;
     if (!path.startsWith("/assets/")) continue;
-    if (files.has(path)) have.add(path);
+    if (keep.has(path)) have.add(path);
     else await cache.delete(req);
   }
-  await cache.addAll([...files].filter((f) => !have.has(f)));
+  await cache.addAll(files.filter((f) => !have.has(f)));
 }
 
-/** The server's answer; the saved copy when it can't be reached. */
+/** How long a request waits for the server when a saved copy can answer instead. */
+const PATIENCE = 4000;
+/** The same for opening the app (its page is small: a server taking longer is busy or unreachable). */
+const SHELL_PATIENCE = 1500;
+
+/** The server's answer; the saved copy when it can't be reached, fails, or is slow to answer. */
 async function api(req, url) {
-  try {
-    const res = await fetch(req);
+  const copy = saved(url);
+  const network = fetch(req).then((res) => {
     // A reverse proxy in front of a stopped server.
-    if (res.status < 502 || res.status > 504) {
-      if (req.method === "GET" && res.ok && (res.headers.get("content-type") ?? "").includes("json")) void refresh(url, res.clone());
-      return res;
-    }
-    return (await saved(url)) ?? res;
-  } catch {
-    return (await saved(url)) ?? Response.error();
-  }
+    if (res.status >= 502 && res.status <= 504) return copy.then((hit) => hit ?? res);
+    if (req.method === "GET" && res.ok && (res.headers.get("content-type") ?? "").includes("json")) void refresh(url, res.clone());
+    return res;
+  });
+  const fallback = network.catch(() => copy.then((hit) => hit ?? Response.error()));
+  const hit = await copy;
+  if (!hit) return fallback;
+  return Promise.race([fallback, new Promise((resolve) => self.setTimeout(() => resolve(hit), PATIENCE))]);
 }
 
 /** A saved copy, by URL (a segment asked for with POST is the same file). */
@@ -81,23 +100,31 @@ self.addEventListener("fetch", (event) => {
   }
   if (req.method !== "GET") return;
   if (req.mode === "navigate") {
-    // Every page is the same index.html: the newest one, or the cached one offline.
+    // Every page is the same index.html: the newest one, or the cached one
+    // when the server can't be reached, fails (a reverse proxy in front of a
+    // stopped server) or is slow to answer, so the app opens like an
+    // installed one. The newest is still kept for next time when it comes late.
+    const update = fetch(req).then((res) => {
+      if (res.ok) {
+        const copy = res.clone();
+        event.waitUntil(
+          caches
+            .open(CACHE)
+            .then((cache) => cache.put("/", copy))
+            .then(precache)
+            .catch(() => undefined),
+        );
+      }
+      return res;
+    });
+    event.waitUntil(update.catch(() => undefined));
     event.respondWith(
-      fetch(req)
-        .then((res) => {
-          if (res.ok) {
-            const copy = res.clone();
-            event.waitUntil(
-              caches
-                .open(CACHE)
-                .then((cache) => cache.put("/", copy))
-                .then(precache)
-                .catch(() => undefined),
-            );
-          }
-          return res;
-        })
-        .catch(() => caches.match("/").then((hit) => hit ?? Response.error())),
+      (async () => {
+        const hit = await caches.match("/");
+        if (!hit) return update.catch(() => Response.error());
+        const fresh = update.then((res) => (res.ok ? res : hit)).catch(() => hit);
+        return Promise.race([fresh, new Promise((resolve) => self.setTimeout(() => resolve(hit), SHELL_PATIENCE))]);
+      })(),
     );
     return;
   }

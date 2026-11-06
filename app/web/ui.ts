@@ -43,7 +43,8 @@ export function openReader(bookId: string, pos?: Pick<ReadingPosition, "chapterI
 export function cover(book: Pick<BookSummary, "id" | "title" | "hasCover">, extra?: Node | null): HTMLElement {
   const box = h("div", { class: "cover" });
   if (book.hasCover) {
-    const img = h("img", { src: `/api/books/${book.id}/cover`, alt: "", loading: "lazy" });
+    const src = `/api/books/${book.id}/cover`;
+    const img = h("img", { src, alt: "", loading: "lazy", "data-keep": src });
     img.addEventListener("error", () => img.replaceWith(h("div", { class: "placeholder" }, book.title)));
     box.append(img);
   } else {
@@ -51,6 +52,29 @@ export function cover(book: Pick<BookSummary, "id" | "title" | "hasCover">, extr
   }
   if (extra) box.append(extra);
   return box;
+}
+
+/**
+ * Replaces `parent`'s content with `nodes`, keeping the elements marked
+ * `data-keep` (covers) that the new content has too: a redraw then doesn't
+ * load and decode its images again, which shows as a flash of empty covers.
+ * Kept elements must not hold state of the old drawing (no listeners using it).
+ */
+export function swap(parent: Element, nodes: Node[]): void {
+  const old = new Map<string, Element[]>();
+  for (const el of parent.querySelectorAll("[data-keep]")) {
+    const key = el.getAttribute("data-keep")!;
+    old.set(key, [...(old.get(key) ?? []), el]);
+  }
+  const frag = document.createDocumentFragment();
+  frag.append(...nodes);
+  if (old.size) {
+    for (const el of frag.querySelectorAll("[data-keep]")) {
+      const prev = old.get(el.getAttribute("data-keep")!)?.shift();
+      if (prev) el.replaceWith(prev);
+    }
+  }
+  parent.replaceChildren(frag);
 }
 
 export function progressBar(fraction: number): HTMLElement {
@@ -218,16 +242,21 @@ export function formatTime(ms: number): string {
 /** A page re-rendered on an interval while it is shown. */
 export interface Page {
   el: HTMLElement;
-  /** Called when the page is left. */
+  /** Called when the page is left for good. */
   dispose?: () => void;
+  /** Called when a page kept while another one was shown is shown again (to catch up). */
+  resume?: () => void;
+  /** The document title while shown (default: the app's name). */
+  title?: () => string;
 }
 
-export function poll(fn: () => Promise<void> | void, ms: number): () => void {
+/** Calls `fn` every `ms` while the app is in front and `el` (the page) is shown. */
+export function poll(fn: () => Promise<void> | void, ms: number, el?: Element): () => void {
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const tick = async () => {
     if (stopped) return;
-    if (!document.hidden) await Promise.resolve(fn()).catch(() => undefined);
+    if (!document.hidden && (!el || el.isConnected)) await Promise.resolve(fn()).catch(() => undefined);
     if (!stopped) timer = setTimeout(() => void tick(), ms);
   };
   timer = setTimeout(() => void tick(), ms);

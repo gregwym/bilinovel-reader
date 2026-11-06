@@ -2,7 +2,7 @@ import { h } from "../../../src/utils/dom";
 import type { JobInfo, JobKind, JobStatus, JobsOverview } from "../../shared/api";
 import { api } from "../api";
 import { cancelSave, offlineSupported, onSaveChange, saveTasks, type SaveTask } from "../offline";
-import { act, formatBytes, formatTime, poll, progressBar, toast, topbar, type Page } from "../ui";
+import { act, formatBytes, formatTime, poll, progressBar, swap, toast, topbar, type Page } from "../ui";
 
 const KIND_LABEL: Record<JobKind, string> = { chapter: "生成语音", text: "下载原文", export: "导出" };
 const STATUS_LABEL: Record<JobStatus, string> = {
@@ -41,7 +41,7 @@ export function jobsPage(): Page {
     const sig = JSON.stringify(data);
     if (sig === last) return;
     last = sig;
-    body.replaceChildren(...render(data));
+    swap(body, render(data));
   };
 
   function render(data: JobsOverview): Node[] {
@@ -188,9 +188,13 @@ export function jobsPage(): Page {
   const kept = api.cached<JobsOverview>("/api/jobs");
   if (kept) show(kept);
   void load().catch((err: Error) => toast(err.message));
-  const stop = poll(load, 2000);
+  const stop = poll(load, 2000, el);
   return {
     el,
+    resume: () => {
+      drawLocal();
+      void load().catch(() => undefined);
+    },
     dispose: () => {
       stop();
       unsubscribe();
