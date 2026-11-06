@@ -54,13 +54,58 @@ export function cover(book: Pick<BookSummary, "id" | "title" | "hasCover">, extr
   return box;
 }
 
+/** A finger (or mouse button) is down; redraws wait for it to lift (see `swap`). */
+let pressed = false;
+const deferred = new Map<Element, Node[]>();
+let flushTimer: ReturnType<typeof setTimeout> | undefined;
+/** A lift that never comes (the system took the touch) doesn't stop redraws for long. */
+let stuckTimer: ReturnType<typeof setTimeout> | undefined;
+const flush = () => {
+  flushTimer = undefined;
+  if (pressed) return;
+  const all = [...deferred];
+  deferred.clear();
+  for (const [parent, nodes] of all) draw(parent, nodes);
+};
+if (typeof document !== "undefined") {
+  // After the click the tap makes (it comes right after the finger lifts).
+  const up = () => {
+    pressed = false;
+    clearTimeout(flushTimer);
+    clearTimeout(stuckTimer);
+    if (deferred.size) flushTimer = setTimeout(flush, 350);
+  };
+  const down = () => {
+    pressed = true;
+    clearTimeout(flushTimer);
+    clearTimeout(stuckTimer);
+    stuckTimer = setTimeout(up, 3000);
+  };
+  document.addEventListener("pointerdown", down, { capture: true, passive: true });
+  document.addEventListener("pointerup", up, { capture: true, passive: true });
+  document.addEventListener("pointercancel", up, { capture: true, passive: true });
+  document.addEventListener("visibilitychange", up);
+}
+
 /**
  * Replaces `parent`'s content with `nodes`, keeping the elements marked
- * `data-keep` (covers) that the new content has too: a redraw then doesn't
- * load and decode its images again, which shows as a flash of empty covers.
- * Kept elements must not hold state of the old drawing (no listeners using it).
+ * `data-keep` (covers, unchanged book tiles) that the new content has too: a
+ * redraw then doesn't load and decode its images again, which shows as a flash
+ * of empty covers. Kept elements must not hold state of the old drawing (no
+ * listeners using it), or their key must change with it.
+ *
+ * While a finger is down the redraw waits until the tap is done: replacing
+ * the element being tapped loses the tap (it then takes a second one).
  */
 export function swap(parent: Element, nodes: Node[]): void {
+  if (pressed || deferred.has(parent)) {
+    deferred.set(parent, nodes);
+    return;
+  }
+  draw(parent, nodes);
+}
+
+function draw(parent: Element, nodes: Node[]): void {
   const old = new Map<string, Element[]>();
   for (const el of parent.querySelectorAll("[data-keep]")) {
     const key = el.getAttribute("data-keep")!;
@@ -70,11 +115,23 @@ export function swap(parent: Element, nodes: Node[]): void {
   frag.append(...nodes);
   if (old.size) {
     for (const el of frag.querySelectorAll("[data-keep]")) {
+      // Inside an element already replaced by its kept one.
+      if (!frag.contains(el)) continue;
       const prev = old.get(el.getAttribute("data-keep")!)?.shift();
-      if (prev) el.replaceWith(prev);
+      if (!prev) continue;
+      el.replaceWith(prev);
+      // What it holds stays in it.
+      for (const inner of prev.querySelectorAll("[data-keep]")) {
+        const list = old.get(inner.getAttribute("data-keep")!);
+        const i = list?.indexOf(inner) ?? -1;
+        if (i >= 0) list!.splice(i, 1);
+      }
     }
   }
+  // The page stays where it was scrolled to (it is briefly shorter while replaced).
+  const y = window.scrollY;
   parent.replaceChildren(frag);
+  if (parent.isConnected && window.scrollY !== y) window.scrollTo(0, y);
 }
 
 export function progressBar(fraction: number): HTMLElement {

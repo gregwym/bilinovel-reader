@@ -45,6 +45,44 @@ describe("swap", () => {
     expect(parent.children[2]).toBe(c);
     expect(b.isConnected).toBe(false);
   });
+
+  it("keeps an unchanged tile whole, without lending its cover to another", () => {
+    const parent = document.createElement("div");
+    const tile = (key: string) => {
+      const el = document.createElement("a");
+      el.setAttribute("data-keep", key);
+      const img = document.createElement("img");
+      img.setAttribute("data-keep", "/a");
+      el.append(img);
+      return el;
+    };
+    const card = tile("card:1");
+    const kept = tile("tile:1");
+    parent.replaceChildren(card, kept);
+    const keptImg = kept.firstChild;
+    const cardImg = card.firstChild;
+    const nextCard = tile("card:2");
+    swap(parent, [nextCard, tile("tile:1")]);
+    expect(parent.children[1]).toBe(kept);
+    expect(kept.firstChild).toBe(keptImg);
+    expect(nextCard.firstChild).toBe(cardImg);
+  });
+
+  it("waits for the finger to lift before redrawing", () => {
+    vi.useFakeTimers();
+    const parent = document.createElement("div");
+    const tapped = document.createElement("a");
+    parent.append(tapped);
+    document.dispatchEvent(new Event("pointerdown"));
+    const next = document.createElement("b");
+    swap(parent, [next]);
+    expect(parent.firstChild).toBe(tapped);
+    document.dispatchEvent(new Event("pointerup"));
+    expect(parent.firstChild).toBe(tapped);
+    vi.advanceTimersByTime(400);
+    expect(parent.firstChild).toBe(next);
+    vi.useRealTimers();
+  });
 });
 
 describe("tabs", () => {
