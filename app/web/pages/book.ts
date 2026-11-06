@@ -52,7 +52,28 @@ export function bookPage({ id }: Record<string, string>): Page {
     if (shown) draw(shown);
   };
 
+  /**
+   * The page is drawn anew when the book changes (background work changes it
+   * every few seconds): never while it is being scrolled or touched, which
+   * replacing it would stop (a phone's scroll then stalls and jumps back).
+   */
+  let touching = false;
+  let scrolledAt = 0;
+  let later: ReturnType<typeof setTimeout> | undefined;
+  const busy = () => touching || Date.now() - scrolledAt < 500;
+  const onScroll = () => (scrolledAt = Date.now());
+  const onTouch = (ev: Event) => {
+    touching = ev.type === "touchstart";
+    scrolledAt = Date.now();
+  };
+  addEventListener("scroll", onScroll, { passive: true });
+  for (const type of ["touchstart", "touchend", "touchcancel"]) addEventListener(type, onTouch, { passive: true });
   const draw = (book: BookDetail) => {
+    clearTimeout(later);
+    if (busy()) {
+      later = setTimeout(() => draw(shown ?? book), 300);
+      return;
+    }
     const y = window.scrollY;
     body.replaceChildren(...render(book));
     window.scrollTo(0, y);
@@ -711,6 +732,9 @@ export function bookPage({ id }: Record<string, string>): Page {
       stop();
       unsubscribe();
       cancelAnimationFrame(frame);
+      clearTimeout(later);
+      removeEventListener("scroll", onScroll);
+      for (const type of ["touchstart", "touchend", "touchcancel"]) removeEventListener(type, onTouch);
       player?.remove();
       sheet?.close();
     },

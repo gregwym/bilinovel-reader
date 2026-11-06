@@ -189,12 +189,12 @@ export class SiteSource {
   }
 
   /** A chapter page: from the database, or fetched and stored. */
-  page(bookId: string, chapterId: string, pageIndex: number, refresh = false): Promise<PageContent> {
+  page(bookId: string, chapterId: string, pageIndex: number, refresh = false, background = false): Promise<PageContent> {
     const cached = refresh ? undefined : this.cachedPage(bookId, chapterId, pageIndex);
     if (cached && !cached.incomplete) return Promise.resolve(cached);
     // An incomplete page is asked for again; what was kept stays when that fails.
-    if (cached) return this.fetch(bookId, chapterId, pageIndex).catch(() => cached);
-    return this.fetch(bookId, chapterId, pageIndex).catch((err: unknown) => {
+    if (cached) return this.fetch(bookId, chapterId, pageIndex, background).catch(() => cached);
+    return this.fetch(bookId, chapterId, pageIndex, background).catch((err: unknown) => {
       const saved = this.backup?.(bookId, chapterId, pageIndex);
       if (!saved) throw err;
       this.db.run(
@@ -210,11 +210,14 @@ export class SiteSource {
     });
   }
 
-  private fetch(bookId: string, chapterId: string, pageIndex: number): Promise<PageContent> {
+  /** `background`: after the requests a person waits for (see `SiteClient.html`). */
+  private fetch(bookId: string, chapterId: string, pageIndex: number, background = false): Promise<PageContent> {
     const id = `${bookId}/${chapterId}/${pageIndex}`;
+    const url = this.pageUrl(bookId, chapterId, pageIndex);
     let p = this.pending.get(id);
+    if (p && !background) this.client.promote(url);
     if (!p) {
-      p = this.fetchPage(this.pageUrl(bookId, chapterId, pageIndex));
+      p = this.fetchPage(url, background);
       this.pending.set(id, p);
       const done = () => this.pending.delete(id);
       p.then(done, done);
@@ -222,17 +225,17 @@ export class SiteSource {
     return p;
   }
 
-  private async load(url: string, retries?: number): Promise<PageContent> {
-    const html = await this.client.html(url, retries);
+  private async load(url: string, retries?: number, background = false): Promise<PageContent> {
+    const html = await this.client.html(url, retries, background);
     const scriptUrl = this.parse(html, url, (doc) => findChapterLogScript(doc, new URL(url)));
     const shuffle = scriptUrl ? await this.template(scriptUrl) : undefined;
     return this.parse(html, url, (doc) => parseBilinovelDocument(doc, new URL(url), { shuffle }));
   }
 
-  private async fetchPage(url: string): Promise<PageContent> {
+  private async fetchPage(url: string, background = false): Promise<PageContent> {
     let page: PageContent;
     try {
-      page = await this.load(url);
+      page = await this.load(url, undefined, background);
     } catch (err) {
       this.fail(err, url);
       throw err;
@@ -298,11 +301,11 @@ export class SiteSource {
     return { pages, complete: true };
   }
 
-  /** All pages of a chapter, in order. */
-  async chapterPages(bookId: string, chapterId: string, onPage?: (n: number) => void): Promise<PageContent[]> {
+  /** All pages of a chapter, in order (`background`: see `page`). */
+  async chapterPages(bookId: string, chapterId: string, onPage?: (n: number) => void, background = false): Promise<PageContent[]> {
     const pages: PageContent[] = [];
     for (let i = 0; i < 100; i++) {
-      const page = await this.page(bookId, chapterId, i);
+      const page = await this.page(bookId, chapterId, i, false, background);
       pages.push(page);
       onPage?.(pages.length);
       if (page.nextType !== "same-chapter-page" || !page.nextUrl) break;
