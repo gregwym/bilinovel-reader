@@ -70,12 +70,7 @@ class FakeAudio {
 const BOOK = [["第一段。", "第二段。"], ["第三段。"]];
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
-function engine(
-  responses: HttpResponse[],
-  cfg: Partial<FishConfig> = {},
-  decode = decoder([1, 1]),
-  extra: { loadTimeoutMs?: number } = {},
-) {
+function engine(responses: HttpResponse[], cfg: Partial<FishConfig> = {}, decode = decoder([1, 1])) {
   const requests: HttpRequest[] = [];
   const waits: number[] = [];
   const statuses: string[] = [];
@@ -98,7 +93,6 @@ function engine(
     },
     sleep: async (ms) => void waits.push(ms),
     onStatus: (msg) => void statuses.push(msg),
-    ...extra,
   });
   return { e, audio, requests, waits, store, statuses };
 }
@@ -191,31 +185,6 @@ describe("FishSpeechEngine", () => {
     expect(requests).toHaveLength(1);
     e.stop();
     await p;
-  });
-
-  it("doesn't wait forever for stored audio that never loads", async () => {
-    const { e, audio, requests, store, statuses } = engine([mp3(), mp3()], {}, decoder([1, 1]), { loadTimeoutMs: 20 });
-    store.get = () => new Promise(() => undefined);
-    const p = e.speak(BOOK[0][0], { rate: 1, paragraphId: "0:0" });
-    await new Promise((r) => setTimeout(r, 60));
-    for (let i = 0; i < 5; i++) await flush();
-    expect(statuses[0]).toBe("Fish Audio 正在载入语音…");
-    // Asked for as if not stored, and played.
-    expect(requests.length).toBeGreaterThanOrEqual(1);
-    expect(audio.paused).toBe(false);
-    e.stop();
-    await expect(p).resolves.toBe("cancelled");
-  });
-
-  it("clears the loading status when stopped while waiting", async () => {
-    const { e, store, statuses } = engine([], {}, decoder([1, 1]), { loadTimeoutMs: 60_000 });
-    store.get = () => new Promise(() => undefined);
-    const p = e.speak(BOOK[0][0], { rate: 1, paragraphId: "0:0" });
-    for (let i = 0; i < 5; i++) await flush();
-    expect(statuses.at(-1)).toBe("Fish Audio 正在载入语音…");
-    e.stop();
-    expect(statuses.at(-1)).toBe("");
-    void p;
   });
 
   it("says audio that isn't stored is generated", async () => {

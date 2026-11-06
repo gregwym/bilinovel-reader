@@ -559,17 +559,7 @@ export interface PageEngineOptions {
    * stored yet), so only the segment's own position is known.
    */
   onTrack?(position: TrackPosition | undefined): void;
-  /** How long loading stored audio may take before it is treated as not stored (ms). */
-  loadTimeoutMs?: number;
 }
-
-/**
- * Loading stored audio that takes longer than this (a stalled request to the
- * server, a stuck IndexedDB) is given up: the segment is asked for as if it
- * weren't stored, which the server answers from its store without a new
- * request to the service.
- */
-const LOAD_TIMEOUT_MS = 20_000;
 
 /** After a paragraph's end, keep the audio running this long for the player to ask for the next one. */
 const CONTINUE_GRACE_MS = 1500;
@@ -709,11 +699,6 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
   stop(): void {
     this.held = false;
     this.token++;
-    // A speak() still waiting for its audio no longer clears its status itself.
-    if (this.waiting) {
-      this.waiting = undefined;
-      this.options.onStatus?.("");
-    }
     this.settleCurrent("cancelled");
     this.pauseAudio();
   }
@@ -804,7 +789,7 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
   private render(seg: Segment, cfg: C): Promise<Rendered> {
     if (seg.done) return Promise.resolve(seg.done);
     seg.rendered ??= (async () => {
-      const stored = await this.load(seg);
+      const stored = await this.store.get(seg.key, seg.texts).catch(() => undefined);
       if (stored) return { audio: stored.audio, bounds: stored.bounds };
       seg.generating = true;
       if (this.waiting === seg) this.showStatus(seg);
@@ -823,26 +808,6 @@ export class PageSpeechEngine<C extends PageEngineConfig> implements SpeechEngin
       () => (seg.rendered = undefined),
     );
     return seg.rendered;
-  }
-
-  /** Stored audio of a segment; undefined when not stored, unreadable or too slow to load. */
-  private load(seg: Segment): Promise<StoredSegment | undefined> {
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        log.warn(`${this.backend.name} loading stored audio timed out`, seg.key);
-        resolve(undefined);
-      }, this.options.loadTimeoutMs ?? LOAD_TIMEOUT_MS);
-      this.store.get(seg.key, seg.texts).then(
-        (stored) => {
-          clearTimeout(timer);
-          resolve(stored);
-        },
-        () => {
-          clearTimeout(timer);
-          resolve(undefined);
-        },
-      );
-    });
   }
 
   private async evict(): Promise<void> {

@@ -22,10 +22,9 @@ export interface Tags {
   genre?: string;
 }
 
-/** Runs a command; one given `timeoutMs` is stopped after it (so a stuck run can't hold up whoever waits for it). */
-function run(cmd: string, args: string[], input?: Buffer, timeoutMs?: number): Promise<Buffer> {
+function run(cmd: string, args: string[], input?: Buffer): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"], timeout: timeoutMs, killSignal: "SIGKILL" });
+    const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"] });
     const out: Buffer[] = [];
     let err = "";
     child.stdout.on("data", (d: Buffer) => out.push(d));
@@ -35,7 +34,6 @@ function run(cmd: string, args: string[], input?: Buffer, timeoutMs?: number): P
     child.on("error", reject);
     child.on("close", (code) => {
       if (code === 0) resolve(Buffer.concat(out));
-      else if (code === null) reject(new Error(`${cmd} was stopped (took too long or was killed)`));
       else reject(new Error(`${cmd} exited with ${code}: ${err.trim().split("\n").slice(-3).join(" | ")}`));
     });
     child.stdin.on("error", () => undefined);
@@ -62,7 +60,7 @@ export class Ffmpeg {
 
   /** Whether ffmpeg runs (checked once). */
   check(): Promise<boolean> {
-    this.available ??= run(this.ffmpeg, ["-hide_banner", "-version"], undefined, 30_000).then(
+    this.available ??= run(this.ffmpeg, ["-hide_banner", "-version"]).then(
       () => true,
       () => false,
     );
@@ -75,8 +73,6 @@ export class Ffmpeg {
       this.ffmpeg,
       ["-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-ac", "1", "-ar", String(rate), "-f", "f32le", "pipe:1"],
       data,
-      // A segment is minutes of audio: decoding takes seconds.
-      60_000,
     );
     const samples = new Float32Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength - (raw.byteLength % 4)));
     return { samples, rate };
