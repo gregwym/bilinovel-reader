@@ -2,6 +2,15 @@ import type { Catalog, CatalogChapter, PageContent } from "../types";
 import { parseChapterUrl } from "./url";
 
 const titleKey = (title: string) => title.normalize("NFKC").replace(/\s+/g, "").trim();
+/** The site masks some characters of chapter pages' titles with 〇 (e.g. 「＃6 〇书的真相是修罗场」 for 情书). */
+const MASK = "\u3007";
+function sameTitle(catalogTitle: string, pageTitle: string): boolean {
+  const a = [...titleKey(catalogTitle)];
+  const b = [...titleKey(pageTitle)];
+  return a.length > 0 && a.length === b.length && a.every((c, i) => c === b[i] || c === MASK || b[i] === MASK) &&
+    // Not a title that is all mask.
+    b.some((c) => c !== MASK);
+}
 
 /**
  * A placeholder is not proof of a missing chapter. Recover it only from a
@@ -25,7 +34,7 @@ export function reconcileCatalog(catalog: Catalog, pages: Iterable<PageContent>)
       const before = volume.chapters[i - 1]?.chapterId;
       const after = volume.chapters[i + 1]?.chapterId;
       const candidates = [...first.values()].filter((page) => {
-        if (linked.has(page.chapterId) || !titleKey(chapter.title) || titleKey(page.chapterTitle) !== titleKey(chapter.title)) return false;
+        if (linked.has(page.chapterId) || !sameTitle(chapter.title, page.chapterTitle)) return false;
         const prev = page.prev && parseChapterUrl(page.prev.url);
         const following = after ? first.get(after) : undefined;
         const followingPrev = following && following.prev && parseChapterUrl(following.prev.url);

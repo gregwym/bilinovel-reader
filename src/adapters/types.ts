@@ -90,8 +90,11 @@ export interface SiteAdapter {
   getDiagnostics?(): Record<string, unknown>[];
   /** Lets the UI host the adapter's loader frames. */
   setFrameHost?(host: FrameHost): void;
-  /** Loads the book's table of contents. */
-  fetchCatalog?(bookId: string): Promise<Catalog>;
+  /**
+   * Loads the book's table of contents. The adapter may keep improving it
+   * afterwards (linking placeholder entries in place); `onUpdate` is called then.
+   */
+  fetchCatalog?(bookId: string, onUpdate?: () => void): Promise<Catalog>;
   /** The book's cover image, when the adapter has one (lock screen artwork when the volume has none). */
   bookCover?(bookId: string): string | undefined;
   /** Builds the URL of a given page of a chapter (used for progress restore). */

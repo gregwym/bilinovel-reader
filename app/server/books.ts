@@ -18,6 +18,7 @@ import type { Ffmpeg } from "./audio/ffmpeg";
 import type { SiteSource } from "./site/source";
 import type { SiteClient } from "./site/client";
 import type { Tts } from "./tts";
+import { fillPlaceholders, pageRef } from "../../src/adapters/bilinovel/fillPlaceholders";
 import { bookCatalog, type BookRow, type ChapterAudioRow, type Library } from "./library";
 import { existsSync, statSync } from "node:fs";
 import { savedTexts } from "./backup";
@@ -120,6 +121,35 @@ export class Books {
       if (recovered.length) this.recoveryListeners.forEach((fn) => fn(id, recovered));
     });
     this.catalogListeners.forEach((fn) => fn(id));
+    if (fetchedAt !== undefined) this.fillPlaceholders(id, catalog);
+  }
+
+  /** Books whose placeholders are being looked up, and pages that failed (not asked for again until restart). */
+  private readonly filling = new Set<string>();
+  private readonly fillFailed = new Map<string, Set<string>>();
+
+  /**
+   * After a catalog fetch: loads the pages next to its placeholder entries
+   * (cached ones first) so their links can be recovered. Newly cached pages
+   * reconcile the saved catalog (`onPageCached`); a last pass covers cached ones.
+   */
+  private fillPlaceholders(id: string, catalog: Catalog): void {
+    if (this.filling.has(id) || !catalog.volumes.some((v) => v.chapters.some((c) => !c.chapterId))) return;
+    this.filling.add(id);
+    const failed = this.fillFailed.get(id) ?? new Set<string>();
+    this.fillFailed.set(id, failed);
+    const load = (chapterId: string, pageIndex: number) =>
+      this.source.page(id, chapterId, pageIndex).catch((err: unknown) => {
+        failed.add(pageRef({ chapterId, pageIndex }));
+        throw err;
+      });
+    void fillPlaceholders(structuredClone(catalog), load, { tried: new Set(failed) })
+      .then((linked) => {
+        if (linked.length) console.info(`[library] book ${id}: linked ${linked.length} catalog placeholder(s) from chapter navigation`);
+        if (this.get(id)) this.reconcile(id);
+      })
+      .catch((err: unknown) => console.warn("[library] catalog placeholders", id, String(err)))
+      .finally(() => this.filling.delete(id));
   }
 
   /**

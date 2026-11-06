@@ -9,6 +9,7 @@ import { defaultFrameHost, loadInFrame, type FrameHost, type LoadedFrame } from 
 import { SUPPORTED_HOSTS, buildPageUrl, isChapterUrl } from "./url";
 import { catalogUrl, hasCatalog, parseCatalogDocument } from "./catalog";
 import { reconcileCatalog } from "./reconcileCatalog";
+import { fillPlaceholders, pageRef } from "./fillPlaceholders";
 import { ensureNightCookie } from "./siteCookies";
 
 const TEMPLATE_CACHE_KEY = "biliReader.chapterlogTemplate";
@@ -24,6 +25,42 @@ class TemplateUnavailableError extends Error {
   }
 }
 
+/**
+ * What visited pages say about their chapter (title, links; no text), kept in
+ * localStorage per book: evidence for linking catalog placeholders.
+ */
+class CatalogNav {
+  private static readonly MAX = 300;
+  private readonly key: string;
+  constructor(bookId: string) {
+    this.key = `bili-reader:catalog-nav:${bookId}`;
+  }
+
+  pages(): Map<string, PageContent> {
+    try {
+      const list = JSON.parse(localStorage.getItem(this.key) ?? "[]") as PageContent[];
+      return new Map(Array.isArray(list) ? list.map((p) => [pageRef(p), p]) : []);
+    } catch {
+      return new Map();
+    }
+  }
+
+  add(page: PageContent): void {
+    try {
+      const pages = this.pages();
+      pages.delete(pageRef(page));
+      pages.set(pageRef(page), {
+        ...page,
+        // Only whether it had content counts.
+        paragraphs: page.paragraphs.slice(0, 1).map((p) => ({ id: p.id })),
+      });
+      localStorage.setItem(this.key, JSON.stringify([...pages.values()].slice(-CatalogNav.MAX)));
+    } catch {
+      /* storage full or blocked: only costs requests next time */
+    }
+  }
+}
+
 export class BilinovelAdapter implements SiteAdapter {
   readonly name = "bilinovel";
   private readonly templates = new Map<string, Promise<ShuffleTemplate | undefined>>();
@@ -32,6 +69,8 @@ export class BilinovelAdapter implements SiteAdapter {
   private readonly diagnostics: Record<string, unknown>[] = [];
   private readonly firstPages = new Map<string, PageContent>();
   private readonly catalogs = new Map<string, Catalog>();
+  /** Books whose catalog placeholders are being looked up. */
+  private readonly filling = new Set<string>();
 
   constructor(
     private readonly queue: RequestQueue = new RequestQueue(),
@@ -129,8 +168,12 @@ export class BilinovelAdapter implements SiteAdapter {
     return page;
   }
 
-  /** Loads the table of contents (same loading strategy as chapter pages). */
-  fetchCatalog(bookId: string): Promise<Catalog> {
+  /**
+   * Loads the table of contents (same loading strategy as chapter pages).
+   * Then, in the background, follows the neighbouring chapters' links to its
+   * placeholder entries; `onUpdate` is called whenever one got linked.
+   */
+  fetchCatalog(bookId: string, onUpdate?: () => void): Promise<Catalog> {
     const url = catalogUrl(location.origin, bookId);
     const u = new URL(url);
     const parse = async (doc: Document) => {
@@ -140,7 +183,7 @@ export class BilinovelAdapter implements SiteAdapter {
       this.record({ url, method: "catalog", chapters: catalog.volumes.reduce((n, v) => n + v.chapters.length, 0) });
       return catalog;
     };
-    return this.queue.run(async () => {
+    const catalog = this.queue.run(async () => {
       try {
         return await this.withFrame(url, false, parse, hasCatalog);
       } catch (err) {
@@ -149,6 +192,42 @@ export class BilinovelAdapter implements SiteAdapter {
         return this.withFrame(url, true, parse, hasCatalog);
       }
     });
+    return catalog.then((c) => {
+      void this.fillPlaceholders(c, onUpdate);
+      return c;
+    });
+  }
+
+  /**
+   * Loads the pages next to the catalog's placeholders, one at a time through
+   * the queue (a page the reader asks for waits for one at most). What they
+   * say is kept (`CatalogNav`), so the next visit needs no requests.
+   */
+  private async fillPlaceholders(catalog: Catalog, onUpdate?: () => void): Promise<void> {
+    const { bookId } = catalog;
+    const unlinked = () => catalog.volumes.reduce((n, v) => n + v.chapters.filter((c) => !c.chapterId).length, 0);
+    if (this.filling.has(bookId) || !unlinked()) return;
+    this.filling.add(bookId);
+    const kept = new CatalogNav(bookId);
+    const pages = kept.pages();
+    for (const p of this.firstPages.values()) if (p.bookId === bookId) pages.set(pageRef(p), p);
+    const load = async (chapterId: string, pageIndex: number) => {
+      const before = unlinked();
+      const page = await this.fetchPage(this.pageUrl(bookId, chapterId, pageIndex));
+      kept.add(page);
+      // Loading it may have linked it already (see `logged`).
+      if (unlinked() < before) onUpdate?.();
+      return page;
+    };
+    try {
+      const placeholders = unlinked();
+      await fillPlaceholders(catalog, load, { pages, onRecovered: () => onUpdate?.() });
+      this.record({ method: "catalog-placeholders", bookId, placeholders, left: unlinked() });
+    } catch (err) {
+      log.warn("catalog placeholders", err);
+    } finally {
+      this.filling.delete(bookId);
+    }
   }
 
   /** Loads a page through the rate-limited queue. */

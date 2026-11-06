@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
 import { BilinovelAdapter } from "../src/adapters/bilinovel";
 import { parseChapterLogScript } from "../src/adapters/bilinovel/deobfuscate";
 import { isInvisible, parseBilinovelDocument } from "../src/adapters/bilinovel/parser";
@@ -95,6 +95,43 @@ describe("userscript catalog recovery", () => {
     }
     expect(catalog.volumes[0].chapters[1].chapterId).toBe("180210");
     expect(catalog.volumes[0].chapters[1].url).toBe(`${ORIGIN}/novel/5369/180210.html`);
+  });
+});
+
+describe("userscript: linking catalog placeholders after loading the catalog", () => {
+  const catalogHtml = `<div id="volumes"><h2>卷</h2><ul>
+    <li><a href="/novel/5369/180209.html">前</a></li>
+    <li class="jsChapter"><a href="javascript:cid(1)">第十章 普通的一章</a></li>
+    <li><a href="/novel/5369/180211.html">后</a></li></ul></div>`;
+  const chapter = (id: string, title: string, prev: string, next: string) =>
+    `<script>var ReadParams={url_previous:'/novel/5369/${prev}.html',url_next:'/novel/5369/${next}.html',
+      articleid:'5369',chapterid:'${id}',chaptername:'${title}'};</script>
+      <h1 id="atitle">${title}</h1><div id="acontent"><p>正文正文正文正文正文正文正文正文正文正文。</p></div>`;
+  const site: Record<string, string> = {
+    "/novel/5369/catalog": catalogHtml,
+    "/novel/5369/180211.html": chapter("180211", "后", "180210", "180212"),
+    "/novel/5369/180210.html": chapter("180210", "第十章 普通的一章", "180209", "180211"),
+  };
+  beforeEach(() => localStorage.removeItem("bili-reader:catalog-nav:5369"));
+
+  it("follows the next chapter's link, and keeps what it learnt for the next visit", async () => {
+    const loads: string[] = [];
+    const loader: Loader = async (url) => {
+      loads.push(new URL(url).pathname);
+      return { doc: new DOMParser().parseFromString(site[new URL(url).pathname] ?? "", "text/html"), win: window, dispose() {} };
+    };
+    let updates = 0;
+    const catalog = await new BilinovelAdapter(queue(), host, loader).fetchCatalog("5369", () => updates++);
+    await vi.waitFor(() => expect(catalog.volumes[0].chapters[1].chapterId).toBe("180210"));
+    // Pages are loaded from the site the reader runs on.
+    expect(catalog.volumes[0].chapters[1].url).toBe(`${location.origin}/novel/5369/180210.html`);
+    expect(loads).toEqual(["/novel/5369/catalog", "/novel/5369/180211.html", "/novel/5369/180210.html"]);
+    expect(updates).toBeGreaterThan(0);
+
+    loads.length = 0;
+    const again = await new BilinovelAdapter(queue(), host, loader).fetchCatalog("5369");
+    expect(again.volumes[0].chapters[1].chapterId).toBe("180210");
+    expect(loads).toEqual(["/novel/5369/catalog"]);
   });
 });
 
