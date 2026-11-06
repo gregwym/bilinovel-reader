@@ -97,8 +97,16 @@ describe("existing library recovery", () => {
     await s.books.refresh("10");
     expect(requests.filter((u) => /\/novel\/10\/\d+\.html$/.test(u))).toEqual([]);
   }, 15_000);
+  it("links what a saved catalog lacks at startup, without fetching the catalog again", async () => {
+    const { open } = setup();
+    const upgraded = open();
+    await vi.waitFor(() => expect(recoveredId(upgraded)).toBe("321"), { timeout: 9000, interval: 100 });
+    expect(requests).toEqual([`${origin}/novel/10/999.html`, `${origin}/novel/10/321.html`]);
+    expect(upgraded.books.get("10")!.catalog_at).toBe(123);
+  }, 15_000);
   it("leaves unavailable placeholders alone and never guesses an ID", () => {
     const { s, open } = setup();
+    // Synchronously: no evidence yet (what startup then loads is the test above).
     expect(recoveredId(open())).toBeUndefined();
     expect(s.jobs.overview().jobs).toEqual([]);
   });

@@ -59,6 +59,8 @@ export function createServices(config: Config, version: string, options: Service
   // Upgrade existing libraries before the planner sees their reading positions.
   // This is idempotent and does not require fetching the catalog again.
   for (const book of books.list()) books.reconcile(book.id);
+  // Then what the saved catalogs still lack a link for: from neighbouring chapters' links (site requests, in the background).
+  void books.fillSaved();
   // What was cached before (or changed while the server was down) into the library.
   void backup.saveAll();
   void (async () => {

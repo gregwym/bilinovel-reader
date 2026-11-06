@@ -121,7 +121,7 @@ export class Books {
       if (recovered.length) this.recoveryListeners.forEach((fn) => fn(id, recovered));
     });
     this.catalogListeners.forEach((fn) => fn(id));
-    if (fetchedAt !== undefined) this.fillPlaceholders(id, catalog);
+    if (fetchedAt !== undefined) void this.fillPlaceholders(id, catalog);
   }
 
   /** Books whose placeholders are being looked up, and pages that failed (not asked for again until restart). */
@@ -129,11 +129,28 @@ export class Books {
   private readonly fillFailed = new Map<string, Set<string>>();
 
   /**
+   * Startup: the same lookup for the catalogs already saved, one book at a
+   * time (each load waits its turn in the site's request queue). No catalog
+   * is fetched again; pages already cached cost no requests.
+   */
+  async fillSaved(): Promise<void> {
+    try {
+      for (const { id } of this.list()) {
+        const book = this.get(id);
+        const catalog = book && bookCatalog(book);
+        if (catalog) await this.fillPlaceholders(id, catalog);
+      }
+    } catch (err) {
+      console.warn("[library] catalog placeholders", String(err));
+    }
+  }
+
+  /**
    * After a catalog fetch: loads the pages next to its placeholder entries
    * (cached ones first) so their links can be recovered. Newly cached pages
    * reconcile the saved catalog (`onPageCached`); a last pass covers cached ones.
    */
-  private fillPlaceholders(id: string, catalog: Catalog): void {
+  private async fillPlaceholders(id: string, catalog: Catalog): Promise<void> {
     if (this.filling.has(id) || !catalog.volumes.some((v) => v.chapters.some((c) => !c.chapterId))) return;
     this.filling.add(id);
     const failed = this.fillFailed.get(id) ?? new Set<string>();
@@ -143,7 +160,7 @@ export class Books {
         failed.add(pageRef({ chapterId, pageIndex }));
         throw err;
       });
-    void fillPlaceholders(structuredClone(catalog), load, { tried: new Set(failed) })
+    await fillPlaceholders(structuredClone(catalog), load, { tried: new Set(failed) })
       .then((linked) => {
         if (linked.length) console.info(`[library] book ${id}: linked ${linked.length} catalog placeholder(s) from chapter navigation`);
         if (this.get(id)) this.reconcile(id);
