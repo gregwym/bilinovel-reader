@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Db } from "./db";
 import type { SiteClient } from "./site/client";
@@ -44,16 +44,37 @@ export class Images {
     return undefined;
   }
 
-  /** An image: from where it already is, else fetched from the site (and kept). Throws if it isn't an image. */
-  async load(url: string): Promise<{ body: Buffer; type: string }> {
+  /**
+   * An image: from where it already is, else fetched from the site (and kept). Throws if it isn't an image.
+   *
+   * The reader and the library backup often ask for the same illustration at
+   * once: it is fetched once, and the file only appears when it is whole (a
+   * half-written one would be served, and the browser keeps it for good).
+   */
+  load(url: string): Promise<{ body: Buffer; type: string }> {
+    let p = this.inflight.get(url);
+    if (!p) {
+      p = this.fetchAndKeep(url);
+      this.inflight.set(url, p);
+      const done = () => this.inflight.delete(url);
+      p.then(done, done);
+    }
+    return p;
+  }
+
+  private readonly inflight = new Map<string, Promise<{ body: Buffer; type: string }>>();
+
+  private async fetchAndKeep(url: string): Promise<{ body: Buffer; type: string }> {
     const found = await this.find(url);
     if (found) return { body: await readFile(found.file), type: found.type };
     const img = await this.client.binary(url, this.referer());
     if (!/^image\//.test(img.type)) throw new NotImageError(`Not an image (${img.type}): ${url}`);
     const file = this.cacheFile(url);
     await mkdir(join(file, ".."), { recursive: true });
-    await writeFile(file, img.body);
+    // The type first: find() takes the image once both files are there.
     await writeFile(`${file}.type`, img.type);
+    await writeFile(`${file}.part`, img.body);
+    await rename(`${file}.part`, file);
     return img;
   }
 }
