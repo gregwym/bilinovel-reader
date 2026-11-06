@@ -69,34 +69,6 @@ async function refresh(url, res) {
   if (await cache.match(key)) await cache.put(key, res);
 }
 
-/**
- * A page: the newest index.html, or the cached one when the server can't be
- * reached or hasn't answered within a few seconds (a busy server, or the
- * browser's connections all taken), instead of a blank screen.
- */
-async function navigation(event, req) {
-  const network = fetch(req);
-  // Keeps the newest copy, even when the cached one was shown meanwhile.
-  event.waitUntil(
-    network
-      .then(async (res) => {
-        if (!res.ok) return;
-        const cache = await caches.open(CACHE);
-        await cache.put("/", res.clone());
-        await precache();
-      })
-      .catch(() => undefined),
-  );
-  const first = await Promise.race([
-    network.catch(() => undefined),
-    new Promise((resolve) => self.setTimeout(resolve, NAVIGATION_WAIT_MS, undefined)),
-  ]);
-  if (first) return first;
-  const hit = await caches.match("/");
-  return hit ?? network.catch(() => Response.error());
-}
-const NAVIGATION_WAIT_MS = 4000;
-
 self.addEventListener("fetch", (event) => {
   const req = event.request;
   const url = new URL(req.url);
@@ -110,7 +82,23 @@ self.addEventListener("fetch", (event) => {
   if (req.method !== "GET") return;
   if (req.mode === "navigate") {
     // Every page is the same index.html: the newest one, or the cached one offline.
-    event.respondWith(navigation(event, req));
+    event.respondWith(
+      fetch(req)
+        .then((res) => {
+          if (res.ok) {
+            const copy = res.clone();
+            event.waitUntil(
+              caches
+                .open(CACHE)
+                .then((cache) => cache.put("/", copy))
+                .then(precache)
+                .catch(() => undefined),
+            );
+          }
+          return res;
+        })
+        .catch(() => caches.match("/").then((hit) => hit ?? Response.error())),
+    );
     return;
   }
   if (url.pathname.startsWith("/assets/")) {

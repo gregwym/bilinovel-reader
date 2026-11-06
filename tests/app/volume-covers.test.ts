@@ -49,8 +49,8 @@ describe("volume covers", () => {
     expect(Date.now() - started).toBeLessThan(1000);
     expect(answers.map((r) => r.status)).toEqual([200, 200, 200]);
     expect(await answers[0].text()).toBe("book cover");
-    // Not kept by the browser: the volume's own shows once it is fetched.
-    expect(answers[0].headers.get("cache-control")).toBe("no-cache");
+    // Kept only briefly: the volume's own shows once it is fetched.
+    expect(answers[0].headers.get("cache-control")).toBe("private, max-age=600");
     expect(asked).toHaveLength(1);
   });
 

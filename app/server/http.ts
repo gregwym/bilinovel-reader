@@ -313,8 +313,9 @@ export function createApp(d: AppDeps): Hono {
     const own = d.library.volumeCover(book, vi);
     if (!own && bookCatalog(book)?.volumes[vi]?.cover) void d.library.updateCovers(book.id);
     const file = own ?? d.library.coverFile(book.id);
-    // The book's in its place is not kept by the browser: its own shows once fetched.
-    const cache = { "Cache-Control": own ? "private, max-age=86400" : "no-cache" };
+    // The book's in its place is kept only briefly (its own shows once fetched), not asked
+    // for again on every redraw of the book page.
+    const cache = { "Cache-Control": `private, max-age=${own ? 86400 : 600}` };
     return existsSync(file) ? sendFile(c, file, "image/jpeg", cache) : c.body(null, 404);
   });
 
