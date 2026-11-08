@@ -1,0 +1,25 @@
+[Unit]
+Description=Bili Reader signed webhook receiver (wake only)
+After=network.target bili-reader-cd.service
+
+[Service]
+User=bili-hook
+Group=bili-hook
+SupplementaryGroups=bili-signal
+ExecStart=/usr/bin/python3 /opt/bili-reader-cd/webhook.py
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET
+InaccessiblePaths=/srv/bili-reader /srv/bili-reader-cd /etc/bili-reader-cd /run/docker.sock
+MemoryMax=64M
+TasksMax=16
+
+[Install]
+WantedBy=multi-user.target

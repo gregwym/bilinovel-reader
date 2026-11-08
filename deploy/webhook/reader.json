@@ -1,0 +1,8 @@
+{
+  "repository": "gregwym/bilinovel-reader",
+  "repository_id": 1406537869,
+  "workflow": ".github/workflows/server-image.yml",
+  "branch": "main",
+  "route": "/hooks/bili-reader",
+  "signal_socket": "/run/cd-hook/wake.sock"
+}

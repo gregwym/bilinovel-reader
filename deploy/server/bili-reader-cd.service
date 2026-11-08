@@ -1,0 +1,30 @@
+[Unit]
+Description=Bili Reader independently verified rootless deployment reconciler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=bili-run
+Group=bili-run
+SupplementaryGroups=bili-signal
+EnvironmentFile=/etc/bili-reader-cd/github.env
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=GH_HOST=github.com
+Environment=GH_CONFIG_DIR=/srv/bili-reader-cd/gh
+ExecStart=/usr/bin/python3 /opt/bili-reader-cd/worker.py
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/srv/bili-reader /srv/bili-reader-cd /run/bili-reader-cd
+InaccessiblePaths=/run/docker.sock
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
