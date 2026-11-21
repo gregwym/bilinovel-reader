@@ -146,7 +146,12 @@ export class Db {
     return { changes: Number(r.changes), lastInsertRowid: Number(r.lastInsertRowid) };
   }
 
+  /**
+   * Runs `fn` in one transaction: one commit (one disk sync) for all its
+   * writes. Inside another transaction, `fn` joins it.
+   */
   tx<T>(fn: () => T): T {
+    if (this.sql.isTransaction) return fn();
     this.sql.exec("begin");
     try {
       const out = fn();

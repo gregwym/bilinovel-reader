@@ -342,16 +342,19 @@ export function createApp(d: AppDeps): Hono {
     const cached = d.source.cachedChapters(book.id);
     let queued = 0;
     const incomplete: { chapterId: string; title: string }[] = [];
-    for (const ch of pick) {
-      if (ready.get(ch.id)) continue;
-      const partial = !!cached.get(ch.id)?.incomplete;
-      if (partial && !body.partial) {
-        incomplete.push({ chapterId: ch.id, title: ch.title });
-        continue;
+    // One transaction: a whole book is one disk sync, not one per chapter.
+    d.db.tx(() => {
+      for (const ch of pick) {
+        if (ready.get(ch.id)) continue;
+        const partial = !!cached.get(ch.id)?.incomplete;
+        if (partial && !body.partial) {
+          incomplete.push({ chapterId: ch.id, title: ch.title });
+          continue;
+        }
+        d.jobs.enqueueChapter(book.id, ch.id, ch.title, "manual", partial);
+        queued++;
       }
-      d.jobs.enqueueChapter(book.id, ch.id, ch.title, "manual", partial);
-      queued++;
-    }
+    });
     return c.json({ queued, incomplete } satisfies GenerateResult);
   });
 
@@ -365,12 +368,14 @@ export function createApp(d: AppDeps): Hono {
     const body = await c.req.json<ChapterPick>().catch(() => ({}) as Record<string, never>);
     const saved = savedTexts(d.db, book.id);
     let queued = 0;
-    for (const ch of pickChapters(book, body)) {
-      const text = saved.get(ch.id);
-      if (text && !text.incomplete) continue;
-      d.jobs.enqueueText(book.id, ch.id, ch.title, "manual");
-      queued++;
-    }
+    d.db.tx(() => {
+      for (const ch of pickChapters(book, body)) {
+        const text = saved.get(ch.id);
+        if (text && !text.incomplete) continue;
+        d.jobs.enqueueText(book.id, ch.id, ch.title, "manual");
+        queued++;
+      }
+    });
     return c.json({ queued } satisfies DownloadResult);
   });
 
