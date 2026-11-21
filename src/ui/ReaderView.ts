@@ -582,16 +582,24 @@ export class ReaderView {
   /** Keeps the spoken paragraph in view without fighting a user who is scrolling. */
   follow(id: string): void {
     if (this.userScrolledRecently) return;
-    // In the background a smooth scroll never runs; revealActive() catches up on return.
+    // In the background a smooth scroll never runs; revealOnReturn() catches up on return.
     this.bringIntoBand(id, document.hidden ? "instant" : "smooth");
   }
 
   /**
-   * Jumps straight to the spoken paragraph, for coming back to the page:
-   * while it was in the background the view could not keep up.
+   * Coming back to the page. While listening, the view could not follow the
+   * voice in the background: jump straight to the spoken paragraph. Otherwise
+   * the page stays where the reader left it — after pausing they may have read
+   * on far past the paused paragraph. Only a cursor that is off screen (the
+   * voice moved it on in the background, then was paused from the lock
+   * screen) is brought into view.
    */
-  revealActive(): void {
-    if (this.activeId) this.bringIntoBand(this.activeId, "instant");
+  revealOnReturn(cursorId: string | undefined, listening: boolean): void {
+    if (listening) {
+      if (this.activeId) this.bringIntoBand(this.activeId, "instant");
+    } else if (cursorId && !this.isOnScreen(cursorId)) {
+      this.bringIntoBand(cursorId, "instant");
+    }
   }
 
   private bringIntoBand(id: string, behavior: ScrollBehavior): void {

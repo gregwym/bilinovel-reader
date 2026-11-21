@@ -493,7 +493,7 @@ export class Reader implements PlaybackSource {
 
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") {
-        this.view.revealActive();
+        this.view.revealOnReturn(this.cursorId, this.player.isActive);
         this.player.recoverIfStalled();
         void this.checkExternalProgress();
       } else void this.saveNow();
