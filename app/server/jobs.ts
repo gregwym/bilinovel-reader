@@ -56,6 +56,8 @@ export class Jobs {
   /** Chapter files compaction looked at (each once per run of the server). */
   private compactSeen = new Set<string>();
   private timer?: ReturnType<typeof setTimeout>;
+  /** A look for work is queued (see kick). */
+  private kicked = false;
   private stopped = false;
   private listeners: (() => void)[] = [];
   /** Writes a chapter's text into the library (see Backup.saveChapter). */
@@ -125,8 +127,7 @@ export class Jobs {
       if (partial && !existing.partial) this.db.run("update jobs set partial = 1 where id = ?", existing.id);
       return existing.id;
     }
-    const id = this.insert("chapter", bookId, chapterId, title, reason);
-    if (partial) this.db.run("update jobs set partial = 1 where id = ?", id);
+    const id = this.insert("chapter", bookId, chapterId, title, reason, partial);
     this.kick();
     return id;
   }
@@ -178,12 +179,12 @@ export class Jobs {
     }
   }
 
-  private insert(kind: JobKind, bookId: string, target: string, title: string, reason: JobReason): number {
+  private insert(kind: JobKind, bookId: string, target: string, title: string, reason: JobReason, partial = false): number {
     const t = this.now();
     const profile = this.tts.profile();
     return this.db.run(
-      `insert into jobs (kind, book_id, target, title, profile, reason, priority, status, created_at, updated_at)
-       values (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+      `insert into jobs (kind, book_id, target, title, profile, reason, priority, status, partial, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
       kind,
       bookId,
       target,
@@ -191,6 +192,7 @@ export class Jobs {
       profile ? this.tts.profileId(profile) : "",
       reason,
       PRIORITY[reason],
+      partial ? 1 : 0,
       t,
       t,
     ).lastInsertRowid;
@@ -211,13 +213,17 @@ export class Jobs {
       "select * from jobs where book_id = ? and kind = 'chapter' and reason = 'follow' and status = 'queued'",
       bookId,
     );
-    for (const r of rows) if (!keep.has(r.target)) this.cancel(r.id);
+    this.db.tx(() => {
+      for (const r of rows) if (!keep.has(r.target)) this.cancel(r.id);
+    });
   }
 
   cancelBook(bookId: string): void {
-    for (const r of this.db.all<JobRow>("select id from jobs where book_id = ? and status in ('queued', 'running')", bookId)) {
-      this.cancel(r.id);
-    }
+    this.db.tx(() => {
+      for (const r of this.db.all<JobRow>("select id from jobs where book_id = ? and status in ('queued', 'running')", bookId)) {
+        this.cancel(r.id);
+      }
+    });
   }
 
   retry(id: number): void {
@@ -284,11 +290,20 @@ export class Jobs {
     if (this.timer) clearTimeout(this.timer);
   }
 
-  /** Looks for work now. */
+  /**
+   * Looks for work now. Kicks before that look come to one (queueing a
+   * whole book kicks once per chapter).
+   */
   kick(): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
-    queueMicrotask(() => void this.tick());
+    if (!this.kicked) {
+      this.kicked = true;
+      queueMicrotask(() => {
+        this.kicked = false;
+        void this.tick();
+      });
+    }
     this.changed();
   }
 
