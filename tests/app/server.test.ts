@@ -54,6 +54,8 @@ let mp3: Buffer;
 const siteRequests: string[] = [];
 let ttsRequests: { url: string; text: string }[] = [];
 let ttsStatus = 200;
+/** What a failed speech request answers. */
+let ttsError = "";
 /** Called on each speech request (before it answers). */
 let onTts: (() => void) | undefined;
 let services: ReturnType<typeof createServices>;
@@ -75,7 +77,7 @@ async function siteFetch(url: string): Promise<Response> {
 async function ttsRequest(req: HttpRequest): Promise<HttpResponse> {
   ttsRequests.push({ url: req.url, text: req.body ? (JSON.parse(req.body) as { text: string }).text : "" });
   onTts?.();
-  if (ttsStatus !== 200) return { status: ttsStatus, headers: {}, body: new ArrayBuffer(0) };
+  if (ttsStatus !== 200) return { status: ttsStatus, headers: {}, body: new TextEncoder().encode(ttsError).buffer as ArrayBuffer };
   const body = mp3.buffer.slice(mp3.byteOffset, mp3.byteOffset + mp3.byteLength) as ArrayBuffer;
   return { status: 200, headers: { "content-type": "audio/mpeg" }, body };
 }
@@ -545,6 +547,50 @@ describe("library server", () => {
     ttsStatus = 200;
     await send("PUT", "/api/settings", { keys: { fish: "new-key" } });
     expect((await json<JobsOverview>(call("/api/jobs"))).blocked.fish).toBeUndefined();
+  });
+
+  /** Fish Audio's answer at 2026-11-23 23:40 PST, as logged; the same model and voice worked before and after. */
+  const UNSERVED = JSON.stringify({ status: 404, message: "no service on this path serves the requested model" });
+
+  /** Queues 180205 again while Fish Audio answers `status` and `error`; returns its job once `settled`. */
+  async function generateWhileFailing(status: number, error: string, settled: (o: JobsOverview) => unknown) {
+    await waitFor(() => !services.jobs.overview().counts.running);
+    services.jobs.setPaused(true);
+    await send("POST", "/api/jobs/clear");
+    ttsStatus = status;
+    ttsError = error;
+    services.jobs.setPaused(false);
+    await send("DELETE", "/api/books/5369/audio?chapter=180205");
+    await send("POST", "/api/library/clear-segments");
+    await send("POST", "/api/books/5369/generate", { chapters: ["180205"] });
+    return waitFor(async () => {
+      const o = await json<JobsOverview>(call("/api/jobs"));
+      const job = o.jobs.find((j) => j.target === "180205" && j.status === "queued");
+      return !!job && !!settled(o) && { overview: o, job };
+    });
+  }
+
+  it.skipIf(!hasFfmpeg)("retries by itself when Fish Audio briefly serves no model (2026-11-23)", async () => {
+    // Every try of the first run gets the 404 seen on 2026-11-23.
+    const { overview, job } = await generateWhileFailing(404, UNSERVED, (o) =>
+      o.blocked.fish || o.jobs.some((j) => j.target === "180205" && j.notBefore),
+    );
+    expect(overview.blocked.fish).toBeUndefined();
+    expect(job).toMatchObject({ status: "queued", message: "Fish Audio 服务暂时出错" });
+    // The service is back when the job's time comes: it finishes without the user.
+    ttsStatus = 200;
+    services.db.run("update jobs set not_before = 0 where id = ?", job.id);
+    services.jobs.kick();
+    await waitFor(async () => (await json<JobsOverview>(call("/api/jobs"))).jobs.find((j) => j.id === job.id && j.status === "done"));
+  });
+
+  it("waits for settings when Fish Audio says the model or voice doesn't exist", async () => {
+    // Fish Audio doesn't document this 404's wording: any other than UNSERVED.
+    const { overview, job } = await generateWhileFailing(404, JSON.stringify({ status: 404, message: "Not Found" }), (o) => o.blocked.fish);
+    expect(overview.blocked.fish?.code).toBe("model");
+    expect(job.status).toBe("queued");
+    ttsStatus = 200;
+    await send("POST", "/api/jobs/resume");
   });
 
   it.skipIf(!hasFfmpeg)("stops generating a chapter's segments when the queue is paused", async () => {

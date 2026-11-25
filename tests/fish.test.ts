@@ -229,4 +229,23 @@ describe("FishSpeechEngine", () => {
     const { e } = engine([json(402, { message: "Insufficient balance" })], { ahead: 0 });
     await expect(e.speak("你好。", { rate: 1 })).rejects.toMatchObject({ code: "billing" });
   });
+
+  it("retries while Fish Audio briefly serves no model (the 404 of 2026-11-23)", async () => {
+    // As logged at 2026-11-23 23:40 PST; the same model and voice worked before and after.
+    const unserved = json(404, { status: 404, message: "no service on this path serves the requested model" });
+    const { e, requests, waits } = engine([unserved, mp3()], { ahead: 0 });
+    const p = e.speak("你好。", { rate: 1 });
+    for (let i = 0; i < 3; i++) await flush();
+    expect(requests).toHaveLength(2);
+    expect(waits).toEqual([2000]);
+    e.stop();
+    await p;
+  });
+
+  it("reports a model or voice that doesn't exist", async () => {
+    // Fish Audio doesn't document this 404's wording: any other than the one above.
+    const { e, requests } = engine([json(404, { status: 404, message: "Not Found" })], { ahead: 0 });
+    await expect(e.speak("你好。", { rate: 1 })).rejects.toMatchObject({ code: "model" });
+    expect(requests).toHaveLength(1);
+  });
 });
