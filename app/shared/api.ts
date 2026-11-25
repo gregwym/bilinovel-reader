@@ -191,6 +191,8 @@ export interface ProviderBlock {
   code: string;
   message: string;
   since: number;
+  /** Down for now: the first queued job tries again at this time (no settings needed). */
+  retryAt?: number;
 }
 
 export interface JobsOverview {
