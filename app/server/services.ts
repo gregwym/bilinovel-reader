@@ -22,6 +22,8 @@ export interface ServiceOptions {
   request?: (req: HttpRequest) => Promise<HttpResponse>;
   sleep?: (ms: number) => Promise<void>;
   ffmpeg?: Ffmpeg;
+  /** The job queue's clock (tests move it on). */
+  now?: () => number;
 }
 
 /** Wires the server's parts together. */
@@ -42,7 +44,7 @@ export function createServices(config: Config, version: string, options: Service
   const restored = backup.restore();
   if (restored.books) console.log(`[backup] restored ${restored.books} book(s) from the library`);
   const books = new Books(db, settings, source, client, library, tts, ffmpeg);
-  const jobs = new Jobs(db, source, tts, library, ffmpeg);
+  const jobs = new Jobs(db, source, tts, library, ffmpeg, options.now);
   jobs.setTextSaver((id, chapterId) => backup.saveChapter(id, chapterId));
   const planner = new Planner(books, jobs, tts, library, source);
   books.onRecovered((id, recovered) => jobs.recoverChapters(id, recovered));

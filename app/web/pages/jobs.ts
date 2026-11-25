@@ -49,7 +49,8 @@ export function jobsPage(): Page {
     if (data.paused) nodes.push(h("div", { class: "banner" }, "队列已暂停：新任务会排队，但不会开始生成。"));
     for (const [provider, block] of Object.entries(data.blocked)) {
       if (!block) continue;
-      const retry = h("button", { class: "btn small" }, "重试");
+      const label = PROVIDER_LABEL[provider] ?? provider;
+      const retry = h("button", { class: "btn small" }, block.retryAt ? "立即重试" : "重试");
       retry.addEventListener("click", () =>
         void act(retry, async () => {
           await api.post("/api/jobs/resume");
@@ -59,13 +60,15 @@ export function jobsPage(): Page {
       nodes.push(
         h(
           "div",
-          { class: "banner error" },
+          { class: block.retryAt ? "banner" : "banner error" },
           h(
             "div",
             { class: "grow" },
-            h("b", {}, `${PROVIDER_LABEL[provider] ?? provider} 已停用`),
+            h("b", {}, block.retryAt ? `${label} 暂时不可用` : `${label} 已停用`),
             h("div", {}, block.message),
-            h("div", { class: "hint" }, `${formatTime(block.since)} · 修改设置后自动恢复 · `, h("a", { href: "/settings", "data-link": true }, "前往设置")),
+            block.retryAt
+              ? h("div", { class: "hint" }, `${formatTime(block.since)}起 · ${formatTime(block.retryAt)}自动重试，任务按原顺序继续`)
+              : h("div", { class: "hint" }, `${formatTime(block.since)} · 修改设置后自动恢复 · `, h("a", { href: "/settings", "data-link": true }, "前往设置")),
           ),
           retry,
         ),

@@ -37,7 +37,11 @@ export const READER_PRIORITY = 100;
 const MAX_ATTEMPTS = 5;
 const PAUSED_KEY = "server.jobsPaused";
 
-/** Something only the user can fix (a key, a bot check): jobs for it wait until settings change. */
+/**
+ * What jobs wait for: something only the user can fix (a key, a bot check)
+ * until settings change, or a speech service that is down for now until its
+ * `retryAt`.
+ */
 export type BlockKey = PageProvider | "site";
 
 class Cancelled extends Error {}
@@ -47,7 +51,8 @@ class Paused extends Error {}
 /**
  * Background work: a queue of chapter (voice), text (download) and export jobs in the
  * database, run one at a time. Failures that need the user block the
- * service until settings change; quota and throttling wait and retry.
+ * service until settings change; quota waits for the reset; a speech service
+ * that is down is tried again by the first queued job until it works.
  */
 export class Jobs {
   private blocked: Partial<Record<BlockKey, ProviderBlock>> = {};
@@ -325,7 +330,9 @@ export class Jobs {
     if (this.blocked.site) return undefined;
     if (kind === "text") return rows[0];
     const provider = this.tts.profile()?.provider;
-    if (!provider || this.blocked[provider]) return undefined;
+    if (!provider) return undefined;
+    const block = this.blocked[provider];
+    if (block && (block.retryAt ?? Infinity) > this.now()) return undefined;
     return rows[0];
   }
 
@@ -340,11 +347,11 @@ export class Jobs {
       }
     }
     if (!this.running.size) void this.compact().catch(() => undefined);
-    const waiting = this.db.get<{ t: number | null }>(
-      "select min(not_before) as t from jobs where status = 'queued' and not_before > ?",
-      this.now(),
-    )?.t;
-    this.schedule(waiting ? waiting - this.now() : 60_000);
+    const waiting = [
+      this.db.get<{ t: number | null }>("select min(not_before) as t from jobs where status = 'queued' and not_before > ?", this.now())?.t,
+      ...Object.values(this.blocked).map((b) => b?.retryAt),
+    ].filter((t): t is number => !!t && t > this.now());
+    this.schedule(waiting.length ? Math.min(...waiting) - this.now() : 60_000);
   }
 
   private update(id: number, fields: Partial<Pick<JobRow, "status" | "progress" | "message" | "error" | "attempts" | "not_before">>): void {
@@ -372,6 +379,9 @@ export class Jobs {
       else await this.runExport(job);
       if (this.db.get<{ status: string }>("select status from jobs where id = ?", job.id)?.status === "running") {
         this.update(job.id, { status: "done", progress: 1 });
+        // A speech service that was down is back.
+        const provider = this.tts.profile()?.provider;
+        if (job.kind === "chapter" && provider && this.blocked[provider]?.retryAt) delete this.blocked[provider];
       }
     } catch (err) {
       if (err instanceof Paused) this.update(job.id, { status: "queued", message: "已暂停（已生成的段落会保留）" });
@@ -384,6 +394,17 @@ export class Jobs {
 
   private block(key: BlockKey, code: string, message: string): void {
     this.blocked[key] = { code, message, since: this.now() };
+  }
+
+  /**
+   * The speech service is down for now. Its jobs wait, then the first in the
+   * queue tries again: after as long as it has been down, from 2 minutes up
+   * to 30, until it works.
+   */
+  private down(provider: PageProvider, code: string, message: string): void {
+    const t = this.now();
+    const since = this.blocked[provider]?.since ?? t;
+    this.blocked[provider] = { code, message, since, retryAt: t + Math.min(30 * 60_000, Math.max(2 * 60_000, t - since)) };
   }
 
   /** Decides what a failure means: wait for the user, wait for a quota, retry later or give up. */
@@ -401,7 +422,12 @@ export class Jobs {
         this.update(job.id, { status: "queued", message, not_before: nextQuotaReset(this.now()) });
         return;
       }
-      if (["throttled", "server", "network", "empty"].includes(err.code) && attempts < MAX_ATTEMPTS) {
+      if (["throttled", "server", "network"].includes(err.code)) {
+        this.down(provider, err.code, message);
+        this.update(job.id, { status: "queued", message });
+        return;
+      }
+      if (err.code === "empty" && attempts < MAX_ATTEMPTS) {
         this.update(job.id, { status: "queued", attempts, message, not_before: this.now() + 60_000 * 2 ** attempts });
         return;
       }

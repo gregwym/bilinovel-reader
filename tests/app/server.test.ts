@@ -58,6 +58,14 @@ let ttsStatus = 200;
 let ttsError = "";
 /** Called on each speech request (before it answers). */
 let onTts: (() => void) | undefined;
+/** How far the job queue's clock is ahead of the real one. */
+let skew = 0;
+const clock = () => Date.now() + skew;
+/** Moves the job queue's clock on to `t` and has it look for work. */
+const reach = (t: number) => {
+  skew += Math.max(0, t - clock());
+  services.jobs.kick();
+};
 let services: ReturnType<typeof createServices>;
 let app: ReturnType<typeof createApp>;
 
@@ -111,6 +119,7 @@ beforeAll(() => {
     request: ttsRequest,
     sleep: async () => undefined,
     ffmpeg: new Ffmpeg(),
+    now: clock,
   });
   app = createApp(services);
 });
@@ -552,36 +561,91 @@ describe("library server", () => {
   /** Fish Audio's answer at 2026-11-23 23:40 PST, as logged; the same model and voice worked before and after. */
   const UNSERVED = JSON.stringify({ status: 404, message: "no service on this path serves the requested model" });
 
-  /** Queues 180205 again while Fish Audio answers `status` and `error`; returns its job once `settled`. */
-  async function generateWhileFailing(status: number, error: string, settled: (o: JobsOverview) => unknown) {
+  /**
+   * Queues `chapters` again, in that order, while Fish Audio answers `status`
+   * and `error`; returns the first one's job once `settled`.
+   */
+  async function generateWhileFailing(status: number, error: string, settled: (o: JobsOverview) => unknown, chapters = ["180205"]) {
     await waitFor(() => !services.jobs.overview().counts.running);
     services.jobs.setPaused(true);
+    // Earlier tests' jobs (following the reading position) don't get in the way.
+    services.jobs.cancelBook("5369");
     await send("POST", "/api/jobs/clear");
     ttsStatus = status;
     ttsError = error;
-    services.jobs.setPaused(false);
-    await send("DELETE", "/api/books/5369/audio?chapter=180205");
+    for (const chapter of chapters) await send("DELETE", `/api/books/5369/audio?chapter=${chapter}`);
     await send("POST", "/api/library/clear-segments");
-    await send("POST", "/api/books/5369/generate", { chapters: ["180205"] });
+    ttsRequests = [];
+    await send("POST", "/api/books/5369/generate", { chapters });
+    services.jobs.setPaused(false);
     return waitFor(async () => {
       const o = await json<JobsOverview>(call("/api/jobs"));
-      const job = o.jobs.find((j) => j.target === "180205" && j.status === "queued");
+      const job = o.jobs.find((j) => j.target === chapters[0] && j.status === "queued");
       return !!job && !!settled(o) && { overview: o, job };
     });
   }
 
+  /** Fish Audio is marked down for now (before 0.13 the job was put off on its own instead). */
+  const down = (o: JobsOverview) => o.blocked.fish || o.jobs.some((j) => j.notBefore);
+  const jobsNow = () => json<JobsOverview>(call("/api/jobs"));
+
   it.skipIf(!hasFfmpeg)("retries by itself when Fish Audio briefly serves no model (2026-11-23)", async () => {
     // Every try of the first run gets the 404 seen on 2026-11-23.
-    const { overview, job } = await generateWhileFailing(404, UNSERVED, (o) =>
-      o.blocked.fish || o.jobs.some((j) => j.target === "180205" && j.notBefore),
-    );
-    expect(overview.blocked.fish).toBeUndefined();
+    const { overview: o, job } = await generateWhileFailing(404, UNSERVED, down);
+    expect(o.blocked.fish).toMatchObject({ code: "server", message: "Fish Audio 服务暂时出错" });
     expect(job).toMatchObject({ status: "queued", message: "Fish Audio 服务暂时出错" });
-    // The service is back when the job's time comes: it finishes without the user.
+    // The service is back when its time comes: the job finishes without the user.
     ttsStatus = 200;
-    services.db.run("update jobs set not_before = 0 where id = ?", job.id);
-    services.jobs.kick();
-    await waitFor(async () => (await json<JobsOverview>(call("/api/jobs"))).jobs.find((j) => j.id === job.id && j.status === "done"));
+    reach(o.blocked.fish!.retryAt!);
+    await waitFor(async () => (await jobsNow()).jobs.find((j) => j.id === job.id && j.status === "done"));
+    expect((await jobsNow()).blocked.fish).toBeUndefined();
+  });
+
+  /** Fish Audio's answer to 111 requests on 2026-11-22 18:06–18:31 PST, as logged. */
+  const DRAINED = "service is drained and no peer DC can take the traffic";
+
+  it.skipIf(!hasFfmpeg)("keeps trying, in queue order, while Fish Audio is down for longer than on 2026-11-22", async () => {
+    let { overview: o } = await generateWhileFailing(503, DRAINED, down, ["180204", "180205"]);
+    const minutes: number[] = [];
+    // That outage lasted 77 minutes; the old retries gave up after about 30.
+    for (;;) {
+      const block = o.blocked.fish;
+      expect(block).toMatchObject({ code: "server", message: "Fish Audio 服务暂时出错" });
+      minutes.push(Math.round((block!.retryAt! - clock()) / 60_000));
+      if (clock() - block!.since > 77 * 60_000) break;
+      const tries = ttsRequests.length;
+      reach(block!.retryAt!);
+      o = await waitFor(async () => {
+        const next = await jobsNow();
+        return ttsRequests.length > tries && (next.blocked.fish?.retryAt ?? 0) > block!.retryAt! && next;
+      });
+    }
+    // As long again as it has been down, from 2 minutes up to 30.
+    expect(minutes).toEqual([2, 2, 4, 8, 16, 30, 30, 30]);
+    // No job failed; only the first in the queue tried (its first page each time).
+    expect(o.counts.failed).toBe(0);
+    expect(o.jobs.filter((j) => j.status === "queued").map((j) => j.target)).toEqual(["180204", "180205"]);
+    expect(new Set(ttsRequests.map((r) => r.text)).size).toBe(1);
+
+    // "立即重试" on the banner tries at once.
+    const tries = ttsRequests.length;
+    await send("POST", "/api/jobs/resume");
+    o = await waitFor(async () => {
+      const next = await jobsNow();
+      return ttsRequests.length > tries && !!next.blocked.fish && next;
+    });
+    expect(Math.round((o.blocked.fish!.retryAt! - clock()) / 60_000)).toBe(2);
+
+    // Back up: the queue finishes in its order without the user.
+    ttsStatus = 200;
+    reach(o.blocked.fish!.retryAt!);
+    const done = await waitFor(async () => {
+      const jobs = (await jobsNow()).jobs.filter((j) => j.status === "done" && ["180204", "180205"].includes(j.target));
+      return jobs.length === 2 && jobs;
+    });
+    const at = (target: string) => done.find((j) => j.target === target)!.updatedAt;
+    expect(at("180204")).toBeLessThanOrEqual(at("180205"));
+    expect((await jobsNow()).blocked.fish).toBeUndefined();
   });
 
   it("waits for settings when Fish Audio says the model or voice doesn't exist", async () => {
