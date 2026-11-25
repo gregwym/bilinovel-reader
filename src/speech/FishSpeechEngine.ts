@@ -52,11 +52,16 @@ export function parseFishVoice(input: string): string | undefined {
 // ---------------------------------------------------------------------------
 // Errors
 
-export function fishErrorCode(status: number): string {
+/**
+ * A 404 is a model or voice that doesn't exist, except when it says no
+ * service serves the model: that one (2026-11-23) went away by itself, so it
+ * is retried like a server error.
+ */
+export function fishErrorCode(status: number, body = ""): string {
   if (status === 401) return "auth";
   if (status === 402) return "billing";
   if (status === 403) return "forbidden";
-  if (status === 404) return "model";
+  if (status === 404) return /no service .*serves the requested model/i.test(body) ? "server" : "model";
   if (status === 400 || status === 422) return "bad-request";
   if (status === 429) return "throttled";
   if (status >= 500) return "server";
@@ -222,7 +227,7 @@ async function requestFish(cfg: FishConfig, text: string, io: BackendIO): Promis
       throw new SpeechEngineError("network");
     }
     if (res.status >= 200 && res.status < 300) return res;
-    const code = fishErrorCode(res.status);
+    const code = fishErrorCode(res.status, bodyText(res));
     if (code === "throttled" && attempt < 4) {
       const after = Number(res.headers["retry-after"]);
       const delay = Math.min(90_000, after > 0 ? after * 1000 : 15_000 * (attempt + 1));
