@@ -225,35 +225,43 @@ function stripParens(expr: string): string {
 }
 
 function parsePlain(js: string): ShuffleTemplate | null {
-  const fixedStart = /if\s*\(\s*[\w$]+\s*>\s*/.exec(js);
-  const seedMatch = /=\s*(.+?Number\s*\(\s*chapterId\s*\).+?)\s*;/.exec(js);
-  const lcgMatch = /=\s*(\(\s*[\w$]+\s*\*.+?\)\s*%\s*.+?)\s*;/.exec(js);
-  if (!fixedStart || !seedMatch || !lcgMatch) return null;
+  const seeds = [...js.matchAll(/=\s*(Number\s*\(\s*([\w$]+)\s*\)\s*[*+-][^,;]+?)\s*[,;]/g)];
+  const seedMatch = seeds.find((match) => match[2] === "chapterId") ?? seeds[0];
+  const lcgMatch = /([\w$]+)\s*=\s*(\(\s*\1\s*\*[^;]+?\)\s*%\s*[^;]+?)\s*;/.exec(js);
+  if (!seedMatch || !lcgMatch) return null;
+  // In the minified format the shuffle guard follows the seed, after unrelated conditions.
+  const guardSource = seedMatch[2] === "chapterId" ? js : js.slice(seedMatch.index + seedMatch[0].length);
+  const fixedStart = /if\s*\(\s*[\w$]+\s*>\s*/.exec(guardSource);
+  if (!fixedStart) return null;
 
   // fixed length: expression up to the closing parenthesis of the if
   let depth = 0;
   let fixedExpr: string | null = null;
-  for (let i = fixedStart.index + fixedStart[0].length; i < js.length; i++) {
-    if (js[i] === "(") depth++;
-    else if (js[i] === ")") {
+  const fixedFrom = fixedStart.index + fixedStart[0].length;
+  for (let i = fixedFrom; i < guardSource.length; i++) {
+    if (guardSource[i] === "(") depth++;
+    else if (guardSource[i] === ")") {
       if (depth === 0) {
-        fixedExpr = js.slice(fixedStart.index + fixedStart[0].length, i);
+        fixedExpr = guardSource.slice(fixedFrom, i).trim();
         break;
       }
       depth--;
     }
   }
-  const fixedLength = fixedExpr ? evalIntExpression(stripParens(fixedExpr)) : null;
+  if (fixedExpr && /^[A-Za-z_$][\w$]*$/.test(fixedExpr)) {
+    const declaration = new RegExp(`\\bvar\\s+${escapeRe(fixedExpr)}\\s*=\\s*([^;]+);`);
+    fixedExpr = declaration.exec(js.slice(0, seedMatch.index))?.[1] ?? null;
+  }
+  const fixedLength = fixedExpr ? evalIntExpression(fixedExpr) : null;
 
-  const off = evalWith(seedMatch[1], "chapterId", 0);
-  const one = evalWith(seedMatch[1], "chapterId", 1);
+  const off = evalWith(seedMatch[1], seedMatch[2], 0);
+  const one = evalWith(seedMatch[1], seedMatch[2], 1);
 
-  const modParts = splitTopLevel(lcgMatch[1], "%");
+  const modParts = splitTopLevel(lcgMatch[2], "%");
   if (modParts.length !== 2) return null;
   const mod = evalIntExpression(modParts[1]);
   const left = stripParens(modParts[0]);
-  const varName = /[A-Za-z_$][\w$]*/.exec(left)?.[0];
-  if (!varName) return null;
+  const varName = lcgMatch[1];
   const c = evalWith(left, varName, 0);
   const a1 = evalWith(left, varName, 1);
 
