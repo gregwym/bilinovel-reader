@@ -34,3 +34,12 @@ snippets are removed.
   section mark, shuffled after the 20th.
 - `chapterlog-2026-11.js`: `/themes/zhmb/js/chapterlog.js?v1006c1.82` as served
   (obfuscated; new constants). The old `/scripts/chapterlog.js` now answers 404.
+
+## Public chapter sample (2026-11-27)
+
+- `incomplete-2026-11-27.html` keeps the public first page's eleven paragraph
+  slots, truncation notice and script link, with placeholder book text.
+- `chapterlog-2026-11-27.js` keeps the shuffle expressions from the referenced
+  script. The tests read the file as text. The full-page test uses a synthetic
+  32-paragraph body with a permutation independently calculated from the
+  sampled expressions.
