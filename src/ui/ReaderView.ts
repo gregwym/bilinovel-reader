@@ -190,6 +190,8 @@ export class ReaderView {
     gemini: { voices: GEMINI_VOICES, keySet: false, status: "", usage: "", fallback: false, models: GEMINI_PRESET_MODELS },
     fish: { voices: PRESET_VOICES.fish, keySet: false, status: "", usage: "", fallback: false },
   };
+  private observer?: IntersectionObserver;
+  private readonly onThemeChange = () => this.applyTheme();
   private systemDark = globalThis.matchMedia?.("(prefers-color-scheme: dark)");
 
   constructor(
@@ -208,7 +210,7 @@ export class ReaderView {
     this.build();
     document.documentElement.append(this.host);
     this.applySettings(this.settings);
-    this.systemDark?.addEventListener?.("change", () => this.applyTheme());
+    this.systemDark?.addEventListener?.("change", this.onThemeChange);
   }
 
   private build(): void {
@@ -293,12 +295,13 @@ export class ReaderView {
     }
     this.contentEl.addEventListener("click", (ev) => this.onContentClick(ev));
 
-    new IntersectionObserver(
+    this.observer = new IntersectionObserver(
       (entries) => {
         if (entries.some((e) => e.isIntersecting)) this.cb.onNearEnd();
       },
       { root: this.scrollEl, rootMargin: "0px 0px 150% 0px" },
-    ).observe(this.sentinel);
+    );
+    this.observer.observe(this.sentinel);
   }
 
   /** Hosts page-loader iframes; shows them full-screen when a challenge needs the user. */
@@ -328,13 +331,22 @@ export class ReaderView {
     this.paintChrome();
   }
 
-  collapse(): void {
+  collapse(showLauncher = true): void {
     this.closeSheet();
     this.closeToc();
     this.root.hidden = true;
-    this.pillEl.hidden = false;
+    this.pillEl.hidden = !showLauncher;
     this.unlockPageScroll();
     this.restoreChrome();
+  }
+
+  dispose(): void {
+    this.collapse(false);
+    this.observer?.disconnect();
+    this.systemDark?.removeEventListener?.("change", this.onThemeChange);
+    cancelAnimationFrame(this.scrollRaf);
+    clearTimeout(this.chipTimer);
+    this.host.remove();
   }
 
   private lockPageScroll(): void {

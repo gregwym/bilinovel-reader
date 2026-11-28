@@ -133,6 +133,9 @@ export interface PageConfigs {
 export interface ReaderHost {
   /** Leaves the reader (default: hide it over the site's page). */
   exit?(): void;
+  /** Reports a change to the current playback state or chapter. */
+  onPlaybackChange?(): void;
+  onDispose?(): void;
   /** Opens the site's page for the reader page `url`. */
   openOriginal?(url: string): void;
   /** Speech engines offered (default: all). */
@@ -251,6 +254,9 @@ export class Reader implements PlaybackSource {
   private readonly originalUrl = location.href;
   private readonly originalTitle = document.title;
   private active = false;
+  private mounted = false;
+  private disposed = false;
+  private stopWatching?: () => void;
 
   private readonly saveSoon = debounce(() => void this.saveNow(), 800);
 
@@ -379,6 +385,7 @@ export class Reader implements PlaybackSource {
         this.view.setPlayerState(state, message);
         if (state === "idle") this.view.setActive(undefined);
         this.setMediaPlaybackState(state);
+        this.host.onPlaybackChange?.();
         // The lock screen shows the volume's cover: the catalog says which.
         if (state === "playing" && !this.catalog) void this.ensureCatalog().then((c) => c && this.updateMediaMetadata());
       },
@@ -455,7 +462,7 @@ export class Reader implements PlaybackSource {
       },
       DEFAULT_SETTINGS,
       version,
-      { engines: host.engines, managedKeys: host.managedKeys, exitLabel: host.exit ? "返回书架" : undefined },
+      { engines: host.engines, managedKeys: host.managedKeys, exitLabel: host.exit ? "返回书籍详情" : undefined },
     );
   }
 
@@ -464,7 +471,9 @@ export class Reader implements PlaybackSource {
 
   async start(): Promise<void> {
     this.settings = await this.settingsStore.load();
+    if (this.disposed) return;
     this.view.mount();
+    this.mounted = true;
     this.adapter.setFrameHost?.(this.view.frameHost);
     this.view.applySettings(this.settings);
     this.view.setTitles("Bili Reader", "正在加载…");
@@ -477,6 +486,7 @@ export class Reader implements PlaybackSource {
       slot.key = this.host.managedKeys?.includes(provider)
         ? MANAGED_KEY
         : ((await this.secrets.get(slot.secret)) ?? "");
+      if (this.disposed) return;
       this.view.setCloudState(provider, { keySet: !!slot.key, usage: slot.usageText() });
     }
     for (const provider of ["gemini", "fish"] as const) {
@@ -491,18 +501,25 @@ export class Reader implements PlaybackSource {
     this.view.setVoices(this.voices.list());
     this.voices.onChange(() => this.view.setVoices(this.voices.list()));
 
-    document.addEventListener("visibilitychange", () => {
+    const onVisibility = () => {
       if (document.visibilityState === "visible") {
-        this.view.revealOnReturn(this.cursorId, this.player.isActive);
+        if (this.active) this.view.revealOnReturn(this.cursorId, this.player.isActive);
         this.player.recoverIfStalled();
         void this.checkExternalProgress();
       } else void this.saveNow();
-    });
-    window.addEventListener("pagehide", () => void this.saveNow());
-    // Back/forward cache: the page comes back as it was, but another tab may have read on.
-    window.addEventListener("pageshow", (ev) => {
+    };
+    const onHide = () => void this.saveNow();
+    const onShow = (ev: PageTransitionEvent) => {
       if (ev.persisted) void this.checkExternalProgress();
-    });
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", onHide);
+    window.addEventListener("pageshow", onShow);
+    this.stopWatching = () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", onHide);
+      window.removeEventListener("pageshow", onShow);
+    };
 
     await this.loadInitial();
   }
@@ -514,6 +531,7 @@ export class Reader implements PlaybackSource {
     try {
       page = await this.fetchCurrentPage();
     } catch (err) {
+      if (this.disposed) return;
       log.error("initial load failed", err);
       const { message, detail } = describeError(err);
       this.view.setTitles("Bili Reader");
@@ -523,6 +541,7 @@ export class Reader implements PlaybackSource {
       ]);
       return;
     }
+    if (this.disposed) return;
     this.resetBuffer();
     this.appendPage(page);
     const first = this.buffer.first();
@@ -536,12 +555,12 @@ export class Reader implements PlaybackSource {
   }
 
   private exit(): void {
-    this.player.stop();
     if (this.host.exit) {
-      const leave = this.host.exit.bind(this.host);
-      void this.saveNow().finally(leave);
+      void this.saveNow();
+      this.host.exit();
       return;
     }
+    this.player.stop();
     void this.saveNow();
     this.view.collapse();
     this.active = false;
@@ -553,6 +572,51 @@ export class Reader implements PlaybackSource {
     } catch {
       /* ignore */
     }
+  }
+
+  get playback() {
+    const p = this.cursorParagraph();
+    if (!p || this.player.state === "idle") return undefined;
+    return {
+      url: p.pageUrl,
+      title: this.buffer.chapterOf(p.id)?.title || this.buffer.bookTitle,
+      playing: this.player.isActive,
+    };
+  }
+
+  /** Keeps the player running while another page of the library is shown. */
+  hide(): void {
+    this.active = false;
+    this.view.collapse(false);
+    void this.saveNow();
+  }
+
+  reveal(): void {
+    this.view.show();
+    this.active = true;
+    const p = this.cursorParagraph();
+    if (!p) return;
+    this.view.scrollToParagraph(p.id);
+    this.writeTabPosition(p);
+    this.syncUrl(p.id);
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.active = false;
+    this.disposed = true;
+    this.host.onDispose?.();
+    this.generation++;
+    this.jumpSeq++;
+    this.stopWatching?.();
+    this.voices.dispose();
+    if (!this.mounted) return;
+    void this.saveNow();
+    this.player.stop();
+    this.setTrack(undefined);
+    this.setupMediaSession(false);
+    if (navigator.mediaSession) navigator.mediaSession.metadata = null;
+    this.view.dispose();
   }
 
   private resetBuffer(): void {
@@ -655,7 +719,7 @@ export class Reader implements PlaybackSource {
       .finally(() => {
         this.loading = undefined;
         // Keep loading while the cursor (or a page engine's look-ahead) still needs pages.
-        if (this.cursorId) this.prefetchAround(this.cursorId);
+        if (!this.disposed && this.cursorId) this.prefetchAround(this.cursorId);
       });
     return this.loading;
   }
@@ -899,6 +963,7 @@ export class Reader implements PlaybackSource {
 
   private async offerRestore(page: PageContent): Promise<void> {
     const saved = await this.progress.get(page.bookId);
+    if (this.disposed) return;
     this.knownUpdatedAt = saved?.updatedAt ?? 0;
     this.savingEnabled = true;
     const tab = readTabPosition();
@@ -976,7 +1041,7 @@ export class Reader implements PlaybackSource {
   private async checkExternalProgress(): Promise<void> {
     if (!this.active || !this.savingEnabled || !this.buffer.bookId || this.player.isActive) return;
     const saved = await this.progress.get(this.buffer.bookId);
-    if (!saved || saved.updatedAt <= this.knownUpdatedAt) return;
+    if (!this.active || !saved || saved.updatedAt <= this.knownUpdatedAt) return;
     this.knownUpdatedAt = saved.updatedAt;
     const cur = this.cursorParagraph();
     if (
@@ -1022,7 +1087,7 @@ export class Reader implements PlaybackSource {
    * on screen; if the user has scrolled or navigated elsewhere since, playback
    * starts where they are now (the cursor) instead of jumping back.
    */
-  private togglePlay(): void {
+  togglePlay(): void {
     this.acceptCurrentPosition();
     if (this.player.state === "error") this.loadFailed = false;
     const at = this.player.currentId;
@@ -1036,6 +1101,7 @@ export class Reader implements PlaybackSource {
   }
 
   private onUserScrolledTo(id: string): void {
+    if (!this.active) return;
     if (this.view.bannerVisible && !this.savingEnabled && ++this.scrollReportsWhilePrompt >= AUTO_ACCEPT_SCROLLS) {
       this.acceptCurrentPosition();
     }
@@ -1068,6 +1134,7 @@ export class Reader implements PlaybackSource {
       this.updateMediaMetadata(this.buffer.chapterOf(id)?.title);
     }
     this.syncUrl(id);
+    if (prev?.pageUrl !== p.pageUrl) this.host.onPlaybackChange?.();
     this.prefetchAround(id);
     if (opts.save !== false) {
       this.dirty = true;
@@ -1094,7 +1161,7 @@ export class Reader implements PlaybackSource {
       pages: (id, count) => this.pagesFrom(id, count, maxChunk),
       timeline: (id, prefix) => this.chapterTimeline(provider, id, prefix, maxChunk),
       onTrack: (position) => {
-        if (this.settings.ttsEngine === provider) this.setTrack(position);
+        if (!this.disposed && this.settings.ttsEngine === provider) this.setTrack(position);
       },
       usage,
       onStatus: (msg) => {
@@ -1353,7 +1420,7 @@ export class Reader implements PlaybackSource {
   }
 
   /** Lock-screen / Control Center controls (effective while a cloud voice's audio element plays). */
-  private setupMediaSession(): void {
+  private setupMediaSession(enabled = true): void {
     const ms = (navigator as Navigator & { mediaSession?: MediaSession }).mediaSession;
     if (!ms) return;
     const handlers: [MediaSessionAction, () => void][] = [
@@ -1364,7 +1431,7 @@ export class Reader implements PlaybackSource {
     ];
     for (const [action, fn] of handlers) {
       try {
-        ms.setActionHandler(action, fn);
+        ms.setActionHandler(action, enabled ? fn : null);
       } catch {
         /* unsupported action */
       }
@@ -1401,7 +1468,7 @@ export class Reader implements PlaybackSource {
     if (t !== "gemini" && t !== "fish") return;
     const engine = this.paged[t].engine;
     const at = await engine.locate(seconds);
-    if (!at) return;
+    if (this.disposed || !at) return;
     const maxChunk = engine.maxChunkLength;
     const find = () => {
       const ps = this.buffer.pageParagraphs(at.chapterId, at.pageIndex);
@@ -1428,7 +1495,7 @@ export class Reader implements PlaybackSource {
 
   private updateMediaMetadata(chapterTitle?: string): void {
     const ms = (navigator as Navigator & { mediaSession?: MediaSession }).mediaSession;
-    if (!ms || typeof MediaMetadata === "undefined") return;
+    if (this.disposed || !ms || typeof MediaMetadata === "undefined") return;
     const chapter = this.cursorId ? this.buffer.chapterOf(this.cursorId) : undefined;
     const title = chapterTitle ?? chapter?.title;
     const volume = chapter && this.catalog?.volumes.find((v) => v.chapters.some((c) => c.chapterId === chapter.chapterId));

@@ -27,10 +27,6 @@ export function resolve(path: string): Page | undefined {
 }
 
 export function navigate(path: string, replace = false): void {
-  if (/^\/novel\//.test(path)) {
-    location.href = path;
-    return;
-  }
   if (replace) history.replaceState(null, "", path);
   else history.pushState(null, "", path);
   show();
@@ -46,7 +42,7 @@ export function startRouter(onRender: (path: string, make: () => Page) => void):
   window.addEventListener("popstate", show);
   document.addEventListener("click", (ev) => {
     const a = (ev.target as Element | null)?.closest?.("a[data-link]");
-    if (!a || ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey) return;
+    if (!a || ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
     ev.preventDefault();
     navigate(a.getAttribute("href")!);
   });

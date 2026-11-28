@@ -30,7 +30,7 @@ const READER_SETTINGS_KEY = "biliReader.settings";
 const PROVIDER_LABEL: Record<string, string> = { gemini: "Gemini", fish: "Fish Audio" };
 
 /** A book: reading, its chapters' text and audio (downloading, generation and export). */
-export function bookPage({ id }: Record<string, string>): Page {
+export function bookPage({ id }: Record<string, string>, onPreview: () => void): Page {
   const el = h("div", {}, topbar("", "/"));
   const body = h("div");
   el.append(body);
@@ -132,12 +132,22 @@ export function bookPage({ id }: Record<string, string>): Page {
       refresh();
     });
 
-  const play = (book: BookDetail, ch: ChapterInfo) => {
+  const closePlayer = () => {
+    player?.querySelector("audio")?.pause();
     player?.remove();
+    player = undefined;
+  };
+  const closePreviews = () => {
+    closePlayer();
     sheet?.close();
     sheet = undefined;
+  };
+
+  const play = (book: BookDetail, ch: ChapterInfo) => {
+    onPreview();
+    closePreviews();
     const audio = h("audio", { controls: true, autoplay: true, preload: "auto", src: `/api/books/${id}/chapters/${ch.chapterId}/audio` });
-    const close = h("button", { class: "icon-btn", "aria-label": "关闭", onclick: () => (player?.remove(), (player = undefined)) }, icon("close"));
+    const close = h("button", { class: "icon-btn", "aria-label": "关闭", onclick: closePlayer }, icon("close"));
     player = h(
       "div",
       { class: "player" },
@@ -501,7 +511,7 @@ export function bookPage({ id }: Record<string, string>): Page {
     const name = h(
       "div",
       { class: "name" },
-      h("a", { href: `/novel/${book.id}/${c.chapterId}.html` }, c.title),
+      h("a", { href: `/novel/${book.id}/${c.chapterId}.html`, "data-link": true }, c.title),
       sub.length ? h("div", { class: "sub" }, sub.join(" · ")) : null,
     );
     const segBtn =
@@ -509,10 +519,8 @@ export function bookPage({ id }: Record<string, string>): Page {
         ? h("button", { class: "state", type: "button", title: "按段试听（生成一段即可播放）", "aria-label": "语音片段" }, icon("list"))
         : null;
     segBtn?.addEventListener("click", () => {
-      sheet?.close();
-      player?.remove();
-      player = undefined;
-      sheet = segmentSheet(book, c);
+      closePreviews();
+      sheet = segmentSheet(book, c, onPreview);
     });
     // One menu: downloads, saving on this device, then deleting on the server.
     const more = moreButton(c.chapterId);
@@ -734,6 +742,7 @@ export function bookPage({ id }: Record<string, string>): Page {
     el,
     resume: () => void load().catch(() => undefined),
     title,
+    suspend: closePreviews,
     dispose: () => {
       stop();
       unsubscribe();
@@ -741,8 +750,7 @@ export function bookPage({ id }: Record<string, string>): Page {
       clearTimeout(later);
       removeEventListener("scroll", onScroll);
       for (const type of ["touchstart", "touchend", "touchcancel"]) removeEventListener(type, onTouch);
-      player?.remove();
-      sheet?.close();
+      closePreviews();
     },
   };
 }

@@ -35,16 +35,24 @@ export function sortChineseVoices<T extends { lang: string; name: string; localS
 export class VoiceManager {
   private voices: SpeechSynthesisVoice[] = [];
   private listeners = new Set<() => void>();
+  private readonly onVoicesChanged = () => this.refresh();
+  private poll?: ReturnType<typeof setInterval>;
 
   constructor(private readonly synth: SpeechSynthesis | undefined = globalThis.speechSynthesis) {
     if (!synth) return;
     this.refresh();
-    synth.addEventListener?.("voiceschanged", () => this.refresh());
+    synth.addEventListener?.("voiceschanged", this.onVoicesChanged);
     let tries = 0;
-    const poll = setInterval(() => {
+    this.poll = setInterval(() => {
       tries++;
-      if (this.refresh() || tries > 20) clearInterval(poll);
+      if (this.refresh() || tries > 20) clearInterval(this.poll);
     }, 500);
+  }
+
+  dispose(): void {
+    this.synth?.removeEventListener?.("voiceschanged", this.onVoicesChanged);
+    clearInterval(this.poll);
+    this.listeners.clear();
   }
 
   private refresh(): boolean {

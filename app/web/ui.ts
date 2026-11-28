@@ -1,4 +1,5 @@
 import { h, svg } from "../../src/utils/dom";
+import { navigate } from "./router";
 import type { BookDetail, BookSummary, ChapterInfo, ReadingPosition } from "../shared/api";
 
 /** Shared pieces of the library pages. */
@@ -11,6 +12,7 @@ export const ICONS = {
   chevron: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>`,
   plus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>`,
   play: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13a1 1 0 0 0 1.5.9l10.2-6.5a1 1 0 0 0 0-1.8L9.5 4.6A1 1 0 0 0 8 5.5Z"/></svg>`,
+  pause: `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="5" width="3.5" height="14" rx="1"/><rect x="13.5" y="5" width="3.5" height="14" rx="1"/></svg>`,
   wave: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 4v16M8 8v8M16 8v8M4 11v2M20 11v2"/></svg>`,
   check: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg>`,
   stale: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>`,
@@ -35,9 +37,8 @@ export function readerPath(bookId: string, pos?: Pick<ReadingPosition, "chapterI
   return `/novel/${bookId}/${pos.chapterId}${page}.html`;
 }
 
-/** Opens the reader with a full page load (it is a separate app). */
 export function openReader(bookId: string, pos?: Pick<ReadingPosition, "chapterId" | "pageIndex">): void {
-  location.href = readerPath(bookId, pos);
+  navigate(readerPath(bookId, pos));
 }
 
 export function cover(book: Pick<BookSummary, "id" | "title" | "hasCover">, extra?: Node | null): HTMLElement {
@@ -299,6 +300,8 @@ export function formatTime(ms: number): string {
 /** A page re-rendered on an interval while it is shown. */
 export interface Page {
   el: HTMLElement;
+  /** Called before the chapter reader takes over the screen. */
+  suspend?: () => void;
   /** Called when the page is left for good. */
   dispose?: () => void;
   /** Called when a page kept while another one was shown is shown again (to catch up). */

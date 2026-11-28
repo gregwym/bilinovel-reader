@@ -1,4 +1,6 @@
 import "./styles.css";
+import { parseChapterUrl } from "../../src/adapters/bilinovel/url";
+import type { Reader } from "../../src/reader/Reader";
 import { h } from "../../src/utils/dom";
 import { navigate, route, startRouter } from "./router";
 import { icon, type Page } from "./ui";
@@ -9,7 +11,7 @@ import { onSaveChange, saveTasks } from "./offline";
 import { settingsPage } from "./pages/settings";
 import { loginPage } from "./pages/login";
 import { api } from "./api";
-import type { JobsOverview } from "../shared/api";
+import type { AppInfo, JobsOverview } from "../shared/api";
 
 const TABS = [
   { path: "/", label: "书架", icon: "shelf" },
@@ -38,15 +40,7 @@ function tabOf(path: string): number {
 }
 
 /** The library pages: bookshelf, book, jobs and settings under a tab bar. */
-export function startShell(): void {
-  route("/", libraryPage);
-  route("/book/:id", bookPage);
-  route("/jobs", jobsPage);
-  route("/settings", settingsPage);
-  route("/login", loginPage);
-  // A book page of the site (`/novel/123.html`) opens the book.
-  route("/novel/:file", ({ file }) => bookPage({ id: file.replace(/\.html$/, "") }));
-
+export function startShell(appInfo: () => Promise<AppInfo>): () => boolean {
   const main = h("main", { class: "app" });
   const dot = h("span", { class: "dot", hidden: true });
   const tabs = TABS.map((t) =>
@@ -63,12 +57,37 @@ export function startShell(): void {
    */
   const stacks: Entry[][] = TABS.map(() => []);
   let current: Entry | undefined;
+  let reader: Reader | undefined;
+  let lastChapterPath: string | undefined;
+  let navigation = 0;
+  const chapterLink = h("a", { "data-link": true });
+  const toggle = h("button", { class: "icon-btn", type: "button", onclick: () => reader?.togglePlay() });
+  const mini = h("div", { class: "mini-player", role: "group", "aria-label": "迷你播放器", hidden: true }, chapterLink, toggle);
+  const updateMini = () => {
+    const playback = reader?.playback;
+    mini.hidden = !playback;
+    if (!playback) return;
+    chapterLink.href = playback.url;
+    chapterLink.title = playback.title;
+    chapterLink.textContent = playback.title;
+    const label = playback.playing ? "暂停" : "继续播放";
+    if (toggle.getAttribute("aria-label") === label) return;
+    toggle.setAttribute("aria-label", label);
+    toggle.replaceChildren(icon(playback.playing ? "pause" : "play"));
+  };
+  const closeReader = () => {
+    const old = reader;
+    reader = undefined;
+    lastChapterPath = undefined;
+    old?.dispose();
+    updateMini();
+  };
   const drop = (e: Entry) => {
     if (e.gone) return;
     e.gone = true;
     e.page.dispose?.();
   };
-  /** Paths of the tabs' top pages, kept across reloads (the reader is a separate page load). */
+  /** Paths of the tabs' top pages, kept across reloads. */
   try {
     const saved = JSON.parse(sessionStorage.getItem(TAB_PATHS) ?? "[]") as unknown;
     if (Array.isArray(saved)) saved.forEach((p, i) => typeof p === "string" && i < TABS.length && (topPaths[i] = p));
@@ -83,9 +102,48 @@ export function startShell(): void {
     }
   };
 
+  route("/", libraryPage);
+  route("/book/:id", (params) => bookPage(params, closeReader));
+  route("/jobs", jobsPage);
+  route("/settings", settingsPage);
+  route("/login", loginPage);
+  // A book page of the site (`/novel/123.html`) opens the book.
+  route("/novel/:file", ({ file }) => bookPage({ id: file.replace(/\.html$/, "") }, closeReader));
+
   startRouter((path, make) => {
-    if (current) current.y = window.scrollY;
+    const seq = ++navigation;
+    if (current && !main.hidden) current.y = window.scrollY;
+    const chapter = parseChapterUrl(location.href);
+    if (chapter) {
+      current?.page.suspend?.();
+      main.hidden = tabbar.hidden = true;
+      main.replaceChildren();
+      if (reader?.playback && (path === lastChapterPath || location.href === reader.playback.url)) {
+        reader.reveal();
+        return;
+      }
+      closeReader();
+      void import("./reader").then(async ({ startReader }) => {
+        if (seq !== navigation) return;
+        const info = await appInfo();
+        if (seq !== navigation) return;
+        if (info.auth && !info.loggedIn) {
+          location.href = `/login?next=${encodeURIComponent(path)}`;
+          return;
+        }
+        reader = startReader(info, { exit: () => navigate(`/book/${chapter.bookId}`), onPlaybackChange: updateMini });
+      });
+      return;
+    }
+
     const login = path.startsWith("/login");
+    if (reader) {
+      if (login || !reader.playback) closeReader();
+      else if (main.hidden) {
+        lastChapterPath = new URL(reader.playback.url).pathname;
+        reader.hide();
+      }
+    }
     const tab = login ? -1 : tabOf(path);
     let entry: Entry | undefined;
     if (login) {
@@ -102,7 +160,7 @@ export function startShell(): void {
         entry = { path, page: make(), y: 0 };
         stack.push(entry);
         stack.splice(0, Math.max(0, stack.length - MAX_STACK)).forEach(drop);
-      } else if (entry !== current) {
+      } else if (entry !== current || main.hidden) {
         entry.page.resume?.();
       }
       topPaths[tab] = path;
@@ -110,7 +168,10 @@ export function startShell(): void {
     }
     if (current && current !== entry && !stacks.some((s) => s.includes(current!))) drop(current);
     current = entry;
+    mini.remove();
+    if (!login) entry.page.el.querySelector(".topbar")?.append(mini);
     main.replaceChildren(entry.page.el);
+    main.hidden = false;
     window.scrollTo(0, entry.y);
     tabbar.hidden = login;
     tabs.forEach((a, i) => a.classList.toggle("active", i === tab));
@@ -144,7 +205,7 @@ export function startShell(): void {
     dot.textContent = blocked ? "!" : n > 99 ? "99+" : String(n);
   };
   const tick = async () => {
-    if (busy || document.hidden || location.pathname.startsWith("/login")) return;
+    if (busy || main.hidden || document.hidden || location.pathname.startsWith("/login")) return;
     busy = true;
     server = await api.keep<JobsOverview>("/api/jobs").catch(() => server);
     busy = false;
@@ -153,4 +214,5 @@ export function startShell(): void {
   onSaveChange(show);
   void tick();
   setInterval(() => void tick(), 5000);
+  return () => !!reader?.playback;
 }
