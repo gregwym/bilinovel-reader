@@ -8,9 +8,33 @@ const resumed: string[] = [];
 const stub = (name: string) => () => {
   made.push(name);
   const el = document.createElement("div");
-  el.textContent = name;
+  const header = document.createElement("header");
+  header.className = "topbar";
+  el.append(header, name);
   return { el, dispose: () => disposed.push(name), resume: () => resumed.push(name) };
 };
+
+const readers: string[] = [];
+vi.mock("../../app/web/reader", () => ({
+  startReader: (_info: unknown, { onPlaybackChange }: { onPlaybackChange: () => void }) => {
+    const url = location.href;
+    readers.push(url);
+    let playing = true;
+    queueMicrotask(onPlaybackChange);
+    return {
+      get playback() {
+        return { url, title: "当前章节", playing };
+      },
+      hide: () => undefined,
+      reveal: () => undefined,
+      dispose: () => undefined,
+      togglePlay: () => {
+        playing = !playing;
+        onPlaybackChange();
+      },
+    };
+  },
+}));
 
 vi.mock("../../app/web/styles.css", () => ({}));
 vi.mock("../../app/web/pages/library", () => ({ libraryPage: stub("shelf") }));
@@ -101,7 +125,7 @@ describe("tabs", () => {
     window.scrollTo = () => undefined;
     history.replaceState(null, "", "/");
     const { startShell } = await import("../../app/web/shell");
-    startShell();
+    startShell(async () => ({ version: "test", auth: false, loggedIn: true, ffmpeg: false, siteOrigin: "https://www.bilinovel.com" }));
   });
   beforeEach(() => {
     made.length = disposed.length = resumed.length = 0;
@@ -136,5 +160,27 @@ describe("tabs", () => {
     expect(made).toEqual(["book 2"]);
     expect(disposed).toEqual(["book 2"]);
     expect(resumed).toEqual(["shelf"]);
+  });
+
+  it("keeps the same playback controllable on the book and shelf, then returns to its chapter", async () => {
+    const mini = () => document.querySelector(".topbar .mini-player");
+    const toggle = () => mini()?.querySelector("button");
+    const chapter = "/novel/1/100.html";
+    link(chapter);
+    await vi.waitFor(() => expect(readers).toHaveLength(1));
+    link("/book/1");
+    expect(location.pathname).toBe("/book/1");
+    expect(mini()?.querySelector("a")?.textContent).toBe("当前章节");
+    expect(toggle()?.getAttribute("aria-label")).toBe("暂停");
+    toggle()?.click();
+    tab(0).click();
+    expect(location.pathname).toBe("/");
+    expect(toggle()?.getAttribute("aria-label")).toBe("继续播放");
+    toggle()?.click();
+    expect(toggle()?.getAttribute("aria-label")).toBe("暂停");
+    mini()?.querySelector("a")?.click();
+    expect(location.pathname).toBe(chapter);
+    expect(document.querySelector("main")?.hidden).toBe(true);
+    expect(readers).toHaveLength(1);
   });
 });

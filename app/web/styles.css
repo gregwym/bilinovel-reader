@@ -116,6 +116,32 @@ textarea {
   padding: 8px 0;
 }
 
+.mini-player {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: min(55%, 20rem);
+  padding: 2px 2px 2px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+}
+
+.mini-player a {
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mini-player .icon-btn {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+}
+
 .tabbar {
   position: fixed;
   left: 0;

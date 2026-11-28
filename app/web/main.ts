@@ -39,23 +39,11 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("pagehide", remember);
 
-async function main(): Promise<void> {
-  resume();
-  if (/^\/novel\/\d+\/\d+(_\d+)?\.html$/.test(location.pathname)) {
-    const info = await appInfo();
-    if (info.auth && !info.loggedIn) {
-      location.href = `/login?next=${encodeURIComponent(location.pathname)}`;
-      return;
-    }
-    const { startReader } = await import("./reader");
-    startReader(info.version, info.siteOrigin);
-    return;
-  }
-  const { startShell } = await import("./shell");
-  startShell();
-}
-
-void main();
+resume();
+let hasPlayback: (() => boolean) | undefined;
+void import("./shell").then(({ startShell }) => {
+  hasPlayback = startShell(appInfo);
+});
 
 const INFO_KEY = "app.info";
 
@@ -93,13 +81,14 @@ async function appInfo(): Promise<AppInfo> {
  * reading, which would stop the audio.
  */
 async function checkVersion(): Promise<void> {
-  if (!import.meta.env.PROD || /^\/novel\//.test(location.pathname)) return;
+  if (!import.meta.env.PROD || /^\/novel\//.test(location.pathname) || hasPlayback?.()) return;
   try {
     const info = (await (await fetch("/api/info", { credentials: "same-origin", cache: "no-store" })).json()) as AppInfo;
     if (!info.version || info.version === __VERSION__ || sessionStorage.getItem(RELOADED) === info.version) return;
-    sessionStorage.setItem(RELOADED, info.version);
     // The service worker opens the app from its copy of the page (sw.js): the new one first.
     await refreshShell();
+    if (/^\/novel\//.test(location.pathname) || hasPlayback?.()) return;
+    sessionStorage.setItem(RELOADED, info.version);
     location.reload();
   } catch {
     // Offline, or private mode: keep the page.

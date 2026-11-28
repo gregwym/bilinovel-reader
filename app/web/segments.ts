@@ -8,7 +8,7 @@ import { act, coverArt, download, icon, menu, poll } from "./ui";
  * soon as it is generated, without waiting for the whole chapter. Playback
  * continues with the next segment, and waits for it while it is generating.
  */
-export function segmentSheet(book: BookDetail, chapter: ChapterInfo): { close: () => void } {
+export function segmentSheet(book: BookDetail, chapter: ChapterInfo, onPlay: () => void): { close: () => void } {
   const audio = h("audio", { controls: true, preload: "auto" });
   const status = h("div", { class: "hint" }, "加载中…");
   const chips = h("div", { class: "chips" });
@@ -67,6 +67,7 @@ export function segmentSheet(book: BookDetail, chapter: ChapterInfo): { close: (
       return;
     }
     waiting = false;
+    onPlay();
     audio.src = `/api/segments/${data.provider}/${encodeURIComponent(seg.key)}`;
     void audio.play().catch(() => undefined);
     if ("mediaSession" in navigator) {
