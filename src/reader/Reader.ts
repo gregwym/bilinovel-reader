@@ -576,11 +576,14 @@ export class Reader implements PlaybackSource {
 
   get playback() {
     const p = this.cursorParagraph();
-    if (!p || this.player.state === "idle") return undefined;
+    const state = this.player.state;
+    if (!p || state === "idle") return undefined;
     return {
       url: p.pageUrl,
       title: this.buffer.chapterOf(p.id)?.title || this.buffer.bookTitle,
+      cover: this.adapter.bookCover?.(this.buffer.bookId),
       playing: this.player.isActive,
+      state,
     };
   }
 

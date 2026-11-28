@@ -23,7 +23,7 @@ vi.mock("../../app/web/reader", () => ({
     queueMicrotask(onPlaybackChange);
     return {
       get playback() {
-        return { url, title: "当前章节", playing };
+        return { url, title: "当前章节", playing, cover: "/api/books/1/cover", state: playing ? "playing" : "paused" };
       },
       hide: () => undefined,
       reveal: () => undefined,
@@ -176,12 +176,21 @@ describe("tabs", () => {
     expect(bottomBar()?.hidden).toBe(false);
     expect(mini()?.hidden).toBe(false);
     expect(mini()?.nextElementSibling).toBe(document.querySelector(".tabbar"));
-    expect(mini()?.querySelector("a")?.textContent).toBe("当前章节");
+    const chapterLink = mini()?.querySelector("a");
+    expect(chapterLink?.title).toBe("当前章节");
+    expect(chapterLink?.textContent).toBe("当前章节正在播放");
+    const cover = chapterLink?.querySelector("img");
+    expect(cover?.getAttribute("src")).toBe("/api/books/1/cover");
+    cover?.dispatchEvent(new Event("load"));
+    expect(cover?.hidden).toBe(false);
+    cover?.dispatchEvent(new Event("error"));
+    expect(cover?.hidden).toBe(true);
     expect(toggle()?.getAttribute("aria-label")).toBe("暂停");
     toggle()?.click();
     tab(0).click();
     expect(location.pathname).toBe("/");
     expect(toggle()?.getAttribute("aria-label")).toBe("继续播放");
+    expect(chapterLink?.textContent).toBe("当前章节已暂停");
     toggle()?.click();
     expect(toggle()?.getAttribute("aria-label")).toBe("暂停");
     mini()?.querySelector("a")?.click();

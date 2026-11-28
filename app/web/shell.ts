@@ -21,6 +21,12 @@ const TABS = [
 
 /** Pages kept per tab (the shelf, a book, …). */
 const MAX_STACK = 4;
+const PLAYBACK_LABELS = {
+  playing: "正在播放",
+  buffering: "正在载入",
+  paused: "已暂停",
+  error: "播放中断",
+} as const;
 const TAB_PATHS = "app.tabPaths";
 const topPaths: (string | undefined)[] = [];
 
@@ -59,8 +65,17 @@ export function startShell(appInfo: () => Promise<AppInfo>): () => boolean {
   let reader: Reader | undefined;
   let lastChapterPath: string | undefined;
   let navigation = 0;
-  const chapterLink = h("a", { "data-link": true });
-  const toggle = h("button", { class: "icon-btn", type: "button", onclick: () => reader?.togglePlay() });
+  const cover = h("img", { alt: "", hidden: true });
+  cover.addEventListener("load", () => { cover.hidden = false; });
+  cover.addEventListener("error", () => { cover.hidden = true; });
+  const chapterTitle = h("span", { class: "mini-player-title" });
+  const status = h("span", { class: "mini-player-status" });
+  const chapterLink = h("a", { class: "mini-player-link", "data-link": true },
+    h("span", { class: "mini-player-cover", "aria-hidden": "true" }, cover),
+    h("span", { class: "mini-player-text" }, chapterTitle, status),
+  );
+  const control = h("span", { class: "mini-player-control" });
+  const toggle = h("button", { class: "mini-player-toggle", type: "button", onclick: () => reader?.togglePlay() }, control);
   const mini = h("div", { class: "mini-player", role: "group", "aria-label": "迷你播放器", hidden: true }, chapterLink, toggle);
   const bottomBar = h("div", { class: "bottom-bar" }, mini, tabbar);
   document.body.append(main, bottomBar);
@@ -71,11 +86,17 @@ export function startShell(appInfo: () => Promise<AppInfo>): () => boolean {
     if (!playback) return;
     chapterLink.href = playback.url;
     chapterLink.title = playback.title;
-    chapterLink.textContent = playback.title;
+    chapterTitle.textContent = playback.title;
+    status.textContent = PLAYBACK_LABELS[playback.state];
+    if (cover.getAttribute("src") !== (playback.cover ?? null)) {
+      cover.hidden = true;
+      if (playback.cover) cover.src = playback.cover;
+      else cover.removeAttribute("src");
+    }
     const label = playback.playing ? "暂停" : "继续播放";
     if (toggle.getAttribute("aria-label") === label) return;
     toggle.setAttribute("aria-label", label);
-    toggle.replaceChildren(icon(playback.playing ? "pause" : "play"));
+    control.replaceChildren(icon(playback.playing ? "pause" : "play"));
   };
   const closeReader = () => {
     const old = reader;
