@@ -157,6 +157,7 @@ export class ReaderView {
   private playerEl!: HTMLElement;
   private playerStatusEl!: HTMLElement;
   private playBtn!: HTMLButtonElement;
+  private playIcon!: HTMLElement;
   private rateLabel!: HTMLElement;
   private rateSelect!: HTMLSelectElement;
   private sheetEl?: HTMLElement;
@@ -247,21 +248,24 @@ export class ReaderView {
     for (const r of RATE_OPTIONS) this.rateSelect.append(h("option", { value: String(r) }, formatRate(r)));
     this.rateSelect.addEventListener("change", () => this.cb.onRate(Number(this.rateSelect.value)));
 
-    this.playBtn = h("button", { class: "br-play", "aria-label": "播放", onclick: () => this.cb.onTogglePlay() });
-    this.playBtn.append(svg(ICONS.play));
+    this.playIcon = h("span", { class: "br-play-icon" }, svg(ICONS.play));
+    this.playBtn = h("button", { class: "br-play", "aria-label": "播放", onclick: () => this.cb.onTogglePlay() }, this.playIcon);
     this.playerStatusEl = h("div", { class: "br-player-status" });
     this.playerEl = h(
       "footer",
       { class: "br-player", "data-state": "idle" },
-      this.playerStatusEl,
       h(
         "div",
-        { class: "br-player-controls" },
-        h("label", { class: "br-rate" }, this.rateLabel, this.rateSelect),
-        iconBtn(ICONS.prev, "上一段", () => this.cb.onPrev()),
-        this.playBtn,
-        iconBtn(ICONS.next, "下一段", () => this.cb.onNext()),
-        h("span"),
+        { class: "br-player-card" },
+        this.playerStatusEl,
+        h(
+          "div",
+          { class: "br-player-controls" },
+          h("label", { class: "br-rate" }, this.rateLabel, this.rateSelect),
+          iconBtn(ICONS.prev, "上一段", () => this.cb.onPrev()),
+          this.playBtn,
+          iconBtn(ICONS.next, "下一段", () => this.cb.onNext()),
+        ),
       ),
     );
 
@@ -698,7 +702,7 @@ export class ReaderView {
   setPlayerState(state: PlayerState, message?: string): void {
     this.playerEl.dataset.state = state;
     const playing = state === "playing" || state === "buffering";
-    this.playBtn.replaceChildren(svg(playing ? ICONS.pause : ICONS.play));
+    this.playIcon.replaceChildren(svg(playing ? ICONS.pause : ICONS.play));
     this.playBtn.setAttribute("aria-label", playing ? "暂停" : "播放");
     const fallback: Record<PlayerState, string> = {
       idle: "",
