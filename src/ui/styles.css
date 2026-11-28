@@ -14,6 +14,8 @@
   --btn-bg: rgba(0, 0, 0, 0.05);
   /* The bars' colour (--panel over --bg), also given to the browser around the page. */
   --chrome: #f7f5f0;
+  --player-card: #fff;
+  --player-shadow: 0 1px 2px rgba(40, 30, 20, 0.08), 0 4px 14px rgba(40, 30, 20, 0.08);
   --font-size: 20px;
   --line-height: 1.8;
   --font-sans: -apple-system, "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Source Han Sans SC",
@@ -51,6 +53,8 @@
   --select-bg: rgba(255, 255, 255, 0.06);
   --btn-bg: rgba(255, 255, 255, 0.08);
   --chrome: #1c1b19;
+  --player-card: #22201e;
+  --player-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 14px rgba(0, 0, 0, 0.3);
 }
 
 .br-root[data-theme="sepia"] {
@@ -64,6 +68,7 @@
   --select-bg: rgba(74, 59, 40, 0.06);
   --btn-bg: rgba(74, 59, 40, 0.08);
   --chrome: #f1e7d0;
+  --player-card: #f8eedb;
 }
 
 .br-root[hidden],
@@ -318,14 +323,25 @@ svg {
   flex: none;
   padding: 6px calc(12px + var(--safe-right)) calc(8px + var(--safe-bottom)) calc(12px + var(--safe-left));
   background: var(--chrome);
-  border-top: 1px solid var(--border);
   z-index: 2;
+}
+
+.br-player-card {
+  box-sizing: border-box;
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--player-card);
+  box-shadow: var(--player-shadow);
 }
 
 .br-player-status {
   min-height: 16px;
   font-size: 12px;
-  color: var(--muted);
+  line-height: 16px;
+  opacity: 0.72;
   text-align: center;
   white-space: nowrap;
   overflow: hidden;
@@ -333,26 +349,34 @@ svg {
 }
 
 .br-player-controls {
-  max-width: 420px;
-  margin: 0 auto;
   display: grid;
-  grid-template-columns: 1fr auto auto auto 1fr;
+  grid-template-columns: 1fr repeat(3, 44px) 1fr;
   align-items: center;
-  gap: 14px;
+  gap: clamp(4px, 2vw, 12px);
+}
+
+.br-player-controls .br-icon-btn,
+.br-play {
+  width: 44px;
+  height: 44px;
 }
 
 .br-rate {
   justify-self: start;
   position: relative;
-  min-width: 56px;
-  height: 36px;
-  border-radius: 18px;
-  background: var(--btn-bg);
+  min-width: 48px;
+  min-height: 44px;
+  border-radius: 22px;
   font-size: 14px;
   font-variant-numeric: tabular-nums;
   display: grid;
   place-items: center;
-  padding: 0 10px;
+}
+
+.br-rate span {
+  padding: 6px 8px;
+  border-radius: 16px;
+  background: var(--btn-bg);
 }
 
 .br-rate select {
@@ -362,21 +386,34 @@ svg {
   width: 100%;
   height: 100%;
   font-size: 16px; /* prevent iOS zoom */
+  cursor: pointer;
 }
 
 .br-play {
-  width: 56px;
-  height: 56px;
-  border-radius: 28px;
-  background: var(--accent);
-  color: #fff;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+}
+
+.br-play-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--fg);
+  color: var(--player-card);
   display: grid;
   place-items: center;
 }
 
 .br-play svg {
-  width: 30px;
-  height: 30px;
+  width: 18px;
+  height: 18px;
+}
+
+.br-player-controls button:focus-visible,
+.br-rate:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .br-play:active,
