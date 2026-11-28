@@ -21,6 +21,7 @@
     system-ui, sans-serif;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --mini-player-height: 52px;
   color-scheme: light dark;
 }
 
@@ -91,6 +92,10 @@ textarea {
   padding: calc(var(--safe-top) + 8px) 16px calc(var(--safe-bottom) + 88px);
 }
 
+.app.has-mini-player {
+  padding-bottom: calc(var(--safe-bottom) + 88px + var(--mini-player-height));
+}
+
 .topbar {
   display: flex;
   align-items: center;
@@ -116,20 +121,30 @@ textarea {
   padding: 8px 0;
 }
 
+.bottom-bar {
+  position: fixed;
+  inset: auto 0 0;
+  z-index: 20;
+  /* Plain rgba, like --bg: Safari tints its bottom bar with this colour. */
+  background: var(--bar);
+  backdrop-filter: saturate(1.6) blur(18px);
+  -webkit-backdrop-filter: saturate(1.6) blur(18px);
+}
+
 .mini-player {
   display: flex;
   align-items: center;
-  gap: 4px;
-  min-width: 0;
-  max-width: min(55%, 20rem);
-  padding: 2px 2px 2px 12px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
+  gap: 12px;
+  height: var(--mini-player-height);
+  padding-inline: max(16px, calc((100% - 1048px) / 2));
+  border-top: 1px solid var(--border);
   background: var(--card);
 }
 
 .mini-player a {
+  flex: 1;
   color: var(--fg);
+  line-height: calc(var(--mini-player-height) - 1px);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -137,25 +152,16 @@ textarea {
 
 .mini-player .icon-btn {
   flex: none;
-  width: 38px;
-  height: 38px;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
 }
 
 .tabbar {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 20;
   display: flex;
   justify-content: center;
   gap: 8px;
   padding: 6px 12px calc(var(--safe-bottom) + 6px);
-  /* Plain rgba, like --bg: Safari tints its bottom bar with this colour. */
-  background: var(--bar);
-  backdrop-filter: saturate(1.6) blur(18px);
-  -webkit-backdrop-filter: saturate(1.6) blur(18px);
   border-top: 1px solid var(--border);
 }
 
@@ -507,6 +513,10 @@ textarea {
   font-size: 14px;
   box-shadow: var(--shadow);
   animation: toast-in 0.2s ease-out;
+}
+
+.app.has-mini-player:not([hidden]) ~ .toast {
+  bottom: calc(var(--safe-bottom) + 84px + var(--mini-player-height));
 }
 
 @keyframes toast-in {

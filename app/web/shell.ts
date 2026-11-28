@@ -47,7 +47,6 @@ export function startShell(appInfo: () => Promise<AppInfo>): () => boolean {
     h("a", { href: t.path }, icon(t.icon), h("span", {}, t.label), t.path === "/jobs" ? dot : null),
   );
   const tabbar = h("nav", { class: "tabbar" }, ...tabs);
-  document.body.append(main, tabbar);
 
   /**
    * Each tab keeps its pages, like a native app's tab bar: switching tabs and
@@ -63,9 +62,12 @@ export function startShell(appInfo: () => Promise<AppInfo>): () => boolean {
   const chapterLink = h("a", { "data-link": true });
   const toggle = h("button", { class: "icon-btn", type: "button", onclick: () => reader?.togglePlay() });
   const mini = h("div", { class: "mini-player", role: "group", "aria-label": "迷你播放器", hidden: true }, chapterLink, toggle);
+  const bottomBar = h("div", { class: "bottom-bar" }, mini, tabbar);
+  document.body.append(main, bottomBar);
   const updateMini = () => {
     const playback = reader?.playback;
     mini.hidden = !playback;
+    main.classList.toggle("has-mini-player", !!playback);
     if (!playback) return;
     chapterLink.href = playback.url;
     chapterLink.title = playback.title;
@@ -116,7 +118,7 @@ export function startShell(appInfo: () => Promise<AppInfo>): () => boolean {
     const chapter = parseChapterUrl(location.href);
     if (chapter) {
       current?.page.suspend?.();
-      main.hidden = tabbar.hidden = true;
+      main.hidden = bottomBar.hidden = true;
       main.replaceChildren();
       if (reader?.playback && (path === lastChapterPath || location.href === reader.playback.url)) {
         reader.reveal();
@@ -168,12 +170,10 @@ export function startShell(appInfo: () => Promise<AppInfo>): () => boolean {
     }
     if (current && current !== entry && !stacks.some((s) => s.includes(current!))) drop(current);
     current = entry;
-    mini.remove();
-    if (!login) entry.page.el.querySelector(".topbar")?.append(mini);
     main.replaceChildren(entry.page.el);
     main.hidden = false;
     window.scrollTo(0, entry.y);
-    tabbar.hidden = login;
+    bottomBar.hidden = login;
     tabs.forEach((a, i) => a.classList.toggle("active", i === tab));
     document.title = entry.page.title?.() ?? "Bili Reader";
   });

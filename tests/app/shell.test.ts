@@ -163,13 +163,19 @@ describe("tabs", () => {
   });
 
   it("keeps the same playback controllable on the book and shelf, then returns to its chapter", async () => {
-    const mini = () => document.querySelector(".topbar .mini-player");
+    const mini = () => document.querySelector<HTMLDivElement>(".bottom-bar > .mini-player");
+    const bottomBar = () => document.querySelector<HTMLDivElement>(".bottom-bar");
     const toggle = () => mini()?.querySelector("button");
     const chapter = "/novel/1/100.html";
+    expect(mini()?.hidden).toBe(true);
     link(chapter);
+    expect(bottomBar()?.hidden).toBe(true);
     await vi.waitFor(() => expect(readers).toHaveLength(1));
     link("/book/1");
     expect(location.pathname).toBe("/book/1");
+    expect(bottomBar()?.hidden).toBe(false);
+    expect(mini()?.hidden).toBe(false);
+    expect(mini()?.nextElementSibling).toBe(document.querySelector(".tabbar"));
     expect(mini()?.querySelector("a")?.textContent).toBe("当前章节");
     expect(toggle()?.getAttribute("aria-label")).toBe("暂停");
     toggle()?.click();
@@ -181,6 +187,10 @@ describe("tabs", () => {
     mini()?.querySelector("a")?.click();
     expect(location.pathname).toBe(chapter);
     expect(document.querySelector("main")?.hidden).toBe(true);
+    expect(bottomBar()?.hidden).toBe(true);
     expect(readers).toHaveLength(1);
+    link("/login");
+    expect(bottomBar()?.hidden).toBe(true);
+    expect(mini()?.hidden).toBe(true);
   });
 });
